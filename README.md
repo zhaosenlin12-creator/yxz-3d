@@ -69,11 +69,16 @@ pingdou-workstation/
 
 ## GitHub
 
-- `airi` 远程已配置：`origin = https://github.com/zhaosenlin12-creator/airi.git`
-- `cartoon-print-studio`：请先在 GitHub 创建仓库后：
-  ```powershell
-  cd cartoon-print-studio
-  git remote add origin https://github.com/<你的账号>/cartoon-print-studio.git
-  git push -u origin main
-  ```
-- ⚠️ 提交前确认 `keys.txt` 被 `.gitignore` 排除（仓库内 `**/keys.txt` 规则已存在），**切勿提交任何 key**
+- **合并仓库已推送**：`origin = https://github.com/zhaosenlin12-creator/yxz-3d.git`（分支 `main`，提交 `d75c7b3`）
+- 仓库包含 airi 前端 + cartoon-print-studio 后端源码、启动/安装脚本、README、依赖清单、名片模板（`data/laser/template`）
+- ⚠️ **隐私红线（已用 .gitignore 强制排除）**：`keys.txt`、`software_paths.json`、`.glb/.obj/.stl` 大模型均不入库。克隆仓库后需从原电脑拷贝 `cartoon-print-studio\keys.txt`；角色大模型（`data/yxz_character_tripo_jpg/`）随 ZIP 交付，不在 GitHub。
+- ⚠️ 提交前始终检查：`git status` 中出现 `keys.txt` 即禁止 `git add`；仓库根 `.gitignore` 已含 `**/keys.txt` 规则，勿删除。
+
+## 大模型 / 运行数据（不入 GitHub）
+
+| 资源 | 位置 | 说明 |
+|---|---|---|
+| 角色 3D 模型 | `cartoon-print-studio\data\yxz_character_tripo_jpg\model` | 宜小智角色主模型（GLB/OBJ/STL），ZIP 自带，不入 GitHub |
+| API keys | `cartoon-print-studio\keys.txt` | 随 ZIP；克隆仓库后需手动放入 |
+| 名片模板 | `cartoon-print-studio\data\laser\template\activity_blue.png` | 已入 GitHub（源码资产） |
+| 软件路径修正 | `cartoon-print-studio\data\software_paths.json` | 每台机器自动检测并可按需生成，不入库 |
