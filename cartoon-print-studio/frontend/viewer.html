@@ -1,0 +1,103 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>3D Viewer</title>
+<style>
+body { margin: 0; background: linear-gradient(135deg, #fce4ec, #e1f5fe); font-family: system-ui; }
+#info { position: absolute; top: 20px; left: 20px; background: rgba(255,255,255,0.95); padding: 14px 18px; border-radius: 14px; box-shadow: 0 8px 24px rgba(255,107,157,0.18); z-index: 10; }
+h1 { margin: 0 0 4px; font-size: 20px; color: #d4568a; }
+p { margin: 4px 0 0; color: #6c7393; font-size: 13px; }
+#stage { display: block; width: 100vw; height: 100vh; }
+</style>
+<script type="importmap">{ "imports": { "three": "./vendor/three/build/three.module.js", "three/addons/": "./vendor/three/examples/jsm/" } }</script>
+</head><body>
+<div id="info">
+<h1>3D Viewer</h1>
+<p>Drag to rotate / scroll to zoom</p>
+<p id="status">Loading GLB...</p>
+</div>
+<canvas id="stage"></canvas>
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+const canvas = document.getElementById("stage");
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xfafbff, 1);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 5000);
+camera.position.set(80, 90, 160);
+
+const scene = new THREE.Scene();
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const dir1 = new THREE.DirectionalLight(0xffffff, 1.1); dir1.position.set(100, 200, 120); scene.add(dir1);
+const dir2 = new THREE.DirectionalLight(0xffffff, 0.55); dir2.position.set(-100, 80, -120); scene.add(dir2);
+const dir3 = new THREE.DirectionalLight(0xffffff, 0.4); dir3.position.set(0, -100, 80); scene.add(dir3);
+scene.add(new THREE.GridHelper(200, 20, 0xddaabb, 0xddaabb));
+
+const ctrl = new OrbitControls(camera, canvas);
+ctrl.target.set(0, 40, 0);
+ctrl.update();
+
+const loader = new GLTFLoader();
+const _q = new URLSearchParams(location.search);
+const _sid = _q.get("sid");
+const _src = _q.get("src") || (_sid ? `/api/data/${_sid}/model/mesh.glb` : "/api/data/af699f8eee35/model/mesh.glb");
+
+loader.load(_src,
+  (gltf) => {
+    const obj = gltf.scene;
+    obj.traverse((node) => {
+      if (!node.isMesh) return;
+      // Preserve the GLB's own PBR material/textures when present.
+      const mat = node.material;
+      const hasTexture = mat && (
+        mat.map || mat.normalMap || mat.roughnessMap ||
+        mat.metalnessMap || mat.emissiveMap
+      );
+      if (!hasTexture) {
+        const hasVertexColor = node.geometry && node.geometry.attributes && node.geometry.attributes.color !== undefined;
+        node.material = new THREE.MeshStandardMaterial({
+          vertexColors: hasVertexColor,
+          color: hasVertexColor ? 0xffffff : 0xffb3d1,
+          roughness: 0.6,
+          metalness: 0.05,
+        });
+      }
+    });
+    const box = new THREE.Box3().setFromObject(obj);
+    const size = box.getSize(new THREE.Vector3()).length();
+    const c = box.getCenter(new THREE.Vector3());
+    obj.position.x -= c.x;
+    obj.position.z -= c.z;
+    obj.position.y -= box.min.y;
+    const scale = 130 / size;
+    obj.scale.setScalar(scale);
+    scene.add(obj);
+    const meshCount = obj.children.reduce((n, ch) => n + (ch.isMesh ? 1 : ch.children?.length || 0), 0);
+    document.getElementById("status").textContent = "Loaded: " + meshCount + " mesh(es), size " + size.toFixed(0) + " units";
+  },
+  undefined,
+  (err) => {
+    console.error("GLB err", err);
+    document.getElementById("status").textContent = "Load error: " + (err && err.message || err);
+  }
+);
+
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+(function animate() {
+  requestAnimationFrame(animate);
+  ctrl.update();
+  renderer.render(scene, camera);
+})();
+</script>
+</body></html>

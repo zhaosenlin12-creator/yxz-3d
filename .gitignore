@@ -1,0 +1,36 @@
+# ===== 密钥与隐私（绝不提交 GitHub）=====
+keys.txt
+key.txt
+Desktop/key.txt
+*.key
+*.pem
+*.env
+
+# ===== 运行数据 / 大体积模型（随 ZIP 交付，不入库）=====
+cartoon-print-studio/data/yxz_character_tripo_jpg/
+*.glb
+*.obj
+*.stl
+cartoon-print-studio/data/software_paths.json
+
+# ===== 日志与运行状态 =====
+*.log
+.run/
+cartoon-print-studio/logs/
+airi/.run/
+airi/dist/
+
+# ===== 依赖与构建 =====
+node_modules/
+venv/
+__pycache__/
+*.pyc
+
+# ===== 报告与临时 =====
+_shots/
+_tmp/
+*.tmp
+tmp_*.mjs
+.*.py
+.*.cjs
+.*.npy

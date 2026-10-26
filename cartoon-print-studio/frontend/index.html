@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI 3D 创作工坊</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M5 12h22v15H5zM3 8h26v5H3zM16 8v19' fill='none' stroke='%232f74d0' stroke-width='2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+    <script type="importmap">
+{ "imports": { "three": "./vendor/three/build/three.module.js", "three/addons/": "./vendor/three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="logo" aria-hidden="true"><svg viewBox="0 0 32 32" role="img"><path d="M5 12h22v15H5zM3 8h26v5H3zM16 8v19M16 8c-5 0-8-2-8-5 0-2 2-3 4-2 3 1 4 4 4 7Zm0 0c5 0 8-2 8-5 0-2-2-3-4-2-3 1-4 4-4 7Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></span>
+    <span class="title">AI 3D 创作工坊</span>
+  </div>
+  <div class="header-actions">
+    <button id="btn-library" class="header-link" type="button">我的作品</button>
+    <div class="status" id="status">就绪</div>
+  </div>
+</header>
+
+<main>
+  <section id="step-workbench" class="step workbench-shell active" aria-label="创作工作台">
+    <div class="workbench-topbar">
+      <label class="workbench-title">作品<input id="workbench-project-title" value="我的卡通小世界" maxlength="80"></label>
+      <div class="workbench-top-actions">
+        <span id="workbench-save-state" class="save-state" aria-live="polite">本机自动保存</span>
+        <button id="btn-workbench-save" class="ghost" type="button" aria-label="保存作品">保存</button>
+        <button id="btn-library-workbench" class="ghost" type="button" aria-label="打开作品库">作品库</button>
+      </div>
+    </div>
+    <p id="workbench-startup-status" class="startup-status" role="status" aria-live="polite" hidden></p>
+    <div class="workbench-layout">
+      <aside class="chat-panel" aria-label="创作对话">
+        <div class="chat-heading">
+          <div><strong>创作对话</strong><span id="chat-context-label">新作品</span></div>
+          <button id="btn-chat-clear" class="icon-btn" type="button" aria-label="清空对话" title="清空对话">清空</button>
+        </div>
+        <div id="conversation-list" class="conversation-list" role="log" aria-live="polite" aria-relevant="additions"></div>
+        <div id="chat-polish-preview" class="chat-polish-preview" hidden>
+          <div class="chat-polish-heading"><strong>润色建议</strong><button id="btn-polish-dismiss" class="icon-btn" type="button" aria-label="撤销润色建议">撤销</button></div>
+          <p id="chat-polish-text"></p>
+          <button id="btn-polish-apply" class="primary mini-btn" type="button">应用建议</button>
+        </div>
+        <p id="chat-polish-message" class="chat-polish-message" role="status" aria-live="polite"></p>
+        <form id="chat-form" class="chat-composer">
+          <textarea id="chat-input" rows="3" maxlength="20000" placeholder="描述你想创作的物件…" aria-label="创作提示词"></textarea>
+          <div class="chat-composer-meta">
+            <span id="voice-status" role="status" aria-live="polite">语音文本会留在输入框供你编辑</span>
+            <div class="chat-composer-actions">
+              <button id="btn-chat-voice" class="ghost" type="button" aria-label="开始语音输入" title="开始语音输入">语音</button>
+              <button id="btn-chat-polish" class="ghost" type="button" aria-label="润色提示词" title="会将提示词发送给已配置的服务商">润色</button>
+              <button id="btn-chat-send" class="primary" type="submit">发送</button>
+            </div>
+          </div>
+          <small class="privacy-note">润色会把当前提示词发送给已配置的云端服务商；不会自动替换原文。</small>
+        </form>
+      </aside>
+
+      <section class="canvas-panel" aria-label="无限画布">
+        <div class="canvas-toolbar" role="toolbar" aria-label="画布工具">
+          <div class="canvas-tool-group">
+            <button id="btn-canvas-pan" class="canvas-tool active" type="button" aria-pressed="true" title="选择并移动元素">选择</button>
+            <button id="btn-canvas-note" class="canvas-tool" type="button" aria-pressed="false" title="在画布添加便签">便签</button>
+            <button id="btn-canvas-draw" class="canvas-tool" type="button" aria-pressed="false" title="在画布绘制标注">画笔</button>
+            <label class="canvas-tool canvas-image-label" for="canvas-image-input">导入图片<input id="canvas-image-input" type="file" accept="image/png,image/jpeg,image/webp"></label>
+          </div>
+          <div class="canvas-tool-group canvas-history-tools">
+            <button id="btn-canvas-undo" class="canvas-tool" type="button" aria-label="撤销画布操作" title="撤销">撤销</button>
+            <button id="btn-canvas-redo" class="canvas-tool" type="button" aria-label="重做画布操作" title="重做">重做</button>
+            <button id="btn-canvas-fit" class="canvas-tool" type="button" aria-label="适配全部画布内容" title="适配内容">适配</button>
+            <button id="btn-canvas-reset" class="canvas-tool" type="button" aria-label="重置画布视图" title="重置视图">重置</button>
+          </div>
+        </div>
+        <div id="canvas-viewport" class="canvas-viewport" tabindex="0" aria-label="画布，可拖动元素，滚轮缩放">
+          <div id="canvas-world" class="canvas-world"></div>
+          <div id="canvas-empty" class="canvas-empty">
+            <strong>从一句描述开始</strong>
+            <span>生成的预览和模型会出现在这里</span>
+          </div>
+          <div class="canvas-zoom-label" id="canvas-zoom-label">100%</div>
+        </div>
+      </section>
+
+      <aside class="canvas-inspector" id="workbench-inspector" aria-label="画布属性">
+        <div class="inspector-heading"><strong>作品内容</strong><span id="canvas-item-count">0 项</span></div>
+        <div id="canvas-selection-info" class="canvas-selection-info">选择画布中的内容</div>
+        <div class="canvas-inspector-actions">
+          <button id="btn-canvas-model" class="primary" type="button" disabled>生成 3D 模型</button>
+          <button id="btn-canvas-to-chat" class="ghost" type="button" disabled>带入对话</button>
+          <button id="btn-canvas-front" class="ghost" type="button" disabled>置于顶层</button>
+          <button id="btn-canvas-back" class="ghost" type="button" disabled>移至底层</button>
+          <button id="btn-canvas-delete" class="ghost danger" type="button" disabled>删除所选</button>
+        </div>
+        <div class="canvas-property-group">
+          <label for="canvas-stroke-color">标注颜色<input id="canvas-stroke-color" type="color" value="#2676c9"></label>
+          <label for="canvas-stroke-width">线宽<input id="canvas-stroke-width" type="range" min="1" max="12" value="4"></label>
+          <label for="workbench-engine">建模引擎
+            <select id="workbench-engine">
+              <option value="cartoon">卡通浮雕（本机，最稳）</option>
+              <option value="hunyuan">Hunyuan3D（本机高质）</option>
+              <option value="multi">多视角 TripoSR</option>
+              <option value="tripo3d">Tripo</option>
+            </select>
+          </label>
+        </div>
+        <div class="canvas-versions">
+          <strong>模型版本</strong>
+          <div id="workbench-model-versions" class="workbench-model-versions"></div>
+        </div>
+        <div class="canvas-versions">
+          <strong>交付到桌面软件</strong>
+          <p id="workbench-software-status" class="software-status" role="status" aria-live="polite">正在检测…</p>
+          <div id="workbench-software-list" class="software-list"></div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- Step 1: prompt -->
+  <section id="step-prompt" class="step">
+    <h1>告诉我你想要什么小物件</h1>
+    <p class="hint">AI 会先理解你的想法，生成多个不同姿势/风格的预览，让你挑</p>
+    <textarea id="prompt" placeholder="输入你的想法... 例如：一只穿橙色披风的蓝色小英雄送给外孙"></textarea>
+    <div class="examples">
+      <span class="ex-chip" data-prompt="一只穿橙色披风的蓝色小英雄送给外孙">披风小英雄</span>
+      <span class="ex-chip" data-prompt="一只戴宇航员头盔的卡通猫咪">太空猫</span>
+      <span class="ex-chip" data-prompt="一个 Q 版龙骑士小人，骑着迷你飞龙">Q 版龙骑士</span>
+      <span class="ex-chip" data-prompt="可爱的史莱姆挂件，绿色，圆润">史莱姆挂件</span>
+      <span class="ex-chip" data-prompt="一只戴生日帽的卡通小狗">生日小狗</span>
+      <span class="ex-chip" data-prompt="一只夜煞龙钥匙扣，蓝黑配色，圆滚滚">夜煞龙钥匙扣</span>
+    </div>
+
+    <div class="opts">
+      <label class="opt">
+        <input type="checkbox" id="think-toggle" checked>
+        <span class="lbl">AI 思考模式</span>
+        <span class="hint">先分析主体、产出多个差异化变体（多等几秒换更稳的质量）</span>
+      </label>
+      <label class="opt">
+        <span class="lbl">预览数量</span>
+        <input type="range" id="n-slider" min="2" max="6" value="4">
+        <span class="badge" id="n-badge">4</span>
+      </label>
+    </div>
+
+    <div class="start-actions">
+      <button id="btn-preview" class="primary big">开始创作</button>
+      <button id="btn-demo" class="demo-btn" type="button"><svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 13h6l-1 8 8-10h-6l1-8Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>立即体验一个 3D 模型</button>
+    </div>
+    <div class="demo-hint">先看成品和编辑流程，再开始自己的 AI 创作；体验模型来自本机示例，不消耗 API 额度。</div>
+  </section>
+
+  <!-- Step 2: pick preview -->
+  <section id="step-pick" class="step">
+    <h1>挑一张你最想要的</h1>
+    <p class="hint">每个变体由 AI 自动配上不同姿势/画风，鼠标移到图片上可以看到 AI 的标注</p>
+    <details id="thinking-box" class="thinking-box">
+      <summary><svg class="summary-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 9V7a5 5 0 0 1 10 0v2M5 9h14v8H5zM8 13h.01M16 13h.01M9 20h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>AI 思考过程</summary>
+      <div id="thinking-content" class="thinking-content"></div>
+    </details>
+    <div id="grid" class="grid"></div>
+    <div class="row">
+      <button id="btn-redo" class="ghost">重新生成</button>
+      <button id="btn-make-3d" class="primary big" disabled>下一步：变 3D</button>
+    </div>
+  </section>
+
+  <!-- Step 3: 3D preview -->
+  <section id="step-3d" class="step">
+    <div class="step-heading">
+      <div>
+        <h1>编辑你的 3D 模型</h1>
+        <p class="hint">拖动旋转，滚轮缩放；选中物体后可移动、缩放或删除</p>
+      </div>
+      <div class="step-heading-actions">
+        <button id="btn-return-workbench" class="ghost" type="button">返回创作工作台</button>
+        <div class="save-state" id="save-state" aria-live="polite">未保存</div>
+      </div>
+    </div>
+    <div class="workbench">
+      <div class="viewer-wrap">
+        <div id="viewer" class="viewer"></div>
+        <div class="viewer-tip">⌘ / Ctrl + Z 撤销 · Delete 删除 · 拖动旋转</div>
+        <div class="viewer-toolbar" aria-label="模型查看工具">
+          <button id="btn-reset-camera" class="viewer-tool" type="button">重置视角</button>
+          <button id="btn-explode" class="viewer-tool" type="button">拆开看</button>
+          <button id="btn-xray" class="viewer-tool" type="button">半透明</button>
+          <label class="explode-control">拆解距离 <input id="explode-range" type="range" min="0" max="1" step="0.05" value="0" disabled></label>
+        </div>
+        <div id="explode-status" class="explode-status" aria-live="polite"></div>
+      </div>
+      <aside class="editor-panel" aria-label="3D 编辑工具">
+        <div class="panel-section">
+          <div class="panel-title">添加卡通素材</div>
+          <div class="asset-grid">
+            <button class="asset-btn" data-primitive="sphere" type="button"><svg class="asset-icon" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="10" fill="none" stroke="currentColor" stroke-width="2"/><path d="M7 16h18M16 6c3 3 4 6 4 10s-1 7-4 10M16 6c-3 3-4 6-4 10s1 7 4 10" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".65"/></svg><span>圆球</span></button>
+            <button class="asset-btn" data-primitive="cube" type="button"><svg class="asset-icon" viewBox="0 0 32 32" aria-hidden="true"><path d="m16 5 11 6v12l-11 5-11-5V11zM5 11l11 6 11-6M16 17v11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>方块</span></button>
+            <button class="asset-btn" data-primitive="cone" type="button"><svg class="asset-icon" viewBox="0 0 32 32" aria-hidden="true"><path d="m16 5 10 21H6L16 5ZM9 26h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>圆锥</span></button>
+            <button class="asset-btn" data-primitive="cylinder" type="button"><svg class="asset-icon" viewBox="0 0 32 32" aria-hidden="true"><ellipse cx="16" cy="8" rx="9" ry="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7 8v15c0 2 4 4 9 4s9-2 9-4V8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7 23c0 2 4 4 9 4s9-2 9-4" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".65"/></svg><span>圆柱</span></button>
+            <button class="asset-btn" data-primitive="torus" type="button"><svg class="asset-icon" viewBox="0 0 32 32" aria-hidden="true"><ellipse cx="16" cy="16" rx="11" ry="7" fill="none" stroke="currentColor" stroke-width="4"/><ellipse cx="16" cy="16" rx="4" ry="2.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg><span>圆环</span></button>
+            <button class="asset-btn" data-primitive="crystal" type="button"><svg class="asset-icon" viewBox="0 0 32 32" aria-hidden="true"><path d="m16 4 9 8-3 13-12 3-4-12zM16 4l2 12-6 12M25 12l-7 4 4 9M6 16l12 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>水晶</span></button>
+            <button class="asset-btn" data-primitive="capsule" type="button"><svg class="asset-icon" viewBox="0 0 32 32" aria-hidden="true"><path d="M10 6a6 6 0 0 1 12 0v20a6 6 0 0 1-12 0z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 16h12" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".65"/></svg><span>胶囊</span></button>
+            <button class="asset-btn" data-primitive="heart" type="button"><svg class="asset-icon" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 27S5 20 5 12a6 6 0 0 1 11-3 6 6 0 0 1 11 3c0 8-11 15-11 15Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>爱心</span></button>
+          </div>
+          <div class="asset-hint">素材会自动使用当前卡通配色，可继续叠加成小场景。</div>
+        </div>
+        <div class="panel-section inspector" id="inspector">
+          <div class="panel-title">选中物体</div>
+          <div class="empty-inspector">点击画布中的物体开始编辑</div>
+          <div class="inspector-controls hidden" id="inspector-controls">
+            <label>水平位置 <input id="edit-x" type="range" min="-80" max="80" value="0"></label>
+            <label>前后位置 <input id="edit-z" type="range" min="-80" max="80" value="0"></label>
+            <label>大小 <input id="edit-scale" type="range" min="0.25" max="2.2" step="0.05" value="1"></label>
+            <div class="swatches" aria-label="选择颜色">
+              <button class="swatch" data-color="#ff719d" style="--swatch:#ff719d" aria-label="粉色" type="button"></button>
+              <button class="swatch" data-color="#5ec8f2" style="--swatch:#5ec8f2" aria-label="蓝色" type="button"></button>
+              <button class="swatch" data-color="#ffd166" style="--swatch:#ffd166" aria-label="黄色" type="button"></button>
+              <button class="swatch" data-color="#78d6a3" style="--swatch:#78d6a3" aria-label="绿色" type="button"></button>
+            </div>
+            <div class="inspector-actions">
+              <button id="btn-duplicate" class="mini-btn" type="button">复制</button>
+              <button id="btn-delete" class="mini-btn danger" type="button">删除</button>
+            </div>
+          </div>
+        </div>
+        <div class="panel-section project-actions">
+          <label class="project-name">作品名称<input id="project-name" value="我的卡通小世界" maxlength="32"></label>
+          <div class="action-row">
+            <button id="btn-undo" class="mini-btn" type="button">撤销</button>
+            <button id="btn-save-project" class="primary mini-btn" type="button">保存作品</button>
+          </div>
+          <div class="saved-note" id="saved-note">保存到本机，可随时回来继续编辑</div>
+        </div>
+      </aside>
+    </div>
+    <div id="model-info" class="info"></div>
+    <div id="model-versions" class="model-versions" aria-label="模型版本"></div>
+    <div class="mode-switcher" aria-label="真实场景入口">
+      <div><strong>想把照片变成真实空间？</strong></div>
+      <button id="btn-scene-mode" class="scene-mode-btn" type="button"><svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 15 5-5 4 3 4-6 3 3v8H4zM7 8h.01" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span><b>进入真实场景</b></span><svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    </div>
+    <details class="engine-drawer">
+      <summary>切换生成方式 <span>默认使用本地高质量模式</span></summary>
+    <div class="opts" style="margin: 8px 0;">
+      <label class="opt">
+        <input type="radio" name="engine" value="hunyuan" checked>
+        <span class="lbl">Hunyuan3D-2 mini（本地推荐）</span>
+        <span class="hint">腾讯开源图生 3D，不消耗额度；首次加载较慢，后续约 30-60 秒</span>
+      </label>
+      <label class="opt">
+        <input type="radio" name="engine" value="cartoon">
+        <span class="lbl">卡通浮雕（快 · 离线）</span>
+        <span class="hint">快速生成，颜色保留好，但形状仅是浮雕</span>
+      </label>
+      <label class="opt">
+        <input type="radio" name="engine" value="multi">
+        <span class="lbl">多视角 3D（TripoSR 离线）</span>
+        <span class="hint">本地融合重建，体积感更强但卡通效果不稳</span>
+      </label>
+      <label class="opt">
+        <input type="radio" name="engine" value="tripo3d">
+        <span class="lbl">Tripo</span>
+        <span class="hint" hidden></span>
+      </label>
+    </div>
+    </details>
+    <div id="bambu-banner" class="bambu-banner"></div>
+    <div id="print-guide" class="print-guide">
+      <div class="print-guide-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 9V3h12v6M6 17H4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-2M6 14h12v7H6zM18 12h.01" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <div><strong>准备打印</strong><span id="print-guide-status">正在检查网格是否适合打印…</span></div>
+    </div>
+    <div class="row">
+      <button id="btn-back-pick" class="ghost">换一张预览</button>
+      <div class="export-actions">
+        <button id="btn-export-stl" class="ghost export-btn" type="button">下载 STL</button>
+        <button id="btn-export-obj" class="ghost export-btn" type="button">下载 OBJ</button>
+        <button id="btn-export-glb" class="ghost export-btn" type="button">下载 GLB</button>
+        <button id="btn-export" class="ghost export-btn" type="button">更多导出</button>
+      </div>
+      <button id="btn-print" class="primary big" disabled>发送到 Bambu Studio 打印</button>
+    </div>
+  </section>
+
+  <section id="scene-mode" class="scene-mode-panel" aria-hidden="true">
+    <div class="scene-mode-heading"><div><h1>真实场景</h1><p>照片或视频，一键变成可探索的空间</p></div><button id="btn-close-scene" class="scene-close" type="button" aria-label="返回 3D 工作台"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>返回</button></div>
+    <div class="scene-workbench">
+      <div id="scene-viewer" class="scene-viewer"><div class="scene-empty"><span class="scene-loader-dot"></span><b>准备创建真实场景</b><small>先上传环绕照片或一段视频</small></div><div id="scene-build" class="scene-build hidden" aria-live="polite"></div></div>
+      <aside class="scene-side">
+        <div class="scene-side-title">创建场景</div>
+        <input id="scene-title" class="scene-title-input" value="我的真实场景" maxlength="48" aria-label="场景名称">
+        <label class="scene-drop" for="scene-captures"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><b>选择照片或视频</b><small>20–60 张照片，或一段环绕视频</small><input id="scene-captures" type="file" accept="image/*,video/mp4,video/quicktime,video/webm" multiple></label>
+        <div id="scene-file-list" class="scene-file-list" aria-live="polite">还没有选择采集素材</div>
+        <div id="scene-quality" class="scene-quality" aria-live="polite">上传后会检查数量和类型</div>
+        <button id="btn-scene-start" class="primary" type="button" disabled>上传素材</button>
+        <button id="btn-scene-submit" class="primary scene-submit hidden" type="button" disabled>开始重建</button>
+        <div class="scene-pipeline" id="scene-pipeline" aria-label="重建进度"><span class="active">采集</span><i></i><span>重建</span><i></i><span>浏览</span></div>
+        <div id="scene-status" class="scene-status" role="status"></div>
+        <details class="scene-more"><summary>更多选项</summary><a id="scene-manifest-link" class="scene-manifest-link hidden" download="scene-manifest.json" target="_blank" rel="noreferrer">下载采集清单</a><label class="scene-result-upload" for="scene-asset"><span>导入已有结果</span><b>.PLY / .SPLAT</b><input id="scene-asset" type="file" accept=".ply,.splat,.sog,.spz"></label></details>
+      </aside>
+    </div>
+  </section>
+
+  <!-- Step 4 (final): print confirm -->
+  <section id="step-print" class="step">
+    <h1>已发送到 Bambu Studio</h1>
+    <p class="hint">打印机会自动打开模型，你可以直接切片并打印。</p>
+    <div class="row">
+      <button id="btn-print-again" class="ghost">再来一组</button>
+    </div>
+  </section>
+
+  <!-- Loader -->
+  <div id="loader" class="loader hidden">
+    <div class="build-stage" id="build-stage" aria-label="模型逐步生成预览"><div class="build-grid"></div><div class="build-orbit orbit-a"></div><div class="build-orbit orbit-b"></div><div class="build-surface"><img id="build-preview-img" alt="正在生成的模型预览"><div class="build-scanline"></div></div><div class="build-points"></div></div>
+    <div class="loader-text" id="loader-text">生成中...</div>
+    <div id="progress-phase" class="progress-phase">准备中</div>
+    <div id="progress-pct" class="progress-pct">0%</div>
+    <div id="progress-msg" class="progress-msg">就绪</div>
+    <div id="progress-bar" class="progress-bar"><div id="progress-bar-fill" class="progress-bar-fill"></div></div>
+    <div class="build-steps" aria-live="polite"><span id="build-step-shape">形体</span><span id="build-step-detail">细节</span><span id="build-step-mesh">网格</span></div><div id="think-feed" class="think-feed"></div>
+  </div>
+</main>
+
+<aside id="library-drawer" class="library-drawer" aria-label="我的作品" aria-hidden="true">
+  <div class="drawer-head"><div><div class="eyebrow">作品库</div><h2>我的卡通世界</h2></div><button id="btn-close-library" class="close-btn" type="button" aria-label="关闭作品库">×</button></div>
+  <p class="drawer-copy">你保存的模型和场景会出现在这里。</p>
+  <div id="saved-projects" class="saved-projects"></div>
+</aside>
+<div id="drawer-backdrop" class="drawer-backdrop hidden"></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
+

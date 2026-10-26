@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>宜小智 · 动态角色</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M5 12h22v15H5zM3 8h26v5H3zM16 8v19' fill='none' stroke='%232f74d0' stroke-width='2'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      --bg-1: #0b1233;
+      --bg-2: #1d2a6f;
+      --accent: #5ec8f2;
+      --accent-2: #ff719d;
+      --text: #e9f0ff;
+      --muted: #8ea0d4;
+      --panel: rgba(14, 22, 60, 0.55);
+      --panel-edge: rgba(120, 180, 255, 0.25);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: radial-gradient(ellipse at top, #1a2563 0%, #050823 100%); color: var(--text); font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+    #stage { display: block; width: 100vw; height: 100vh; cursor: grab; }
+    #stage:active { cursor: grabbing; }
+    .hud { position: absolute; pointer-events: none; }
+    .hud.click { pointer-events: auto; }
+    #title { top: 18px; left: 22px; max-width: 280px; }
+    #title .name { font-size: 20px; font-weight: 700; color: var(--accent); letter-spacing: 1px; }
+    #title .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    #title .tag { display: inline-block; margin-top: 8px; padding: 2px 8px; font-size: 11px; background: rgba(94, 200, 242, 0.15); color: var(--accent); border: 1px solid rgba(94, 200, 242, 0.35); border-radius: 999px; }
+    #status { bottom: 18px; left: 22px; font-size: 12px; color: var(--muted); }
+    #status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: 6px; vertical-align: 1px; animation: pulse 1.6s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+    #panel { bottom: 18px; right: 22px; display: flex; gap: 8px; align-items: center; padding: 10px 12px; background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 14px; backdrop-filter: blur(10px); box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35); }
+    #panel button, #panel select { background: rgba(94, 200, 242, 0.08); color: var(--text); border: 1px solid rgba(94, 200, 242, 0.25); border-radius: 10px; padding: 7px 12px; font-size: 12px; font-family: inherit; cursor: pointer; transition: background 0.15s, border-color 0.15s, transform 0.1s; }
+    #panel button:hover, #panel select:hover { background: rgba(94, 200, 242, 0.18); border-color: rgba(94, 200, 242, 0.45); }
+    #panel button:active { transform: scale(0.97); }
+    #panel button.active { background: rgba(94, 200, 242, 0.25); border-color: rgba(94, 200, 242, 0.6); color: #fff; }
+    #panel select { padding-right: 24px; }
+    #panel .label { font-size: 11px; color: var(--muted); margin-right: 4px; }
+    #hint { top: 18px; right: 22px; font-size: 12px; color: var(--muted); text-align: right; line-height: 1.6; }
+    #hint kbd { display: inline-block; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--panel-edge); background: rgba(255, 255, 255, 0.06); font-family: inherit; font-size: 11px; color: var(--text); }
+    #gaze-indicator { position: absolute; top: 0; left: 0; width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid var(--accent); pointer-events: none; opacity: 0; transition: opacity 0.4s ease; transform: translate(-50%, -50%); }
+    #gaze-indicator.on { opacity: 0.65; }
+  </style>
+  <script type="importmap">
+  { "imports": { "three": "./vendor/three/build/three.module.js", "three/addons/": "./vendor/three/examples/jsm/" } }
+  </script>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+
+  <div id="title" class="hud">
+    <div class="name">宜小智</div>
+    <div class="sub">宜春森林 · AI 桌面伙伴</div>
+    <div class="tag">动态角色预览</div>
+  </div>
+
+  <div id="hint" class="hud">
+    拖动旋转 / 滚轮缩放<br>
+    移动鼠标 <kbd>让眼睛看你</kbd>
+  </div>
+
+  <div id="panel" class="hud click">
+    <span class="label">表情</span>
+    <select id="expression">
+      <option value="happy">开心</option>
+      <option value="curious">好奇</option>
+      <option value="surprised">惊讶</option>
+      <option value="sleepy">困了</option>
+      <option value="proud">得意</option>
+    </select>
+    <button id="btn-blink" type="button">眨眼</button>
+    <button id="btn-wave" type="button">挥手</button>
+    <button id="btn-orbit" class="active" type="button">自动旋转</button>
+    <button id="btn-reset" type="button">复位</button>
+  </div>
+
+  <div id="status" class="hud">
+    <span class="dot"></span><span id="status-text">正在唤醒</span>
+  </div>
+
+  <div id="gaze-indicator"></div>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+    const params = new URLSearchParams(location.search);
+    const MODEL_URL = params.get("src") || "/api/data/yxz_character_tripo/model/mesh.glb";
+    const START_AUTO_ORBIT = params.get("orbit") !== "0";
+
+    const canvas = document.getElementById("stage");
+    const statusEl = document.getElementById("status-text");
+    const expressionSel = document.getElementById("expression");
+    const btnBlink = document.getElementById("btn-blink");
+    const btnWave = document.getElementById("btn-wave");
+    const btnOrbit = document.getElementById("btn-orbit");
+    const btnReset = document.getElementById("btn-reset");
+    const gazeIndicator = document.getElementById("gaze-indicator");
+
+    function setStatus(t) { statusEl.textContent = t; }
+
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
+
+    const scene = new THREE.Scene();
+    scene.background = null;
+
+    const camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.1, 5000);
+    camera.position.set(40, 75, 175);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+    const key = new THREE.DirectionalLight(0xffffff, 1.05); key.position.set(80, 120, 140); scene.add(key);
+    const fill = new THREE.DirectionalLight(0x9ec8ff, 0.55); fill.position.set(-90, 60, 90); scene.add(fill);
+    const rim = new THREE.DirectionalLight(0xff9ecf, 0.35); rim.position.set(0, -20, -120); scene.add(rim);
+
+    const glowGeo = new THREE.CircleGeometry(120, 12, 12);
+    const glowMat = new THREE.MeshBasicMaterial({ color: 0x5ec8f2, transparent: true, opacity: 0.18, depthWrite: false });
+    const glow = new THREE.Mesh(glowGeo, glowMat);
+    glow.rotation.x = -Math.PI / 2;
+    glow.position.y = -0.5;
+    scene.add(glow);
+
+    const orbit = new OrbitControls(camera, canvas);
+    orbit.target.set(0, 50, 0);
+    orbit.enableDamping = true;
+    orbit.dampingFactor = 0.08;
+    orbit.minDistance = 80;
+    orbit.maxDistance = 360;
+    orbit.minPolarAngle = Math.PI * 0.18;
+    orbit.maxPolarAngle = Math.PI * 0.62;
+    orbit.autoRotate = START_AUTO_ORBIT;
+    orbit.autoRotateSpeed = 0.7;
+
+    const FACE_TEX_SIZE = 512;
+    const faceCanvas = document.createElement("canvas");
+    faceCanvas.width = FACE_TEX_SIZE;
+    faceCanvas.height = FACE_TEX_SIZE;
+    const faceCtx = faceCanvas.getContext("2d");
+    const faceTexture = new THREE.CanvasTexture(faceCanvas);
+    faceTexture.colorSpace = THREE.SRGBColorSpace;
+    faceTexture.anisotropy = 4;
+    faceTexture.minFilter = THREE.LinearFilter;
+    faceTexture.magFilter = THREE.LinearFilter;
+
+    const faceSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: faceTexture,
+      transparent: true,
+      depthWrite: false,
+      depthTest: true,
+      blending: THREE.NormalBlending,
+    }));
+    faceSprite.visible = false;
+    scene.add(faceSprite);
+
+    let modelRoot = null;
+    const faceAnchor = new THREE.Vector3(0, 60, 35);
+    let modelBoxSize = 130;
+    let spriteScale = 40;
+
+    const loader = new GLTFLoader();
+    setStatus("加载模型中…");
+    loader.load(MODEL_URL, (gltf) => {
+      const obj = gltf.scene;
+      obj.traverse((node) => {
+        if (!node.isMesh) return;
+        if (node.material) {
+          node.material.roughness = Math.min(0.85, (node.material.roughness ?? 0.6) + 0.1);
+          node.material.envMapIntensity = 0.6;
+        }
+      });
+
+      const box = new THREE.Box3().setFromObject(obj);
+      const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3());
+      const diag = size.length() || 1;
+
+      obj.position.x -= center.x;
+      obj.position.z -= center.z;
+      obj.position.y -= box.min.y;
+      const scaleFactor = 180 / diag;
+      obj.scale.setScalar(scaleFactor);
+      // The Tripo model's "front" is on the -Z side after centering;
+      // flip it 180° around Y so the character faces the camera by default.
+      obj.rotation.y = Math.PI;
+
+      scene.add(obj);
+      modelRoot = obj;
+
+      const finalBox = new THREE.Box3().setFromObject(obj);
+      const finalSize = finalBox.getSize(new THREE.Vector3());
+      modelBoxSize = finalSize.y;
+
+      faceAnchor.set(0, finalBox.min.y + finalSize.y * 0.50, -finalSize.z * 0.55);
+      spriteScale = finalSize.y * 0.36;
+
+      faceSprite.position.copy(faceAnchor);
+      faceSprite.scale.set(spriteScale, spriteScale, 1);
+      faceSprite.visible = true;
+
+      setStatus("已上线");
+    }, undefined, (err) => {
+      console.error("GLB load error", err);
+      setStatus("模型加载失败");
+    });
+
+    const anim = {
+      time: 0,
+      dt: 0,
+      targetPupilX: 0,
+      targetPupilY: 0,
+      pupilX: 0,
+      pupilY: 0,
+      targetHeadYaw: 0,
+      targetHeadPitch: 0,
+      headYaw: 0,
+      headPitch: 0,
+      blinkTimer: 2 + Math.random() * 3,
+      blinkPhase: 0,
+      forcedBlink: false,
+      breathPhase: Math.random() * Math.PI * 2,
+      swayPhase: Math.random() * Math.PI * 2,
+      waveTimer: 0,
+      expression: "happy",
+      lastInteraction: performance.now(),
+    };
+
+    expressionSel.addEventListener("change", () => { anim.expression = expressionSel.value; });
+    btnBlink.addEventListener("click", () => { anim.forcedBlink = true; });
+    btnWave.addEventListener("click", () => { anim.waveTimer = 1.2; });
+    btnOrbit.addEventListener("click", () => {
+      orbit.autoRotate = !orbit.autoRotate;
+      btnOrbit.classList.toggle("active", orbit.autoRotate);
+    });
+    btnReset.addEventListener("click", () => {
+      anim.targetHeadYaw = 0;
+      anim.targetHeadPitch = 0;
+      anim.targetPupilX = 0;
+      anim.targetPupilY = 0;
+      camera.position.set(40, 75, 175);
+      orbit.target.set(0, 50, 0);
+      orbit.update();
+    });
+
+    canvas.addEventListener("pointermove", (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const nx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      const ny = ((e.clientY - rect.top) / rect.height) * 2 - 1;
+      anim.targetPupilX = THREE.MathUtils.clamp(nx * 1.3, -1, 1);
+      anim.targetPupilY = THREE.MathUtils.clamp(-ny * 1.3, -1, 1);
+      anim.targetHeadYaw = THREE.MathUtils.clamp(nx * 0.18, -0.25, 0.25);
+      anim.targetHeadPitch = THREE.MathUtils.clamp(-ny * 0.10, -0.18, 0.18);
+      gazeIndicator.style.left = e.clientX + "px";
+      gazeIndicator.style.top = e.clientY + "px";
+      gazeIndicator.classList.add("on");
+      anim.lastInteraction = performance.now();
+    });
+    canvas.addEventListener("pointerleave", () => {
+      gazeIndicator.classList.remove("on");
+    });
+    canvas.addEventListener("pointerdown", () => {
+      anim.lastInteraction = performance.now();
+      orbit.autoRotate = false;
+      btnOrbit.classList.remove("active");
+    });
+
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight, false);
+    });
+
+    setInterval(() => {
+      if (performance.now() - anim.lastInteraction > 4500) {
+        anim.targetPupilX = Math.sin(anim.time * 0.4) * 0.4;
+        anim.targetPupilY = Math.cos(anim.time * 0.5) * 0.25;
+        anim.targetHeadYaw = Math.sin(anim.time * 0.27) * 0.12;
+        anim.targetHeadPitch = Math.cos(anim.time * 0.33) * 0.06;
+      }
+    }, 500);
+
+    function lerp(a, b, t) { return a + (b - a) * t; }
+
+    const EXPRESSION_TEMPLATES = {
+      happy:    { eyeR: 1.00, eyeY: 0.40, scleraColor: "#ffffff", irisColor: "#00d4ff", pupilColor: "#0a3a8a", highlightColor: "#ffffff", mouth: "smile",     mouthColor: "#ff4d8a", browTilt: -0.05, browOffset: 0 },
+      curious:  { eyeR: 1.10, eyeY: 0.40, scleraColor: "#ffffff", irisColor: "#00d4ff", pupilColor: "#0a3a8a", highlightColor: "#ffffff", mouth: "flat",      mouthColor: "#ff4d8a", browTilt:  0.10, browOffset: 0.04 },
+      surprised:{ eyeR: 1.25, eyeY: 0.40, scleraColor: "#ffffff", irisColor: "#00d4ff", pupilColor: "#0a3a8a", highlightColor: "#ffffff", mouth: "o",         mouthColor: "#ff4d8a", browTilt:  0.18, browOffset: 0.06 },
+      sleepy:   { eyeR: 0.55, eyeY: 0.40, scleraColor: "#ffffff", irisColor: "#00d4ff", pupilColor: "#0a3a8a", highlightColor: "#ffffff", mouth: "soft",      mouthColor: "#ff8aa8", browTilt: -0.10, browOffset: -0.04 },
+      proud:    { eyeR: 0.95, eyeY: 0.38, scleraColor: "#ffffff", irisColor: "#00d4ff", pupilColor: "#0a3a8a", highlightColor: "#ffffff", mouth: "smileBig",  mouthColor: "#ff4d8a", browTilt:  0.12, browOffset: 0.03 },
+    };
+
+    function paintFace(state, exp) {
+      const tpl = EXPRESSION_TEMPLATES[exp] || EXPRESSION_TEMPLATES.happy;
+      const W = faceCanvas.width;
+      const H = faceCanvas.height;
+      const ctx = faceCtx;
+
+      ctx.clearRect(0, 0, W, H);
+
+      const panelGrad = ctx.createRadialGradient(W * 0.5, H * 0.45, W * 0.05, W * 0.5, H * 0.5, W * 0.55);
+      panelGrad.addColorStop(0, "rgba(20, 60, 130, 0.78)");
+      panelGrad.addColorStop(0.55, "rgba(8, 30, 80, 0.65)");
+      panelGrad.addColorStop(1, "rgba(4, 14, 40, 0)");
+      ctx.fillStyle = panelGrad;
+      ctx.beginPath();
+      ctx.ellipse(W * 0.5, H * 0.5, W * 0.46, H * 0.46, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      const eyeY = H * tpl.eyeY;
+      const baseR = Math.min(W, H) * 0.13 * tpl.eyeR;
+      const eyeSpacing = W * 0.18;
+      const leftCx = W * 0.5 - eyeSpacing;
+      const rightCx = W * 0.5 + eyeSpacing;
+
+      const pupilPx = state.pupilX * baseR * 0.45;
+      const pupilPy = state.pupilY * baseR * 0.45;
+
+      drawEye(ctx, leftCx, eyeY, baseR, pupilPx, pupilPy, tpl, state);
+      drawEye(ctx, rightCx, eyeY, baseR, pupilPx, pupilPy, tpl, state);
+
+      drawBrow(ctx, leftCx, eyeY - baseR * 1.55, baseR * 1.4, tpl.browTilt, tpl.browOffset, tpl);
+      drawBrow(ctx, rightCx, eyeY - baseR * 1.55, baseR * 1.4, -tpl.browTilt, tpl.browOffset, tpl);
+
+      drawMouth(ctx, W * 0.5, H * 0.68, W * 0.16, tpl, state);
+    }
+
+    function drawEye(ctx, cx, cy, r, px, py, tpl, state) {
+      ctx.fillStyle = tpl.scleraColor;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+      const grad = ctx.createRadialGradient(cx, cy - r * 0.2, r * 0.2, cx, cy, r);
+      grad.addColorStop(0, "rgba(255, 255, 255, 0.0)");
+      grad.addColorStop(1, "rgba(0, 30, 90, 0.25)");
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = tpl.irisColor;
+      ctx.beginPath();
+      ctx.arc(cx + px, cy + py, r * 0.62, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = tpl.pupilColor;
+      ctx.beginPath();
+      ctx.arc(cx + px, cy + py, r * 0.32, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = tpl.highlightColor;
+      ctx.beginPath();
+      ctx.arc(cx + px - r * 0.18, cy + py - r * 0.25, r * 0.18, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "rgba(255, 255, 255, 0.55)";
+      ctx.beginPath();
+      ctx.arc(cx + px + r * 0.22, cy + py + r * 0.18, r * 0.08, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (state.blinkPhase > 0) {
+        const halfH = r * 1.0 * state.blinkPhase;
+        ctx.save();
+        ctx.fillStyle = "rgba(4, 14, 40, 0.95)";
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, r * 1.05, r * 1.05, 0, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.fillRect(cx - r * 1.2, cy - r * 1.2, r * 2.4, halfH * 2);
+        ctx.restore();
+        ctx.strokeStyle = "#06122a";
+        ctx.lineWidth = r * 0.10;
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(cx - r * 1.05, cy);
+        ctx.quadraticCurveTo(cx, cy + r * 0.05, cx + r * 1.05, cy);
+        ctx.stroke();
+      }
+    }
+
+    function drawBrow(ctx, cx, y, w, tilt, offset, tpl) {
+      ctx.save();
+      ctx.translate(cx, y + offset * w);
+      ctx.rotate(tilt);
+      ctx.fillStyle = "#082340";
+      const h = w * 0.13;
+      ctx.beginPath();
+      const rx = w * 0.55;
+      const ry = h;
+      ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawMouth(ctx, cx, cy, w, tpl, state) {
+      ctx.save();
+      ctx.strokeStyle = tpl.mouthColor;
+      ctx.fillStyle = tpl.mouthColor;
+      ctx.lineWidth = w * 0.20;
+      ctx.lineCap = "round";
+      const mouthType = tpl.mouth;
+      const openness = Math.max(0, Math.sin(state.time * 0.6) * 0.5 + 0.5);
+      const waveOpen = state.waveTimer > 0 ? (1 - state.waveTimer / 1.2) : 0;
+
+      if (mouthType === "smile" || mouthType === "smileBig") {
+        const lift = mouthType === "smileBig" ? w * 0.30 : w * 0.20;
+        ctx.beginPath();
+        ctx.moveTo(cx - w * 0.9, cy + w * 0.10);
+        ctx.quadraticCurveTo(cx, cy + w * lift + waveOpen * w * 0.25, cx + w * 0.9, cy + w * 0.10);
+        ctx.stroke();
+        if (waveOpen > 0.1) {
+          ctx.fillStyle = "#ff8aa8";
+          ctx.beginPath();
+          ctx.ellipse(cx, cy + w * 0.55, w * 0.4 * waveOpen, w * 0.25 * waveOpen, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else if (mouthType === "o") {
+        const r = w * (0.35 + openness * 0.20);
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#06122a";
+        ctx.beginPath();
+        ctx.arc(cx, cy, r * 0.7, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (mouthType === "soft") {
+        ctx.beginPath();
+        ctx.moveTo(cx - w * 0.6, cy + w * 0.10);
+        ctx.quadraticCurveTo(cx, cy + w * 0.05, cx + w * 0.6, cy + w * 0.10);
+        ctx.stroke();
+      } else {
+        ctx.beginPath();
+        ctx.moveTo(cx - w * 0.7, cy);
+        ctx.lineTo(cx + w * 0.7, cy);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    let lastT = performance.now();
+    function loop(now) {
+      requestAnimationFrame(loop);
+      const dt = Math.min(0.05, (now - lastT) / 1000);
+      lastT = now;
+      anim.dt = dt;
+      anim.time += dt;
+
+      anim.pupilX = lerp(anim.pupilX, anim.targetPupilX, Math.min(1, dt * 6));
+      anim.pupilY = lerp(anim.pupilY, anim.targetPupilY, Math.min(1, dt * 6));
+      anim.headYaw = lerp(anim.headYaw, anim.targetHeadYaw, Math.min(1, dt * 4));
+      anim.headPitch = lerp(anim.headPitch, anim.targetHeadPitch, Math.min(1, dt * 4));
+
+      anim.blinkTimer -= dt;
+      if (anim.blinkTimer <= 0 || anim.forcedBlink) {
+        anim.blinkPhase = 1;
+        anim.forcedBlink = false;
+        if (anim.blinkTimer <= 0) {
+          anim.blinkTimer = 2.5 + Math.random() * 4.0;
+          if (Math.random() < 0.18) anim.blinkTimer = 0.18;
+        }
+      } else {
+        anim.blinkPhase = Math.max(0, anim.blinkPhase - dt * 5.5);
+      }
+
+      if (anim.waveTimer > 0) {
+        anim.waveTimer = Math.max(0, anim.waveTimer - dt);
+      }
+
+      if (modelRoot) {
+        const breath = Math.sin(anim.time * 1.2 + anim.breathPhase) * 0.012;
+        const sway = Math.sin(anim.time * 0.6 + anim.swayPhase) * 0.020;
+        const headBob = Math.sin(anim.time * 0.9 + 1.2) * 0.012;
+        modelRoot.rotation.y = Math.PI + anim.headYaw + sway;
+        modelRoot.rotation.x = anim.headPitch + headBob;
+        modelRoot.position.y = breath * modelBoxSize;
+        if (anim.waveTimer > 0) {
+          const w = (1 - anim.waveTimer / 1.2);
+          modelRoot.rotation.z = Math.sin(w * Math.PI * 3) * 0.08;
+        } else {
+          modelRoot.rotation.z = 0;
+        }
+        faceSprite.position.set(
+          faceAnchor.x,
+          faceAnchor.y + breath * modelBoxSize,
+          faceAnchor.z
+        );
+      }
+
+      paintFace({
+        pupilX: anim.pupilX,
+        pupilY: anim.pupilY,
+        blinkPhase: anim.blinkPhase,
+        waveTimer: anim.waveTimer,
+        time: anim.time,
+      }, anim.expression);
+      faceTexture.needsUpdate = true;
+
+      orbit.update();
+      renderer.render(scene, camera);
+    }
+    requestAnimationFrame(loop);
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        lastT = performance.now();
+      }
+    });
+  </script>
+</body>
+</html>

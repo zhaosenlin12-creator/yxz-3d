@@ -1,0 +1,20 @@
+# Local credentials
+**/keys.txt
+**/.env
+**/.env.*
+
+# Local Python/runtime caches
+**/venv/
+**/__pycache__/
+*.py[cod]
+**/*.log
+.pytest_cache/
+.mypy_cache/
+
+# Generated application data and packaged builds
+/data/
+/logs/
+/build/
+/dist/
+/release/
+/installer/demo/

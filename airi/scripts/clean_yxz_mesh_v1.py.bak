@@ -1,0 +1,211 @@
+"""Remove the doubled surfaces from the YXZ scan.
+
+The character arrives from Tripo as 230 disconnected blobs.  Many of them
+are a second, inner copy of a surface that was scanned twice, and the two
+copies sit a hair apart.  Wherever they overlap the depth test flips
+triangle by triangle and the surface breaks into speckle, which is what
+makes the visor edge and the helmet rim look shredded.
+
+The copies can be told apart by the volume they enclose.  A closed blob
+whose faces point outwards encloses a positive volume; the inner copy of
+the same blob encloses the same volume with the opposite sign.  So the
+cleanup groups the blobs that sit on top of each other and keeps the one
+with the largest absolute volume, which is the outer copy, and drops the
+rest.  A blob that has no partner is left completely alone, so a piece
+that happens to be wound inside out is never silently deleted.
+
+Usage:
+  blender -b -P scripts/clean_yxz_mesh.py -- \
+    --source <glb> --output <glb> [--threshold 0.003] [--apply]
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import bpy
+import bmesh
+from mathutils.bvhtree import BVHTree
+
+
+def value_after(name: str, default=None):
+    if name not in sys.argv:
+        return default
+    return sys.argv[sys.argv.index(name) + 1]
+
+
+def signed_volume(mesh) -> float:
+    """Volume enclosed by a closed mesh, signed by the winding."""
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    result = 0.0
+    try:
+        result = bm.calc_volume(signed=True)
+    except Exception:
+        result = 0.0
+    bm.free()
+    return result
+
+
+def surface_bvh(objects):
+    """One BVH over every polygon of the given objects."""
+    vertices = []
+    polygons = []
+    for obj in objects:
+        mesh = obj.data
+        offset = len(vertices)
+        vertices.extend(tuple(vertex.co) for vertex in mesh.vertices)
+        for polygon in mesh.polygons:
+            polygons.append(tuple(index + offset for index in polygon.vertices))
+    if not vertices:
+        return None
+    return BVHTree.FromPolygons(vertices, polygons, all_triangles=False, epsilon=0.0)
+
+
+def coincidence(source, bvh, threshold):
+    """Fraction of the source's vertices that sit on the other surface."""
+    mesh = source.data
+    if not mesh.vertices:
+        return 0.0
+    hits = 0
+    for vertex in mesh.vertices:
+        found = bvh.find_nearest(vertex.co)
+        if found and found[3] is not None and found[3] < threshold:
+            hits += 1
+    return hits / len(mesh.vertices)
+
+
+def main():
+    source = Path(value_after("--source"))
+    output = Path(value_after("--output"))
+    threshold = float(value_after("--threshold", 0.003))
+    apply_changes = "--apply" in sys.argv
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.import_scene.gltf(filepath=str(source))
+    meshes = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
+    if not meshes:
+        raise RuntimeError("no mesh in " + str(source))
+    body = max(meshes, key=lambda obj: len(obj.data.vertices))
+
+    # Split the merged scan into its blobs.  Everything the cleanup does
+    # needs to know which blob a triangle belongs to, and the loose parts
+    # are exactly those blobs.
+    bpy.ops.object.select_all(action="DESELECT")
+    body.select_set(True)
+    bpy.context.view_layer.objects.active = body
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.separate(type="LOOSE")
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    blobs = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
+    report = {"source": str(source), "blobs": len(blobs), "threshold": threshold}
+
+    volumes = {obj.name: signed_volume(obj.data) for obj in blobs}
+    ordered = sorted(blobs, key=lambda obj: -abs(volumes[obj.name]))
+    report["positive_blobs"] = sum(1 for value in volumes.values() if value > 0)
+    report["negative_blobs"] = sum(1 for value in volumes.values() if value < 0)
+    report["largest"] = [
+        {"name": obj.name,
+         "vertices": len(obj.data.vertices),
+         "polygons": len(obj.data.polygons),
+         "volume": round(volumes[obj.name], 10)}
+        for obj in ordered[:8]
+    ]
+
+    # Group the blobs that sit on top of each other.  The comparison is
+    # made against every bigger blob, and a blob joins a group as soon as
+    # most of its vertices are within the threshold of it.
+    groups = []
+    for blob in ordered:
+        for group in groups:
+            bvh = surface_bvh([group[0]])
+            if bvh is None:
+                continue
+            if coincidence(blob, bvh, threshold) >= 0.6:
+                group.append(blob)
+                break
+        else:
+            groups.append([blob])
+
+    removals = []
+    for group in groups:
+        if len(group) < 2:
+            continue
+        # The outer copy encloses the most volume, so it is the one that
+        # stays; every other member of the group is a redundant scan of the
+        # same surface.
+        keeper = max(group, key=lambda obj: abs(volumes[obj.name]))
+        for blob in group:
+            if blob is keeper:
+                continue
+            removals.append({
+                "remove": blob.name,
+                "keep": keeper.name,
+                "removed_volume": round(volumes[blob.name], 10),
+                "kept_volume": round(volumes[keeper.name], 10),
+                "vertices": len(blob.data.vertices),
+                "polygons": len(blob.data.polygons),
+            })
+    report["groups"] = [len(group) for group in groups]
+    report["removals"] = removals
+    report["removed_polygons"] = sum(row["polygons"] for row in removals)
+    report["removed_vertices"] = sum(row["vertices"] for row in removals)
+
+    print("YXZ_CLEAN_REPORT " + json.dumps(report))
+
+    if not apply_changes:
+        print("YXZ_CLEAN_DRY_RUN")
+        return
+
+    for row in removals:
+        obj = bpy.data.objects.get(row["remove"])
+        if obj:
+            bpy.data.objects.remove(obj, do_unlink=True)
+
+    # Put the surviving blobs back into one mesh and make the normals
+    # agree with the winding again.  A scan blob can come out wound the
+    # wrong way round, and with a single-sided material a face that points
+    # away from the camera disappears, which reads as a hole.
+    survivors = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
+    bpy.ops.object.select_all(action="DESELECT")
+    for obj in survivors:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = survivors[0]
+    bpy.ops.object.join()
+    merged = bpy.context.view_layer.objects.active
+    merged.name = body.name
+
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.normals_make_consistent(inside=False)
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    bpy.ops.object.select_all(action="DESELECT")
+    merged.select_set(True)
+    bpy.context.view_layer.objects.active = merged
+    bpy.ops.export_scene.gltf(
+        filepath=str(output),
+        export_format="GLB",
+        use_selection=True,
+        export_materials="EXPORT",
+        export_texcoords=True,
+        export_normals=True,
+        export_apply=False,
+        export_animations=True,
+        export_animation_mode="ACTIONS",
+        export_skins=True,
+        export_morph=True,
+        export_yup=True,
+        export_draco_mesh_compression_enable=False,
+    )
+    report["output"] = str(output)
+    print("YXZ_CLEANED " + json.dumps(report))
+
+
+if __name__ == "__main__":
+    main()
