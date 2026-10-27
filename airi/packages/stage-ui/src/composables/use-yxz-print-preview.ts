@@ -56,6 +56,36 @@ export interface YXZLocalSoftware {
   formats: string[]
 }
 
+export interface YXZLaserCardRequest {
+  /** Laser session id; re-using it overwrites the previous card. */
+  sessionId?: string
+  /** Preview session that owns the visitor's artwork (their model preview). */
+  artworkSessionId?: string
+  artworkImageIndex?: number
+  name?: string
+  title?: string
+  unit?: string
+  contact?: string
+  slogan?: string
+  theme?: string
+  accent?: string
+  note?: string
+  backTemplate?: string
+  backCaption?: string
+}
+
+export interface YXZLaserCardResponse {
+  sessionId: string
+  svgUrl: string
+  pngUrl: string
+  frontUrl: string
+  backUrl: string
+  sizeMm: { width: number, height: number }
+  backTemplate: string
+  hasArtwork: boolean
+  message: string
+}
+
 export const YXZ_PREVIEW_TIMEOUT_MS = 180_000
 export const YXZ_MODEL_TIMEOUT_MS = 10 * 60_000
 
@@ -185,6 +215,77 @@ export async function openYXZExportInSoftware(request: { softwareId: string, ses
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ software_id: request.softwareId, session_id: request.sessionId, fmt: request.format ?? 'stl' }),
+  })
+  const raw: unknown = await response.json().catch(() => undefined)
+  if (!response.ok)
+    throw new Error(isRecord(raw) && typeof raw.detail === 'string' ? raw.detail : `打开软件失败（HTTP ${response.status}）`)
+  return raw
+}
+
+/**
+ * Render the laser-cut card.
+ *
+ * The card is the last step of the 创作 -> 3D -> 切割 chain: its back is the
+ * fixed activity artwork and its front carries the visitor's own model
+ * preview, so the physical card is exactly what they designed.
+ */
+export async function createYXZLaserCard(request: YXZLaserCardRequest, fetcher: typeof fetch = fetch): Promise<YXZLaserCardResponse> {
+  const artworkSessionId = (request.artworkSessionId ?? '').trim()
+  const payload = {
+    name: request.name ?? '',
+    title: request.title ?? '',
+    unit: request.unit ?? '',
+    contact: request.contact ?? '',
+    slogan: request.slogan || '数理创未来 智慧启新程',
+    theme: request.theme || '#0B5FA8',
+    accent: request.accent || '#F5A623',
+    bg_style: 'gradient',
+    back_template: request.backTemplate || 'activity_stage',
+    back_caption: request.backCaption || '宜昌市第四届中小学生数理文化活动',
+    note: request.note ?? '',
+    ...(request.sessionId ? { session_id: request.sessionId } : {}),
+    ...(artworkSessionId
+      ? { artwork_session_id: artworkSessionId, artwork_image_index: request.artworkImageIndex ?? 0 }
+      : {}),
+  }
+
+  const response = await fetcher(`${getYXZPrintApiBase()}/api/laser_card`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+
+  const raw: unknown = await response.json().catch(() => undefined)
+  if (!response.ok) {
+    const detail = isRecord(raw) && typeof raw.detail === 'string' ? raw.detail : ''
+    throw new Error(detail || `激光切割卡片生成失败（HTTP ${response.status}）`)
+  }
+  if (!isRecord(raw) || typeof raw.session_id !== 'string')
+    throw new Error('激光切割卡片服务返回的数据格式无法识别')
+
+  const size = isRecord(raw.size_mm) ? raw.size_mm : {}
+  return {
+    sessionId: raw.session_id,
+    svgUrl: absolutePrintApiUrl(String(raw.svg_url ?? '')),
+    pngUrl: absolutePrintApiUrl(String(raw.png_url ?? '')),
+    frontUrl: absolutePrintApiUrl(String(raw.front_url ?? '')),
+    backUrl: absolutePrintApiUrl(String(raw.back_url ?? '')),
+    sizeMm: {
+      width: typeof size.width === 'number' ? size.width : 100,
+      height: typeof size.height === 'number' ? size.height : 56.25,
+    },
+    backTemplate: typeof raw.back_template === 'string' ? raw.back_template : 'activity_stage',
+    hasArtwork: raw.has_artwork === true,
+    message: typeof raw.message === 'string' ? raw.message : '卡片已生成',
+  }
+}
+
+/** Hand the cut SVG to the installed laser software (xTool / LightBurn). */
+export async function openYXZLaserCardInSoftware(softwareId: string, sessionId: string, fetcher: typeof fetch = fetch) {
+  const response = await fetcher(`${getYXZPrintApiBase()}/api/software/open`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ software_id: softwareId, session_id: sessionId, fmt: 'svg' }),
   })
   const raw: unknown = await response.json().catch(() => undefined)
   if (!response.ok)

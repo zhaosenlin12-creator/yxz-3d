@@ -1,18 +1,18 @@
 # -*- coding: utf-8 -*-
-"""Laser-cut business card generation for the 宜小智 laser workflow.
+"""Laser-cut card generation for the 宜小智 laser workflow.
 
 Design contract (fixed for cutting):
-  - Card size: standard business card 85.6 x 54 mm, rendered at 10 px/mm
-    => 856 x 540 px for PNG layers, SVG viewBox in millimetres.
-  - Back side: a fixed template image (user-provided activity poster, e.g.
-    activity_blue) is cover-fitted, rounded to 3 mm and given a 1 mm inner
-    reference frame.  It is NOT user-editable in the normal flow.
-  - Front side: user-edited fields (name/title/unit/contact/slogan/theme)
-    rendered by this module.
+  - Card size: every back template owns its size.  The 活动舞台 background is a
+    16:9 banner, so its card is 16:9 as well (100 x 56.25 mm); the classic
+    活动邀请 template keeps the business-card size (85.6 x 54 mm).  The SVG
+    viewBox is in millimetres so xTool / LightBurn can open it directly.
+  - Back side: a fixed template image (the activity artwork) is cover-fitted,
+    rounded to 3 mm and given a 1 mm inner reference frame.
+  - Front side: the artwork the visitor designed (their 3D model preview) plus
+    the collected name / title / unit / contact / slogan.
   - SVG: outer cutting path (rounded rect rx=3 mm), 4 corner registration
-    crosses, an inner engrave reference frame, optional engrave text layer
-    and a safety note.  Unit is mm so xTool / LightBurn style software can
-    open it directly.
+    crosses, an inner engrave reference frame, the artwork as an embedded
+    image layer and an engrave text layer.
 
 Everything is deterministic and offline (PIL + SVG text), so the flow never
 depends on a cloud image API.
@@ -20,22 +20,55 @@ depends on a cloud image API.
 
 from __future__ import annotations
 
+import base64
+import io
 import os
 import re
+import shutil
 import uuid
 from pathlib import Path
 from typing import Any, Optional
 
 from PIL import Image, ImageDraw, ImageFont
 
+# The template artwork ships with the repository (backend/assets/laser) so a
+# fresh clone can cut a card without a separate asset pack.  At runtime the
+# files are mirrored into <data>/laser/template, which is what the static
+# /api/data/laser/template/<file> route serves.
+PACKAGED_TEMPLATE_DIR = Path(__file__).resolve().parent / "assets" / "laser"
+
+
+def ensure_templates(data_root: str) -> str:
+    """Mirror the packaged back-side templates into the runtime data dir.
+
+    Returns the template root that the HTTP layer should serve from.
+    """
+    target = Path(os.path.abspath(data_root)) / "laser" / "template"
+    if not PACKAGED_TEMPLATE_DIR.is_dir():
+        return str(target)
+
+    target.mkdir(parents=True, exist_ok=True)
+    for source in sorted(PACKAGED_TEMPLATE_DIR.glob("*.png")):
+        destination = target / source.name
+        if not destination.is_file():
+            shutil.copyfile(source, destination)
+    return str(target)
+
 # 10 px/mm
 MM = 10
-CARD_W_MM = 85.6
-CARD_H_MM = 54.0
-CARD_W = int(CARD_W_MM * MM)  # 856
-CARD_H = int(CARD_H_MM * MM)  # 540
+DEFAULT_CARD_MM = (85.6, 54.0)
 CORNER_RADIUS_MM = 3.0
-CORNER_RADIUS = int(CORNER_RADIUS_MM * MM)
+
+# Every back template carries its own card size, because the artwork decides
+# the shape of the card.
+TEMPLATE_SIZE_MM: dict[str, tuple[float, float]] = {
+    "activity_stage": (100.0, 56.25),
+}
+
+TEMPLATE_NAMES: dict[str, str] = {
+    "activity_blue": "宜小智 · 活动邀请",
+    "activity_stage": "宜昌市第四届中小学生数理文化活动 · 舞台主视觉",
+}
 
 FONT_CANDIDATES = {
     "bold": [
@@ -51,6 +84,11 @@ FONT_CANDIDATES = {
 
 _HEX_RE = re.compile(r"^#?([0-9a-fA-F]{6})$")
 _TEMPLATE_SLUG_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def resolve_size_mm(back_template: str) -> tuple[float, float]:
+    """Card size in millimetres for one back template."""
+    return TEMPLATE_SIZE_MM.get(back_template, DEFAULT_CARD_MM)
 
 
 def _font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont:
@@ -89,6 +127,16 @@ def _cover(image: Image.Image, w: int, h: int) -> Image.Image:
     return canvas
 
 
+def _contain(image: Image.Image, w: int, h: int) -> Image.Image:
+    """Fit the image inside w x h without cropping, centered on a soft plate."""
+    ratio = min(w / image.width, h / image.height)
+    nw, nh = max(1, int(image.width * ratio)), max(1, int(image.height * ratio))
+    resized = image.resize((nw, nh), Image.LANCZOS)
+    canvas = Image.new("RGB", (w, h), (255, 255, 255))
+    canvas.paste(resized, ((w - nw) // 2, (h - nh) // 2))
+    return canvas
+
+
 def _vertical_gradient(w: int, h: int, top: tuple, bottom: tuple) -> Image.Image:
     img = Image.new("RGB", (1, h))
     for y in range(h):
@@ -97,93 +145,160 @@ def _vertical_gradient(w: int, h: int, top: tuple, bottom: tuple) -> Image.Image
     return img.resize((w, h))
 
 
-def render_front(spec: dict[str, Any]) -> Image.Image:
+def load_artwork(path: str) -> Optional[Image.Image]:
+    """Load the visitor's own artwork (their model preview) for the card front."""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with Image.open(path) as handle:
+            return handle.convert("RGB")
+    except Exception:
+        return None
+
+
+def render_front(spec: dict[str, Any], size_mm: tuple[float, float], artwork: Optional[Image.Image] = None) -> Image.Image:
+    """Render the editable front of the card.
+
+    With artwork the layout becomes a作品卡: the model preview on the left and
+    the collected text on the right.  Without artwork it falls back to the
+    centred text-only business card.
+    """
+    width_mm, height_mm = size_mm
+    card_w = max(1, int(width_mm * MM))
+    card_h = max(1, int(height_mm * MM))
+    corner_radius = int(CORNER_RADIUS_MM * MM)
+
     theme = _hex_to_rgb(spec.get("theme"), "#0B5FA8")
     accent = _hex_to_rgb(spec.get("accent"), "#F5A623")
     bg_style = (spec.get("bg_style") or "gradient").strip().lower()
     if bg_style == "solid":
-        background = Image.new("RGB", (CARD_W, CARD_H), theme)
+        background = Image.new("RGB", (card_w, card_h), theme)
     else:
         darker = tuple(max(0, int(v * 0.55)) for v in theme)
-        background = _vertical_gradient(CARD_W, CARD_H, theme, darker)
+        background = _vertical_gradient(card_w, card_h, theme, darker)
 
-    overlay = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
-    odraw = ImageDraw.Draw(overlay)
-    # decorative circle top-left + big arc bottom-right
-    odraw.ellipse((28, 28, 118, 118), fill=(*accent, 110))
-    odraw.ellipse((CARD_W - 190, CARD_H - 190, CARD_W - 30, CARD_H - 30), outline=(*accent, 70), width=4)
-    background = Image.alpha_composite(background.convert("RGBA"), overlay).convert("RGB")
+    # The decorative circles only belong to the text-only layout; with artwork
+    # they would read as stray marks on the finished card.
+    if artwork is None:
+        overlay = Image.new("RGBA", (card_w, card_h), (0, 0, 0, 0))
+        odraw = ImageDraw.Draw(overlay)
+        odraw.ellipse((28, 28, 118, 118), fill=(*accent, 110))
+        odraw.ellipse((card_w - 190, card_h - 190, card_w - 30, card_h - 30), outline=(*accent, 70), width=4)
+        background = Image.alpha_composite(background.convert("RGBA"), overlay).convert("RGB")
 
     draw = ImageDraw.Draw(background)
     white = (255, 255, 255)
     soft = (235, 244, 255)
-    accent_text = accent
 
     slogan = (spec.get("slogan") or "").strip()
-    if slogan:
-        font = _font(26, bold=False)
-        w = draw.textlength(slogan, font=font)
-        draw.text(((CARD_W - w) / 2, 66), slogan, font=font, fill=soft)
-
     name = (spec.get("name") or "").strip() or "姓名"
-    font_name = _font(92, bold=True)
-    w = draw.textlength(name, font=font_name)
-    draw.text(((CARD_W - w) / 2, 168), name, font=font_name, fill=white)
-
     line1 = " ".join(x.strip() for x in [(spec.get("title") or "").strip(), (spec.get("unit") or "").strip()] if x)
-    if line1:
-        font = _font(36, bold=False)
-        w = draw.textlength(line1, font=font)
-        draw.text(((CARD_W - w) / 2, 292), line1, font=font, fill=soft)
-        # accent separator
-        sy = 360
-        sep_w = 220
-        draw.rounded_rectangle(((CARD_W - sep_w) / 2, sy, (CARD_W + sep_w) / 2, sy + 5), radius=3, fill=accent_text)
-
     contact = (spec.get("contact") or "").strip()
-    if contact:
-        font = _font(30, bold=False)
-        lines = [line.strip() for line in contact.splitlines() if line.strip()]
-        y = 400
-        for line in lines[:3]:
-            w = draw.textlength(line, font=font)
-            draw.text(((CARD_W - w) / 2, y), line, font=font, fill=white)
-            y += 44
-
     note = (spec.get("note") or "").strip()
-    if note:
-        font = _font(22, bold=False)
-        w = draw.textlength(note, font=font)
-        draw.text(((CARD_W - w) / 2, CARD_H - 52), note, font=font, fill=soft)
 
-    # rounded corners
-    rounded = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
-    rounded.paste(background, (0, 0), _rounded_mask(CARD_W, CARD_H, CORNER_RADIUS))
+    # Text sizes follow the card height so a 16:9 card and a business card
+    # both look deliberate.
+    unit = card_h / 540.0
+
+    if artwork is not None:
+        panel_w = int(card_w * 0.46)
+        panel = _contain(artwork, panel_w, card_h)
+        background.paste(panel, (0, 0))
+        draw = ImageDraw.Draw(background)
+        draw.rectangle((0, 0, panel_w - 1, card_h), outline=(*accent, 255), width=max(2, int(3 * unit)))
+
+        text_left = panel_w + int(card_w * 0.045)
+        text_right = card_w - int(card_w * 0.05)
+        cursor = int(card_h * 0.10)
+
+        if slogan:
+            font = _font(max(12, int(26 * unit)), bold=False)
+            draw.text((text_left, cursor), slogan, font=font, fill=soft)
+            cursor += int(44 * unit)
+
+        font_name = _font(max(20, int(84 * unit)), bold=True)
+        draw.text((text_left, cursor), name, font=font_name, fill=white)
+        cursor += int(112 * unit)
+
+        if line1:
+            font = _font(max(12, int(34 * unit)), bold=False)
+            draw.text((text_left, cursor), line1, font=font, fill=soft)
+            cursor += int(48 * unit)
+
+        draw.rounded_rectangle((text_left, cursor, text_left + int(180 * unit), cursor + max(2, int(5 * unit))), radius=3, fill=accent)
+        cursor += int(26 * unit)
+
+        if contact:
+            font = _font(max(11, int(28 * unit)), bold=False)
+            for line in [x.strip() for x in contact.splitlines() if x.strip()][:3]:
+                draw.text((text_left, cursor), line, font=font, fill=white)
+                cursor += int(38 * unit)
+
+        if note:
+            font = _font(max(10, int(22 * unit)), bold=False)
+            draw.text((text_left, card_h - int(52 * unit)), note, font=font, fill=soft)
+    else:
+        if slogan:
+            font = _font(max(12, int(26 * unit)), bold=False)
+            w = draw.textlength(slogan, font=font)
+            draw.text(((card_w - w) / 2, int(66 * unit)), slogan, font=font, fill=soft)
+
+        font_name = _font(max(20, int(92 * unit)), bold=True)
+        w = draw.textlength(name, font=font_name)
+        draw.text(((card_w - w) / 2, int(168 * unit)), name, font=font_name, fill=white)
+
+        if line1:
+            font = _font(max(12, int(36 * unit)), bold=False)
+            w = draw.textlength(line1, font=font)
+            draw.text(((card_w - w) / 2, int(292 * unit)), line1, font=font, fill=soft)
+            sep_w = int(220 * unit)
+            draw.rounded_rectangle(((card_w - sep_w) / 2, int(360 * unit), (card_w + sep_w) / 2, int(360 * unit) + max(2, int(5 * unit))), radius=3, fill=accent)
+
+        if contact:
+            font = _font(max(11, int(30 * unit)), bold=False)
+            y = int(400 * unit)
+            for line in [x.strip() for x in contact.splitlines() if x.strip()][:3]:
+                w = draw.textlength(line, font=font)
+                draw.text(((card_w - w) / 2, y), line, font=font, fill=white)
+                y += int(44 * unit)
+
+        if note:
+            font = _font(max(10, int(22 * unit)), bold=False)
+            w = draw.textlength(note, font=font)
+            draw.text(((card_w - w) / 2, card_h - int(52 * unit)), note, font=font, fill=soft)
+
+    rounded = Image.new("RGBA", (card_w, card_h), (0, 0, 0, 0))
+    rounded.paste(background, (0, 0), _rounded_mask(card_w, card_h, corner_radius))
     return rounded.convert("RGB")
 
 
-def render_back(template_path: str, spec: dict[str, Any]) -> Image.Image:
-    base = Image.open(template_path).convert("RGB")
-    background = _cover(base, CARD_W, CARD_H)
+def render_back(template_path: str, spec: dict[str, Any], size_mm: tuple[float, float]) -> Image.Image:
+    width_mm, height_mm = size_mm
+    card_w = max(1, int(width_mm * MM))
+    card_h = max(1, int(height_mm * MM))
+    corner_radius = int(CORNER_RADIUS_MM * MM)
+    unit = card_h / 540.0
 
-    # white inner frame (reference for cutting placement)
-    frame = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
+    base = Image.open(template_path).convert("RGB")
+    background = _cover(base, card_w, card_h)
+
+    frame = Image.new("RGBA", (card_w, card_h), (0, 0, 0, 0))
     fdraw = ImageDraw.Draw(frame)
     fdraw.rounded_rectangle(
-        (14, 14, CARD_W - 14, CARD_H - 14),
-        radius=CORNER_RADIUS - 5,
+        (int(14 * unit), int(14 * unit), card_w - int(14 * unit), card_h - int(14 * unit)),
+        radius=max(2, corner_radius - 5),
         outline=(255, 255, 255, 220),
-        width=4,
+        width=max(2, int(4 * unit)),
     )
     caption = (spec.get("back_caption") or "").strip()
     if caption:
-        font = _font(24, bold=False)
+        font = _font(max(12, int(24 * unit)), bold=False)
         w = fdraw.textlength(caption, font=font)
-        fdraw.text(((CARD_W - w) / 2, CARD_H - 58), caption, font=font, fill=(255, 255, 255, 235))
+        fdraw.text(((card_w - w) / 2, card_h - int(58 * unit)), caption, font=font, fill=(255, 255, 255, 235))
     background = Image.alpha_composite(background.convert("RGBA"), frame).convert("RGB")
 
-    rounded = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
-    rounded.paste(background, (0, 0), _rounded_mask(CARD_W, CARD_H, CORNER_RADIUS))
+    rounded = Image.new("RGBA", (card_w, card_h), (0, 0, 0, 0))
+    rounded.paste(background, (0, 0), _rounded_mask(card_w, card_h, corner_radius))
     return rounded.convert("RGB")
 
 
@@ -194,18 +309,48 @@ def _svg_rounded_rect(x: float, y: float, w: float, h: float, r: float, fill: st
     )
 
 
-def build_svg(spec: dict[str, Any], engrave_text: str = "") -> str:
+def _embed_image_data_uri(path: str, max_width: int = 1000) -> str:
+    """Inline the artwork so the cut file stays a single portable document.
+
+    The image is re-encoded at a bounded width: the original preview is far
+    larger than the engraved area needs, and an oversized SVG is slow to open
+    in the laser software.
+    """
+    if not path or not os.path.isfile(path):
+        return ""
+    try:
+        with Image.open(path) as handle:
+            image = handle.convert("RGB")
+            if image.width > max_width:
+                ratio = max_width / image.width
+                image = image.resize((max_width, max(1, int(image.height * ratio))), Image.LANCZOS)
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG", optimize=True)
+            payload = base64.b64encode(buffer.getvalue()).decode("ascii")
+    except Exception:
+        return ""
+    return f"data:image/png;base64,{payload}"
+
+
+def build_svg(
+    spec: dict[str, Any],
+    size_mm: tuple[float, float],
+    engrave_text: str = "",
+    artwork_path: str = "",
+) -> str:
     """Cut file in millimetres. Layers:
       - outer cut (red, thin): the physical card outline
       - corner registration crosses (dashed thin)
       - inner engrave reference frame (green, thin)
+      - artwork image layer (the visitor's model, embedded)
       - optional engrave text (blue, converted to paths is left to the tool)
     """
-    x, y, w, h = 0.0, 0.0, CARD_W_MM, CARD_H_MM
+    width_mm, height_mm = size_mm
+    x, y, w, h = 0.0, 0.0, width_mm, height_mm
     r = CORNER_RADIUS_MM
     lines: list[str] = [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        '<svg xmlns="http://www.w3.org/2000/svg" width="85.6mm" height="54mm" viewBox="0 0 85.6 54">',
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width_mm}mm" height="{height_mm}mm" viewBox="0 0 {width_mm} {height_mm}">',
         "  <!-- 外切割轮廓（红色） -->",
         _svg_rounded_rect(x, y, w, h, r, "none", "#FF0000", 0.25),
         "  <!-- 内框雕刻参考线（绿色） -->",
@@ -217,6 +362,16 @@ def build_svg(spec: dict[str, Any], engrave_text: str = "") -> str:
             f'<path d="M {cx - 1.6} {cy} H {cx + 1.6} M {cx} {cy - 1.6} V {cy + 1.6}" '
             f'fill="none" stroke="#FF0000" stroke-width="0.15"/>'
         )
+
+    data_uri = _embed_image_data_uri(artwork_path)
+    if data_uri:
+        panel_w = w * 0.46
+        lines.append("  <!-- 作品图（可在此图层上雕刻/打印） -->")
+        lines.append(
+            f'<image x="1.2" y="1.2" width="{panel_w - 2.4:.2f}" height="{h - 2.4:.2f}" '
+            f'preserveAspectRatio="xMidYMid slice" href="{data_uri}"/>'
+        )
+
     theme = _hex_to_rgb(spec.get("theme"), "#0B5FA8")
     engrave = (engrave_text or "").strip() or (spec.get("name") or "").strip()
     if engrave:
@@ -228,7 +383,7 @@ def build_svg(spec: dict[str, Any], engrave_text: str = "") -> str:
         )
     lines.append(
         f'  <text x="{w - 2:.2f}" y="{h - 1.5:.2f}" text-anchor="end" font-size="1.2" '
-        f'fill="#888888">85.6 × 54 mm · 0.2–3 mm 板材请按实际校准</text>'
+        f'fill="#888888">{width_mm:g} × {height_mm:g} mm · 0.2–3 mm 板材请按实际校准</text>'
     )
     lines.append("</svg>")
     return "\n".join(lines)
@@ -253,49 +408,63 @@ def generate(
     spec: dict[str, Any],
     data_root: str,
     template_root: str | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Render front/back/preview PNGs and the cut SVG under
     data_root/laser/<sid>/. Returns absolute paths."""
     data_root = os.path.abspath(data_root)
-    template_root = template_root or os.path.join(data_root, "laser", "template")
-    back_template = (spec.get("back_template") or "activity_blue").strip()
+    template_root = template_root or ensure_templates(data_root)
+    back_template = (spec.get("back_template") or "activity_stage").strip()
     if not _TEMPLATE_SLUG_RE.match(back_template):
-        back_template = "activity_blue"
+        back_template = "activity_stage"
     template_path = os.path.join(template_root, f"{back_template}.png")
+    if not os.path.isfile(template_path):
+        template_path = os.path.join(template_root, "activity_stage.png")
     if not os.path.isfile(template_path):
         template_path = os.path.join(template_root, "activity_blue.png")
     if not os.path.isfile(template_path):
+        # Last resort: the templates that ship with the repository.
+        template_path = os.path.join(str(PACKAGED_TEMPLATE_DIR), "activity_stage.png")
+    if not os.path.isfile(template_path):
         raise FileNotFoundError(f"名片背面模板缺失：{template_path}")
+    back_template = os.path.splitext(os.path.basename(template_path))[0]
+
+    size_mm = resolve_size_mm(back_template)
+    card_w = max(1, int(size_mm[0] * MM))
+    card_h = max(1, int(size_mm[1] * MM))
 
     sid = _safe_slug(str(spec.get("session_id") or uuid.uuid4().hex[:12]), uuid.uuid4().hex[:12])
     out_dir = os.path.join(data_root, "laser", sid)
     os.makedirs(out_dir, exist_ok=True)
 
-    front = render_front(spec)
-    back = render_back(template_path, spec)
+    artwork_path = str(spec.get("artwork_path") or "")
+    artwork = load_artwork(artwork_path)
+
+    front = render_front(spec, size_mm, artwork)
+    back = render_back(template_path, spec, size_mm)
     front_path = os.path.join(out_dir, "card_front.png")
     back_path = os.path.join(out_dir, "card_back.png")
     front.save(front_path)
     back.save(back_path)
 
     # preview: side-by-side with labels
-    preview = Image.new("RGB", (CARD_W * 2 + 60, CARD_H + 44), (240, 244, 248))
+    label_h = 52
+    preview = Image.new("RGB", (card_w * 2 + 60, card_h + label_h + 24), (240, 244, 248))
     pdraw = ImageDraw.Draw(preview)
     front_rgba = front.convert("RGBA")
     back_rgba = back.convert("RGBA")
-    preview.paste(front_rgba, (30, 30), front_rgba)
-    preview.paste(back_rgba, (CARD_W + 60, 30), back_rgba)
+    preview.paste(front_rgba, (30, label_h), front_rgba)
+    preview.paste(back_rgba, (card_w + 60, label_h), back_rgba)
     label_font = _font(26, bold=True)
-    pdraw.text((30, 8), "正面 · 用户编辑", font=label_font, fill=(40, 80, 120))
-    pdraw.text((CARD_W + 60, 8), "背面 · 固定模板", font=label_font, fill=(40, 80, 120))
-    pdraw.rectangle((28, 28, CARD_W + 32, CARD_H + 32), outline=(120, 170, 200), width=2)
-    pdraw.rectangle((CARD_W + 58, 28, CARD_W * 2 + 62, CARD_H + 32), outline=(120, 170, 200), width=2)
+    pdraw.text((30, 10), "正面 · 你的作品", font=label_font, fill=(40, 80, 120))
+    pdraw.text((card_w + 60, 10), "背面 · 活动背景", font=label_font, fill=(40, 80, 120))
+    pdraw.rectangle((28, label_h - 2, card_w + 32, card_h + label_h + 2), outline=(120, 170, 200), width=2)
+    pdraw.rectangle((card_w + 58, label_h - 2, card_w * 2 + 62, card_h + label_h + 2), outline=(120, 170, 200), width=2)
     png_path = os.path.join(out_dir, "card.png")
     preview.save(png_path)
 
     svg_path = os.path.join(out_dir, "card.svg")
     with open(svg_path, "w", encoding="utf-8") as handle:
-        handle.write(build_svg(spec))
+        handle.write(build_svg(spec, size_mm, artwork_path=artwork_path))
 
     return {
         "session_id": sid,
@@ -304,17 +473,25 @@ def generate(
         "front_path": front_path,
         "back_path": back_path,
         "back_template": back_template,
-        "size_mm": {"width": CARD_W_MM, "height": CARD_H_MM},
+        "has_artwork": artwork is not None,
+        "size_mm": {"width": size_mm[0], "height": size_mm[1]},
     }
 
 
-def list_templates(template_root: str) -> list[dict[str, str]]:
+def list_templates(template_root: str) -> list[dict[str, Any]]:
     root = Path(template_root)
-    items: list[dict[str, str]] = []
+    items: list[dict[str, Any]] = []
     if not root.is_dir():
         return items
     for path in sorted(root.glob("*.png")):
         slug = path.stem
-        if _TEMPLATE_SLUG_RE.match(slug):
-            items.append({"id": slug, "name": slug, "url": f"/api/data/laser/template/{path.name}"})
+        if not _TEMPLATE_SLUG_RE.match(slug):
+            continue
+        width_mm, height_mm = resolve_size_mm(slug)
+        items.append({
+            "id": slug,
+            "name": TEMPLATE_NAMES.get(slug, slug),
+            "url": f"/api/data/laser/template/{path.name}",
+            "size_mm": {"width": width_mm, "height": height_mm},
+        })
     return items

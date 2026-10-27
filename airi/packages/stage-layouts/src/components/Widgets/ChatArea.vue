@@ -2,7 +2,7 @@
 import type { ChatProvider } from '@xsai-ext/providers/utils'
 
 import { isStageTamagotchi } from '@proj-airi/stage-shared'
-import { YXZLaserCardPanel } from '@proj-airi/stage-ui/components/scenes'
+import { YXZCreationWorkbench } from '@proj-airi/stage-ui/components/scenes'
 import { useAudioAnalyzer } from '@proj-airi/stage-ui/composables'
 import { useAudioContext } from '@proj-airi/stage-ui/stores/audio'
 import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
@@ -20,7 +20,6 @@ import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 
 import IndicatorMicVolume from './IndicatorMicVolume.vue'
-import CameraCapture from './CameraCapture.vue'
 
 import { ChatSendTimeoutError, notifyYXZChatRecovery, withChatSendTimeout } from './chat-send-recovery'
 
@@ -28,7 +27,8 @@ const messageInput = ref('')
 const hearingPopoverOpen = ref(false)
 const isComposing = ref(false)
 const isListening = ref(false) // Transcription listening state (separate from microphone enabled)
-const laserCardOpen = ref(false)
+const workbenchOpen = ref(false)
+const workbenchMode = ref<'laser' | 'print'>('laser')
 const cameraModalOpen = ref(false)
 const uploadedImagePath = ref<string>()
 const DOUBLE_ENTER_INTERVAL_MS = 300
@@ -54,6 +54,8 @@ const { enabled, selectedAudioInput, stream, audioInputs } = storeToRefs(useSett
 const chatOrchestrator = useChatOrchestratorStore()
 const chatSession = useChatSessionStore()
 const { cancelPendingSends, ingest, onAfterMessageComposed } = chatOrchestrator
+// A turn is in flight: a second tap must not queue another identical turn.
+const sendInFlight = ref(false)
 const { messages } = storeToRefs(chatSession)
 const { audioContext } = useAudioContext()
 const { t } = useI18n()
@@ -137,7 +139,8 @@ function insertInterimAtCaret(text: string) {
     interimPlaceholder.value = { anchor: start, length: replacement.length }
   }
   nextTick(() => {
-    if (!interimPlaceholder.value) return
+    if (!interimPlaceholder.value)
+      return
     const caret = interimPlaceholder.value.anchor + interimPlaceholder.value.length
     el.focus()
     el.setSelectionRange(caret, caret)
@@ -161,71 +164,105 @@ function commitInterimAsFinal(text: string) {
   insertTranscriptAtCaret(text)
 }
 
-async function debouncedAutoSend(text: string) {
-  // Double-check auto-send is enabled before proceeding
+function scheduleAutoSend() {
+  if (autoSendTimeout)
+    clearTimeout(autoSendTimeout)
+
+  autoSendTimeout = setTimeout(() => {
+    autoSendTimeout = undefined
+    void runAutoSend()
+  }, autoSendDelay.value)
+}
+
+async function runAutoSend() {
   if (!autoSendEnabled.value) {
     clearPendingAutoSend()
     return
   }
 
-  // Add text to pending buffer
-  pendingAutoSendText.value = pendingAutoSendText.value ? `${pendingAutoSendText.value} ${text}` : text
-
-  // Clear existing timeout
-  if (autoSendTimeout) {
-    clearTimeout(autoSendTimeout)
+  // A turn is still running: wait for it instead of queueing a second one.
+  if (sendInFlight.value) {
+    scheduleAutoSend()
+    return
   }
 
-  // Set new timeout
-  autoSendTimeout = setTimeout(async () => {
-    // Final check before sending - auto-send might have been disabled while waiting
-    if (!autoSendEnabled.value) {
-      clearPendingAutoSend()
-      return
-    }
+  const textToSend = pendingAutoSendText.value.trim()
+  if (!textToSend)
+    return
 
-    const textToSend = pendingAutoSendText.value.trim()
-    if (textToSend && autoSendEnabled.value) {
-      try {
-        // `ingest()` resolves only after the full assistant turn finishes; clear UI/buffer now so
-        // the next SentenceEnd during streaming does not append to the message we already committed.
-        messageInput.value = ''
-        pendingAutoSendText.value = ''
-        await sendMessage(textToSend)
-      }
-      catch (err) {
-        console.error('[ChatArea] Auto-send error:', err)
-        // Preserve any transcription that arrived while ingest was in flight (see PR review).
-        messageInput.value = [textToSend, messageInput.value.trim()].filter(Boolean).join(' ')
-        pendingAutoSendText.value = [textToSend, pendingAutoSendText.value.trim()].filter(Boolean).join(' ')
-        recoverFromSendError(err)
-      }
-    }
-    autoSendTimeout = undefined
-  }, autoSendDelay.value)
+  try {
+    messageInput.value = ''
+    pendingAutoSendText.value = ''
+    await sendMessage(textToSend)
+  }
+  catch (err) {
+    console.error('[ChatArea] Auto-send error:', err)
+    messageInput.value = [textToSend, messageInput.value.trim()].filter(Boolean).join(' ')
+    pendingAutoSendText.value = [textToSend, pendingAutoSendText.value.trim()].filter(Boolean).join(' ')
+    recoverFromSendError(err)
+  }
+}
+
+function debouncedAutoSend(text: string) {
+  if (!autoSendEnabled.value) {
+    clearPendingAutoSend()
+    return
+  }
+
+  pendingAutoSendText.value = pendingAutoSendText.value ? `${pendingAutoSendText.value} ${text}` : text
+
+  scheduleAutoSend()
 }
 
 async function sendMessage(text: string, providerId?: string) {
-  const pid = providerId ?? activeProvider.value
-  const operation = (async () => {
-    const providerConfig = providersStore.getProviderConfig(pid)
-    await ingest(text, {
-      chatProvider: await providersStore.getProviderInstance(pid) as ChatProvider,
-      model: activeModel.value,
-      providerConfig,
-      providerId: pid,
-    })
-  })()
+  if (sendInFlight.value) {
+    console.warn('[ChatArea] Send ignored: a turn is already running')
+    return
+  }
 
-  return withChatSendTimeout(operation, () => {
-    cancelPendingSends(chatSession.activeSessionId)
-  })
+  sendInFlight.value = true
+  const pid = providerId ?? activeProvider.value
+  try {
+    const operation = (async () => {
+      const providerConfig = providersStore.getProviderConfig(pid)
+      await ingest(text, {
+        chatProvider: await providersStore.getProviderInstance(pid) as ChatProvider,
+        model: activeModel.value,
+        providerConfig,
+        providerId: pid,
+      })
+    })()
+
+    return await withChatSendTimeout(operation, () => {
+      cancelPendingSends(chatSession.activeSessionId)
+    })
+  }
+  finally {
+    sendInFlight.value = false
+  }
 }
 
 // One automatic retry per preserved message: a non-timeout failure is retried
 // once through a backup chat provider before the recovery toast surfaces.
 // Students should not have to understand provider failures at all.
 let lastAutoRetriedText = ''
+
+// The failed turn already appended the visitor's question to the session.
+// Drop that copy before a retry so the chat keeps exactly one of it.
+function removeTrailingUserMessage(text: string) {
+  const sessionId = chatSession.activeSessionId
+  const messages = chatSession.getSessionMessages(sessionId)
+
+  const last = messages.at(-1)
+  if (!last || last.role !== 'user')
+    return
+
+  const content = typeof last.content === 'string' ? last.content : ''
+  if (content.trim() !== text.trim())
+    return
+
+  chatSession.setSessionMessages(sessionId, messages.slice(0, -1))
+}
 
 async function recoverFromSendError(error: unknown) {
   // Keep implementation details in the console only. The conversation should
@@ -234,12 +271,16 @@ async function recoverFromSendError(error: unknown) {
   const retryText = pendingAutoSendText.value.trim() || messageInput.value.trim()
 
   if (!timedOut && retryText && retryText !== lastAutoRetriedText) {
-    const configuredChat = providersStore.configuredChatProvidersMetadata ?? []
+    // Only a provider the visitor (or the local seed) actually added may take
+    // over: the connectivity validator accepts any HTTP status below 500, so
+    // untouched providers would otherwise answer with 401 and fail the retry.
+    const configuredChat = providersStore.persistedChatProvidersMetadata ?? []
     const backup = configuredChat.find(meta => meta.id !== activeProvider.value)
     if (backup) {
       lastAutoRetriedText = retryText
       toast.info(`自动切换到备用模型重试…`)
       try {
+        removeTrailingUserMessage(retryText)
         await sendMessage(retryText, backup.id)
         pendingAutoSendText.value = ''
         messageInput.value = ''
@@ -266,7 +307,7 @@ async function recoverFromSendError(error: unknown) {
 }
 
 async function handleSend() {
-  if (!messageInput.value.trim() || isComposing.value) {
+  if (!messageInput.value.trim() || isComposing.value || sendInFlight.value) {
     return
   }
 
@@ -283,7 +324,7 @@ async function handleSend() {
 }
 
 async function sendQuickStart(prompt: string) {
-  if (messageInput.value.trim())
+  if (messageInput.value.trim() || sendInFlight.value)
     return
 
   messageInput.value = prompt
@@ -295,6 +336,19 @@ async function sendQuickStart(prompt: string) {
 function openPresetYXZ3D() {
   const url = `${window.location.origin}/yxz-studio`
   window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+// + menu: open the guided creation workbench. The laser branch drives the
+// full chain (conversation -> preview -> studio -> 3D -> SVG -> xTool) and the
+// print branch drives the same chain up to the printable STL.
+function openWorkbench(mode: 'laser' | 'print') {
+  workbenchMode.value = mode
+  workbenchOpen.value = true
+}
+
+function handleWorkbenchStatus(status: string) {
+  if (status === 'sent')
+    workbenchOpen.value = false
 }
 
 // Camera capture: handle photo taken from camera
@@ -696,11 +750,18 @@ watch(sendMode, () => {
           v-for="prompt in quickStartPrompts"
           :key="prompt"
           type="button"
-          class="border border-primary-300/50 rounded-full bg-white/80 px-2.5 py-1 text-xs text-primary-700 shadow-sm backdrop-blur transition active:scale-95 dark:border-primary-500/40 dark:bg-neutral-900/70 hover:bg-white dark:text-primary-200"
+          :disabled="sendInFlight"
+          class="border border-primary-300/50 rounded-full bg-white/80 px-2.5 py-1 text-xs text-primary-700 shadow-sm backdrop-blur transition active:scale-95 disabled:cursor-not-allowed dark:border-primary-500/40 dark:bg-neutral-900/70 hover:bg-white dark:text-primary-200 disabled:opacity-45"
           @click="void sendQuickStart(prompt)"
         >
           {{ prompt }}
         </button>
+        <span
+          v-if="sendInFlight"
+          class="w-full text-xs text-primary-600/75 dark:text-primary-200/80"
+        >
+          宜小智正在思考，请稍候…
+        </span>
       </div>
 
       <BasicTextarea
@@ -751,19 +812,27 @@ watch(sendMode, () => {
             >
               <DropdownMenuItem
                 class="w-full flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-xs outline-none transition-colors hover:bg-primary-100/60 dark:hover:bg-primary-900/40"
-                @select="laserCardOpen = true"
+                @select="openWorkbench('laser')"
               >
                 <div class="i-ph:cardholder-bold h-4 w-4 text-primary-600 dark:text-primary-300" />
-                <span>激光切割名片</span>
-                <small class="text-neutral-400">预制模板 · 正面编辑 · SVG 切割</small>
+                <span>激光切割卡片</span>
+                <small class="text-neutral-400">对话引导 · 作品正面 · SVG 切割</small>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                class="w-full flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-xs outline-none transition-colors hover:bg-primary-100/60 dark:hover:bg-primary-900/40"
+                @select="openWorkbench('print')"
+              >
+                <div class="i-ph:robot-bold h-4 w-4 text-primary-600 dark:text-primary-300" />
+                <span>3D 打印作品</span>
+                <small class="text-neutral-400">对话引导 · 预览 · 3D 打印</small>
               </DropdownMenuItem>
               <DropdownMenuItem
                 class="w-full flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-xs outline-none transition-colors hover:bg-primary-100/60 dark:hover:bg-primary-900/40"
                 @select="openPresetYXZ3D"
               >
-                <div class="i-ph:robot-bold h-4 w-4 text-primary-600 dark:text-primary-300" />
-                <span>宜小智 3D 模型</span>
-                <small class="text-neutral-400">预制精致模型 · 直接展示成品</small>
+                <div class="i-ph:hammer-bold h-4 w-4 text-primary-600 dark:text-primary-300" />
+                <span>创作工作室</span>
+                <small class="text-neutral-400">2D 批注编辑 · 产出 3D</small>
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenuPortal>
@@ -882,9 +951,10 @@ watch(sendMode, () => {
       </div>
     </div>
 
-    <YXZLaserCardPanel
-      v-model:open="laserCardOpen"
-      @status="(status) => console.log('[LaserCard]', status)"
+    <YXZCreationWorkbench
+      v-model:open="workbenchOpen"
+      :mode="workbenchMode"
+      @status="handleWorkbenchStatus"
     />
   </div>
 </template>

@@ -12,14 +12,14 @@ const backgroundDialogOpen = ref(false)
 const laserCardPanelOpen = ref(false)
 
 // Dynamically import laser card panel to avoid circular dependencies
-const YXZLaserCardPanel = computed(() => {
+const YXZCreationWorkbench = computed(() => {
   return defineAsyncComponent(() =>
-    import('@proj-airi/stage-ui/components/scenes/YXZLaserCardPanel.vue')
+    import('@proj-airi/stage-ui/components/scenes/YXZCreationWorkbench.vue'),
   )
 })
 
 function handleLaserCardStatus(status: string) {
-  if (status === 'success') {
+  if (status === 'sent') {
     laserCardPanelOpen.value = false
   }
 }
@@ -30,9 +30,10 @@ function handleLaserCardStatus(status: string) {
 
   <!-- Laser card panel -->
   <component
-    :is="YXZLaserCardPanel"
+    :is="YXZCreationWorkbench"
     v-if="laserCardPanelOpen"
     v-model:open="laserCardPanelOpen"
+    mode="laser"
     @status="handleLaserCardStatus"
   />
 

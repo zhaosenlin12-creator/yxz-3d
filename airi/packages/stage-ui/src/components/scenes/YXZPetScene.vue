@@ -14,6 +14,31 @@ import mouthTalkBUrl from '../../assets/yxz/layers/mouth_talk_b.png'
 import mouthTalkCUrl from '../../assets/yxz/layers/mouth_talk_c.png'
 import mouthWideUrl from '../../assets/yxz/layers/mouth_wide.png'
 
+const props = withDefaults(defineProps<{
+  status?: YXZPetStatus
+  speakingLevel?: number
+  paused?: boolean
+  focusAt?: { x: number, y: number }
+  xOffset?: number | string
+  yOffset?: number | string
+  scale?: number
+  message?: string
+}>(), {
+  status: 'idle',
+  speakingLevel: 0,
+  paused: false,
+  xOffset: 0,
+  yOffset: 0,
+  scale: 1,
+  message: '',
+})
+
+const emit = defineEmits<{
+  error: [error: unknown]
+}>()
+
+const WHITESPACE_RE = /\s+/g
+
 export type YXZPetStatus
   = | 'idle'
     | 'listening'
@@ -27,27 +52,6 @@ export type YXZPetStatus
 // from the pictures they belong to.
 interface LayerBox { file: string, x: number, y: number, w: number, h: number, cx: number, cy: number }
 interface RectBox { file: string, x: number, y: number, w: number, h: number }
-
-const props = withDefaults(defineProps<{
-  status?: YXZPetStatus
-  speakingLevel?: number
-  paused?: boolean
-  focusAt?: { x: number, y: number }
-  xOffset?: number | string
-  yOffset?: number | string
-  scale?: number
-}>(), {
-  status: 'idle',
-  speakingLevel: 0,
-  paused: false,
-  xOffset: 0,
-  yOffset: 0,
-  scale: 1,
-})
-
-const emit = defineEmits<{
-  error: [error: unknown]
-}>()
 
 const cut = manifest as unknown as {
   width: number
@@ -83,6 +87,15 @@ const activeLabel = computed(() => ({
   processing: '我正在生成预览和 3D 模型',
   success: '方案完成，可以继续编辑或下载',
 }[props.status]))
+// The bubble follows the answer: while the assistant is replying it shows a
+// short excerpt of what was actually said, so the visitor can read the reply
+// without moving their eyes from the character.
+const bubbleText = computed(() => {
+  const spoken = (props.message ?? '').replace(WHITESPACE_RE, ' ').trim()
+  if (!spoken)
+    return activeLabel.value
+  return spoken.length > 46 ? `${spoken.slice(0, 46)}…` : spoken
+})
 const isSpeaking = computed(() => props.status === 'speaking')
 
 const canvasContainer = ref<HTMLDivElement>()
@@ -393,7 +406,7 @@ watch(() => props.status, () => {
   <div ref="canvasContainer" class="yxz-pet-scene" :data-status="props.status" aria-label="宜小智">
     <div class="yxz-pet-bubble" role="status" aria-live="polite">
       <span class="yxz-pet-dot" />
-      <span>{{ activeLabel }}</span>
+      <span class="yxz-pet-bubble-text">{{ bubbleText }}</span>
       <span v-if="isSpeaking" class="yxz-pet-voice-dots" aria-hidden="true">
         <i /><i /><i />
       </span>
@@ -414,7 +427,7 @@ watch(() => props.status, () => {
   display: flex;
   align-items: center;
   gap: .5rem;
-  max-width: calc(100% - 2rem);
+  max-width: min(30rem, calc(100% - 2rem));
   padding: .5rem .85rem;
   border: 1px solid rgba(27, 111, 177, .22);
   border-radius: .7rem;
@@ -423,7 +436,28 @@ watch(() => props.status, () => {
   box-shadow: 0 6px 20px rgba(27, 111, 177, .12);
   font-size: .82rem;
   transform: translateX(-50%);
-  white-space: nowrap;
+}
+
+/*
+ * On wide screens the chat panel is pinned to the right half of the stage
+ * while the pet canvas keeps the full width, so a bubble centred on the
+ * canvas would slide under the chat.  Pull it back over the robot instead.
+ */
+@media (min-width: 1024px) {
+  .yxz-pet-bubble {
+    left: 30%;
+    top: 15%;
+    max-width: min(24rem, calc(52% - 2rem));
+  }
+}
+
+.yxz-pet-bubble-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  line-height: 1.35;
+  text-align: left;
 }
 
 .yxz-pet-dot {

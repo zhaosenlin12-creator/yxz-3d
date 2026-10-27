@@ -16,8 +16,6 @@ import { wlipsyncProfile } from '@proj-airi/model-driver-lipsync/shared/wlipsync
 import { createPlaybackManager, createSpeechPipeline } from '@proj-airi/pipelines-audio'
 import { Live2DScene, useLive2d } from '@proj-airi/stage-ui-live2d'
 import { ThreeScene, YXZProceduralScene, YXZRealModelScene } from '@proj-airi/stage-ui-three'
-
-import YXZPetScene from './YXZPetScene.vue'
 import { animations } from '@proj-airi/stage-ui-three/assets/vrm'
 import { createQueue } from '@proj-airi/stream-kit'
 import { useBroadcastChannel } from '@vueuse/core'
@@ -29,6 +27,7 @@ import { storeToRefs } from 'pinia'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import YXZImageScene from './YXZImageScene.vue'
+import YXZPetScene from './YXZPetScene.vue'
 import YXZPrintPreviewPanel from './YXZPrintPreviewPanel.vue'
 
 import { useDelayMessageQueue, useEmotionsMessageQueue } from '../../composables/queues'
@@ -816,6 +815,7 @@ defineExpose({
         h-full w-full flex-1
         :status="yxzInteractionStatus"
         :speaking-level="mouthOpenSize"
+        :message="assistantResponseText"
         :paused="paused"
         :focus-at="focusAt"
         :x-offset="xOffset"

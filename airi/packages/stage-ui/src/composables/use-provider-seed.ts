@@ -1,10 +1,23 @@
 import { useConsciousnessStore } from '../stores/modules/consciousness'
+import { useSpeechStore } from '../stores/modules/speech'
 import { useProvidersStore } from '../stores/providers'
 
 export interface ProviderSeedFile {
   providers?: Record<string, Record<string, unknown>>
   activeProvider?: string
   activeModel?: string
+  /**
+   * When true the seed is authoritative: its credentials replace whatever the
+   * browser still has in localStorage.  Exhibition machines are re-seeded
+   * from disk, and a stale key in localStorage would silently win over a
+   * rotated one.
+   */
+  override?: boolean
+  speech?: {
+    provider?: string
+    model?: string
+    voice?: string
+  }
 }
 
 export interface ProviderSeedResult {
@@ -61,9 +74,12 @@ export function applyProviderSeed(seed: ProviderSeedFile): ProviderSeedResult {
 
     const existing = providersStore.getProviderConfig(providerId) ?? {}
     const merged: Record<string, unknown> = { ...config }
-    for (const [key, value] of Object.entries(existing)) {
-      if (value !== '' && value !== null && value !== undefined)
-        merged[key] = value
+    if (!seed.override) {
+      // Fields the user filled in by hand always win.
+      for (const [key, value] of Object.entries(existing)) {
+        if (value !== '' && value !== null && value !== undefined)
+          merged[key] = value
+      }
     }
 
     if (JSON.stringify(merged) !== JSON.stringify(existing)) {
@@ -74,11 +90,34 @@ export function applyProviderSeed(seed: ProviderSeedFile): ProviderSeedResult {
     providersStore.markProviderAdded(providerId)
   }
 
-  if (seed.activeProvider && !consciousnessStore.activeProvider && applied.includes(seed.activeProvider))
+  const providerReady = seed.override || applied.includes(seed.activeProvider ?? '')
+  if (seed.activeProvider && providerReady && (seed.override || !consciousnessStore.activeProvider))
     consciousnessStore.activeProvider = seed.activeProvider
 
-  if (seed.activeModel && !consciousnessStore.activeModel && applied.includes(consciousnessStore.activeProvider))
+  if (seed.activeModel && providerReady && (seed.override || !consciousnessStore.activeModel))
     consciousnessStore.activeModel = seed.activeModel
+
+  // Speech (TTS) is selected independently from the chat provider, so the
+  // seed configures it separately. Only take over when nothing was chosen
+  // yet: a hand-picked voice has to survive a restart.
+  const speechSeed = seed.speech
+  if (speechSeed?.provider) {
+    const speechStore = useSpeechStore()
+    const currentProvider = speechStore.activeSpeechProvider
+    const isUnconfigured = !currentProvider || currentProvider === 'speech-noop'
+
+    if (isUnconfigured || seed.override) {
+      speechStore.activeSpeechProvider = speechSeed.provider
+      if (speechSeed.model)
+        speechStore.activeSpeechModel = speechSeed.model
+      if (speechSeed.voice)
+        speechStore.activeSpeechVoiceId = speechSeed.voice
+      applied.push(`speech:${speechSeed.provider}`)
+    }
+    else {
+      skipped.push(`speech:${speechSeed.provider}`)
+    }
+  }
 
   return { applied, skipped }
 }

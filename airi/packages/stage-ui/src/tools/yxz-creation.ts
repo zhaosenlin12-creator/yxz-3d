@@ -5,11 +5,57 @@ import { tool } from '@xsai/tool'
 import { nanoid } from 'nanoid'
 import { z } from 'zod'
 
-import { buildYXZPreviewPrompt, createYXZCartoonModel, createYXZPreview, getYXZPrintApiBase, previewImageSrc } from '../composables/use-yxz-print-preview'
+import { buildYXZPreviewPrompt, createYXZCartoonModel, createYXZLaserCard, createYXZPreview, previewImageSrc } from '../composables/use-yxz-print-preview'
 import { useYXZRequirementMemory } from '../composables/use-yxz-requirement-memory'
 import { useChatSessionStore } from '../stores/chat/session-store'
 
 const YXZ_MODEL_CONFIRMATION_RE = /生成|制作|做成|开始|确认|同意|可以|继续|好/
+
+function appendLaserCardCard(input: {
+  sessionId: string
+  svgUrl: string
+  pngUrl: string
+  frontUrl: string
+  backUrl: string
+  sizeMm: { width: number, height: number }
+  backTemplate: string
+  artworkSessionId?: string
+  artworkImageIndex?: number
+  name?: string
+  description?: string
+  hasArtwork: boolean
+}) {
+  const sessions = useChatSessionStore()
+  const sessionId = sessions.activeSessionId
+  if (!sessionId)
+    return
+
+  const messages = sessions.getSessionMessages(sessionId)
+  const existingIndex = messages.findIndex(message => message.role === 'assistant'
+    && message.yxzLaserCard?.kind === 'yxz-laser-card'
+    && message.yxzLaserCard.sessionId === input.sessionId)
+  const content = '激光切割卡片已生成：卡片正面是你的作品，背面是活动主视觉背景，可直接用 xTool 打开切割文件。'
+  const message = {
+    role: 'assistant' as const,
+    content,
+    slices: [{ type: 'text' as const, text: content }],
+    tool_results: [],
+    yxzLaserCard: {
+      kind: 'yxz-laser-card' as const,
+      ...input,
+    },
+    createdAt: Date.now(),
+    id: existingIndex >= 0 ? messages[existingIndex].id : nanoid(),
+  }
+  if (existingIndex >= 0) {
+    const next = [...messages]
+    next[existingIndex] = message
+    sessions.setSessionMessages(sessionId, next)
+  }
+  else {
+    sessions.appendSessionMessage(sessionId, message)
+  }
+}
 
 function appendCreationCard(input: {
   sessionId?: string
@@ -134,52 +180,57 @@ export async function createYXZCreationTools() {
   return Promise.all([
     tool({
       name: 'yxz_laserCard',
-      description: '宜小智专用：用户要制作激光切割名片、卡片、桌牌等平面切割物料（尤其活动名片）时调用。预制模板：背面固定活动宣传图，正面编辑姓名/职位/单位/联系方式。生成后引导用户在输入框左侧 + 号继续编辑或下载切割文件。',
+      description: '宜小智专用：用户要做激光切割卡片（活动名片 / 作品卡 / 桌牌等平面切割物料）时调用。卡片尺寸固定、背面是活动主视觉背景图，正面是用户自己的作品预览图（先用 yxz_generatePreview 生成）。请在用户已确认作品与个人信息（姓名 / 身份 / 单位 / 联系方式）之后再调用；若还没有作品预览图，先调用 yxz_generatePreview。',
       parameters: z.object({
-        name: z.string().min(1).max(12).describe('名片上的姓名'),
-        title: z.string().max(20).describe('职位，可空'),
-        unit: z.string().max(30).describe('单位或机构名，可空'),
-        contact: z.string().max(120).describe('联系方式，多行（电话/微信/邮箱），可空'),
-        slogan: z.string().max(30).describe('名片标语，默认“数理创未来 智慧启新程”'),
+        name: z.string().min(1).max(12).describe('卡片正面的姓名'),
+        title: z.string().max(20).describe('身份/职位，可空'),
+        unit: z.string().max(30).describe('学校或单位名，可空'),
+        contact: z.string().max(120).describe('联系方式（电话/微信/邮箱），可空'),
+        slogan: z.string().max(30).describe('卡片标语，默认“数理创未来 智慧启新程”'),
+        previewSessionId: z.string().max(40).describe('作品预览会话 id（yxz_generatePreview 返回的 sessionId），作为卡片正面图；没有则留空'),
+        previewImageIndex: z.number().int().min(0).max(9).describe('作品预览图序号，默认 0'),
       }).strict(),
-      execute: async ({ name, title, unit, contact, slogan }) => {
-        const base = getYXZPrintApiBase()
-        const payload = {
-          name,
-          title: title ?? '',
-          unit: unit ?? '',
-          contact: contact ?? '',
-          slogan: slogan || '数理创未来 智慧启新程',
-          theme: '#0B5FA8',
-          accent: '#F5A623',
-          bg_style: 'gradient',
-          back_template: 'activity_blue',
-          back_caption: '宜昌市第四届中小学生数理文化活动',
-          note: '',
-        }
-        let response: Response
+      execute: async ({ name, title, unit, contact, slogan, previewSessionId, previewImageIndex }) => {
+        const artworkSessionId = (previewSessionId ?? '').trim()
+        const artworkImageIndex = previewImageIndex ?? 0
+        let result: Awaited<ReturnType<typeof createYXZLaserCard>>
         try {
-          response = await fetch(`${base}/api/laser_card`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
+          result = await createYXZLaserCard({
+            sessionId: artworkSessionId ? `${artworkSessionId}_card` : undefined,
+            artworkSessionId: artworkSessionId || undefined,
+            artworkImageIndex,
+            name,
+            title,
+            unit,
+            contact,
+            slogan,
           })
         }
-        catch {
-          throw new Error('激光名片服务暂时不可用，请确认后端服务已启动，或稍后重试')
+        catch (error) {
+          throw new Error(error instanceof Error ? error.message : '激光切割卡片生成失败，请稍后重试')
         }
-        const raw: unknown = await response.json().catch(() => undefined)
-        if (!response.ok) {
-          const detail = (raw as { detail?: string })?.detail
-          throw new Error(detail || `名片生成失败（HTTP ${response.status}）`)
-        }
-        const data = raw as { session_id: string, svg_url: string, png_url: string }
+        appendLaserCardCard({
+          sessionId: result.sessionId,
+          svgUrl: result.svgUrl,
+          pngUrl: result.pngUrl,
+          frontUrl: result.frontUrl,
+          backUrl: result.backUrl,
+          sizeMm: result.sizeMm,
+          backTemplate: result.backTemplate,
+          artworkSessionId: artworkSessionId || undefined,
+          artworkImageIndex,
+          name,
+          description: [title, unit].filter(Boolean).join(' · '),
+          hasArtwork: result.hasArtwork,
+        })
         return {
           status: 'laser-card-ready',
-          sessionId: data.session_id,
-          pngUrl: `${base}${data.png_url}`,
-          svgUrl: `${base}${data.svg_url}`,
-          message: '名片已生成。请在预览确认后，点输入框左侧的 + 号打开「激光切割名片」继续编辑或生成切割文件；如需调整姓名、联系方式等内容，告诉我即可。',
+          sessionId: result.sessionId,
+          pngUrl: result.pngUrl,
+          svgUrl: result.svgUrl,
+          message: result.hasArtwork
+            ? '卡片已生成：正面是你的作品预览图，背面是活动背景。可在预览卡里下载切割 SVG、用 xTool 打开切割，或点「打开创作面板」继续编辑并产出 3D 效果。'
+            : '卡片已生成：背面是活动背景，正面是姓名信息卡。可在预览卡里下载切割 SVG 或用 xTool 打开切割；也可以先让我生成作品预览图，把作品放到卡片正面。',
         }
       },
     }),

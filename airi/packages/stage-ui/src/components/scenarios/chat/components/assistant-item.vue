@@ -5,6 +5,7 @@ import { isStageCapacitor, isStageWeb } from '@proj-airi/stage-shared'
 import { computed } from 'vue'
 
 import YXZCreationMessageCard from '../../../scenes/YXZCreationMessageCard.vue'
+import YXZLaserCardMessageCard from '../../../scenes/YXZLaserCardMessageCard.vue'
 import ChatResponsePart from './response-part.vue'
 import ChatToolCallBlock from './tool-call-block.vue'
 
@@ -54,7 +55,7 @@ const toolPending = computed(() => {
   if (props.showPlaceholder)
     return false
   const slices = props.message.slices ?? []
-  const last = slices[slices.length - 1]
+  const last = slices.at(-1)
   return !!last && last.type === 'tool-call'
 })
 const containerClass = computed(() => props.variant === 'mobile' ? 'mr-0' : 'mr-12')
@@ -63,8 +64,9 @@ const boxClasses = computed(() => [
 ])
 const copyText = computed(() => getChatHistoryItemCopyText(props.message as ChatHistoryItem))
 const creation = computed(() => props.message.yxzCreation)
+const laserCard = computed(() => props.message.yxzLaserCard)
 const isInternalTool = (toolName: string) => toolName.startsWith('builtIn_')
-const hideInternalFailure = computed(() => !creation.value
+const hideInternalFailure = computed(() => !creation.value && !laserCard.value
   && props.message.slices?.some(slice => slice.type === 'tool-call' && isInternalTool(slice.toolCall.toolName)))
 </script>
 
@@ -130,6 +132,22 @@ const hideInternalFailure = computed(() => !creation.value
             :status="creation.status"
             :progress-msg="creation.progressMsg"
             :interactive="false"
+            class="mt-3"
+          />
+          <YXZLaserCardMessageCard
+            v-if="laserCard"
+            :session-id="laserCard.sessionId"
+            :svg-url="laserCard.svgUrl"
+            :png-url="laserCard.pngUrl"
+            :front-url="laserCard.frontUrl"
+            :back-url="laserCard.backUrl"
+            :size-mm="laserCard.sizeMm"
+            :back-template="laserCard.backTemplate"
+            :artwork-session-id="laserCard.artworkSessionId"
+            :artwork-image-index="laserCard.artworkImageIndex"
+            :name="laserCard.name"
+            :description="laserCard.description"
+            :has-artwork="laserCard.hasArtwork"
             class="mt-3"
           />
         </div>

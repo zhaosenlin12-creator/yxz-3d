@@ -41,6 +41,24 @@ export interface YXZCreationPayload {
 
 export type ChatSlices = ChatSlicesText | ChatSlicesToolCall | ChatSlicesToolCallResult
 
+export interface YXZLaserCardPayload {
+  kind: 'yxz-laser-card'
+  /** Laser session that owns card.svg / card.png on the backend. */
+  sessionId: string
+  svgUrl: string
+  pngUrl: string
+  frontUrl: string
+  backUrl: string
+  sizeMm: { width: number, height: number }
+  backTemplate: string
+  /** Preview session the front artwork came from, so the studio can reopen it. */
+  artworkSessionId?: string
+  artworkImageIndex?: number
+  name?: string
+  description?: string
+  hasArtwork: boolean
+}
+
 export interface ChatAssistantMessage extends AssistantMessage {
   slices: ChatSlices[]
   tool_results: {
@@ -52,6 +70,7 @@ export interface ChatAssistantMessage extends AssistantMessage {
     reasoning: string
   }
   yxzCreation?: YXZCreationPayload
+  yxzLaserCard?: YXZLaserCardPayload
 }
 
 export type ChatMessage = ChatAssistantMessage | SystemMessage | ToolMessage | UserMessage

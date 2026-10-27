@@ -71,6 +71,10 @@ const ALIYUN_NLS_REGIONS = [
 
 type AliyunNlsRegion = typeof ALIYUN_NLS_REGIONS[number]
 
+// Hoisted so the hot paths do not re-compile the literal on every call.
+const TRAILING_SLASH_RE = /\/$/u
+const HEX_PREFIX_RE = /^0x/i
+
 export interface ProviderMetadata {
   id: string
   order?: number
@@ -309,7 +313,7 @@ export const useProvidersStore = defineStore('providers', () => {
       requiresCredentials: false,
       createProvider: async (config) => {
         const baseUrl = typeof config.baseUrl === 'string' && config.baseUrl.trim()
-          ? config.baseUrl.trim().replace(/\/$/u, '')
+          ? config.baseUrl.trim().replace(TRAILING_SLASH_RE, '')
           : 'http://127.0.0.1:17493'
         const defaultProfileId = typeof config.profileId === 'string' ? config.profileId.trim() : ''
         const modelSize = config.modelSize === '0.6B' ? '0.6B' : '1.7B'
@@ -374,7 +378,7 @@ export const useProvidersStore = defineStore('providers', () => {
         ],
         listVoices: async (config) => {
           const baseUrl = typeof config.baseUrl === 'string' && config.baseUrl.trim()
-            ? config.baseUrl.trim().replace(/\/$/u, '')
+            ? config.baseUrl.trim().replace(TRAILING_SLASH_RE, '')
             : 'http://127.0.0.1:17493'
           const response = await fetch(`${baseUrl}/profiles`)
           if (!response.ok)
@@ -1393,7 +1397,7 @@ export const useProvidersStore = defineStore('providers', () => {
         const speechBaseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
 
         function hexToBytes(hex: string): Uint8Array {
-          const normalizedHex = hex.trim().replace(/^0x/i, '')
+          const normalizedHex = hex.trim().replace(HEX_PREFIX_RE, '')
           if (normalizedHex.length % 2 !== 0)
             throw new Error('Invalid MiniMax audio hex payload')
 
@@ -2237,6 +2241,12 @@ export const useProvidersStore = defineStore('providers', () => {
       }
 
       const loop = useIntervalFn(() => {
+        // Same rule as the initial sweep: only re-validate providers the
+        // visitor actually uses, otherwise every tick re-probes the local
+        // inference servers that are not running.
+        if (!shouldListProvider(providerId))
+          return
+
         void validateProvider(providerId, { force: true })
       }, intervalMs, { immediate: false, immediateCallback: false })
       loop.resume()
@@ -2247,8 +2257,12 @@ export const useProvidersStore = defineStore('providers', () => {
   // Update configuration status for all configured providers
   async function updateConfigurationStatus() {
     await Promise.all(Object.entries(providerMetadata)
-      // TODO: ignore un-configured provider
-      // .filter(([_, provider]) => provider.configured)
+      // Only providers the visitor (or the local seed) actually added are
+      // worth validating.  Upstream validated every registered provider, so a
+      // stock install kept polling LM Studio / Ollama / Voicebox on every
+      // start; those failures are pure console noise on an exhibition
+      // machine and they slow the first paint down.
+      .filter(([providerId]) => shouldListProvider(providerId))
       .map(async ([providerId]) => {
         try {
           if (providerRuntimeState.value[providerId]) {
@@ -2262,6 +2276,12 @@ export const useProvidersStore = defineStore('providers', () => {
           }
         }
       }))
+
+    // Providers that were never added stay unconfigured on purpose.
+    for (const [providerId, state] of Object.entries(providerRuntimeState.value)) {
+      if (!shouldListProvider(providerId))
+        state.isConfigured = false
+    }
   }
 
   // Call initially and watch for changes
@@ -2397,7 +2417,15 @@ export const useProvidersStore = defineStore('providers', () => {
 
   // Load models for all configured providers
   async function loadModelsForConfiguredProviders() {
+    // Only providers the visitor (or the local seed) actually added are worth
+    // probing.  The connectivity validator treats any HTTP status below 500
+    // as "reachable", so untouched local providers such as LM Studio or
+    // Ollama would otherwise be polled on every start and their failures show
+    // up as console noise.
     for (const providerId of availableProviders.value) {
+      if (!shouldListProvider(providerId))
+        continue
+
       if (providerMetadata[providerId].capabilities.listModels) {
         await fetchModelsForProvider(providerId)
       }
@@ -2425,7 +2453,7 @@ export const useProvidersStore = defineStore('providers', () => {
       void disposeProviderInstance(providerId)
 
       // If the provider is configured and has the capability, refetch its models
-      if (providerRuntimeState.value[providerId]?.isConfigured && providerMetadata[providerId]?.capabilities.listModels) {
+      if (providerRuntimeState.value[providerId]?.isConfigured && shouldListProvider(providerId) && providerMetadata[providerId]?.capabilities.listModels) {
         fetchModelsForProvider(providerId)
       }
     }
