@@ -14,12 +14,14 @@ deepseek-key:
 
 # ---- 生图（aixj 首选，minimax / jojo 备用）----
 # 生成 3D 摇件的预览图；全空则回退到本地 SD 1.5
+# 注意：生图 key 必须以 sk- 开头（后端按 sk- 前缀识别）
 aixj-image-key:
 minimax-image-key:
 jojo-image-key:
 
 # ---- 3D 云端生成（Tripo 首选，混元 3D 备用）----
 # 全空则回退到本地 Hunyuan3D-2 mini / TripoSR
+# 注意：Tripo 的值必须以 tsk_ 开头（后端按 tsk_ 前缀识别）
 TRIPO:
 hunyuan3d-secret-id:
 hunyuan3d-secret-key:
