@@ -1331,6 +1331,82 @@ def to_3d_tripo(req: ThreeDTripoReq):
     }
 
 
+class ThreeDHYCloudReq(BaseModel):
+    model_config = {"protected_namespaces": ()}
+    session_id: str
+    image_index: int = 0
+    target_height_mm: float = 70.0
+    model: str = "3.1"
+    enable_pbr: bool = True
+    face_count: int = 500000
+
+
+@app.post("/api/3d_hycloud")
+def to_3d_hycloud(req: ThreeDHYCloudReq):
+    """Tencent Cloud Hunyuan3D 专业版 (fallback between Tripo3D and local).
+
+    Pipeline: submit image job -> poll until DONE -> download COS zip ->
+    pick .glb -> clean/scale for print.
+    """
+    import hunyuan_cloud_api as hyc
+    keys = hyc.health()
+    if not keys["key_loaded"]:
+        raise HTTPException(503, "混元3D 密钥未配置（keys.txt 需要 hunyuan3d-secret-id / -key）")
+    pg = progress.Progress(req.session_id, "3d-hunyuan-cloud")
+    sd = session_dir(req.session_id)
+    src = os.path.join(sd, "previews", f"img_{req.image_index}.png")
+    if not os.path.isfile(src):
+        raise HTTPException(404, "preview not found")
+    out = os.path.join(sd, "model")
+    os.makedirs(out, exist_ok=True)
+
+    def on_poll(resp):
+        try:
+            status = str(resp.get("Status", "")).upper()
+            credits = resp.get("ResultCreditConsumed")
+            msg = f"混元3D 云端生成中（{status}）"
+            if credits:
+                msg += f"，已消耗 {credits} 积分"
+            pg.emit(f"hunyuan3d-{status.lower()}", 50, msg)
+        except Exception:
+            pass
+
+    t0 = time.time()
+    try:
+        result = hyc.image_to_model(
+            src, out,
+            model=req.model,
+            enable_pbr=req.enable_pbr,
+            face_count=req.face_count,
+            max_wait=420.0,
+            target_height_mm=req.target_height_mm,
+        )
+    except Exception as e:
+        traceback.print_exc()
+        pg.fail(f"混元3D 云端失败: {e}")
+        raise HTTPException(500, {"error": f"hunyuan3d-cloud error: {e}", "engine": "hunyuan3d-cloud"})
+    faces = int(result.get("faces", 0))
+    ext = result.get("extents_mm", "0,0,0")
+    if isinstance(ext, list):
+        ext_str = ",".join(str(x) for x in ext[:3])
+    else:
+        ext_str = str(ext)
+    pg.done(f"混元3D 云端完成 ({faces} 面)")
+    return {
+        "session_id": req.session_id,
+        "engine": "hunyuan3d-cloud",
+        "job_id": result.get("job_id"),
+        "credits_consumed": result.get("credits_consumed"),
+        "model_url": f"/api/data/{req.session_id}/model/mesh.glb",
+        "stl_url": f"/api/data/{req.session_id}/model/mesh.stl",
+        "obj_url": f"/api/data/{req.session_id}/model/mesh.obj",
+        "faces": faces,
+        "vertices": result.get("vertices", 0),
+        "extents_mm": ext_str,
+        "elapsed_s": round(time.time() - t0, 1),
+    }
+
+
 @app.get("/api/bambu")
 def bambu_status():
     p = bambu.find_bambu_path()
