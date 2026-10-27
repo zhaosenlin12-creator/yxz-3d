@@ -32,6 +32,8 @@ const props = withDefaults(defineProps<{
   speakingLevel?: number
   paused?: boolean
   src?: string
+  // Latest chat message to display as keyword summary in the speech bubble
+  chatMessage?: string
   // Where the stage wants the character to sit.
   //
   // The home page floats the chat column over the right half of the
@@ -48,6 +50,7 @@ const props = withDefaults(defineProps<{
   speakingLevel: 0,
   paused: false,
   src: yxzVrmUrl,
+  chatMessage: '',
   xOffset: 0,
   yOffset: 0,
   scale: 1,
@@ -59,14 +62,55 @@ const emit = defineEmits<{
 
 const componentState = defineModel<'pending' | 'loading' | 'mounted'>('state', { default: 'pending' })
 const canvasContainer = ref<HTMLDivElement>()
-const activeLabel = computed(() => ({
-  idle: '你好，我是宜小智，想做什么？',
-  listening: '我在认真听你的想法',
-  thinking: '我正在理解并整理方案',
-  speaking: '我来向你介绍这份方案',
-  processing: '我正在生成预览和 3D 模型',
-  success: '方案完成，可以继续编辑或下载',
-}[props.status]))
+
+// Extract keywords from chat message for speech bubble display
+function extractKeywords(message: string, maxLength: number = 20): string {
+  if (!message || message.trim().length === 0) return ''
+
+  const cleaned = message.trim()
+
+  // If message is short enough, return as is
+  if (cleaned.length <= maxLength) return cleaned
+
+  // Define high-priority keywords to preserve
+  const priorityKeywords = [
+    '激光', '切割', '名片', '3D', '打印', '模型', '生成', '创作',
+    '设计', '编辑', '下载', '预览', '上传', '图片', '语音',
+    '宜小智', 'YCSL', '活动', '数理', '智慧'
+  ]
+
+  // Extract priority keywords if present
+  const foundKeywords = priorityKeywords.filter(kw => cleaned.includes(kw))
+
+  if (foundKeywords.length > 0) {
+    // Return up to 3 keywords
+    const keywords = foundKeywords.slice(0, 3).join('·')
+    return keywords.length <= maxLength ? keywords : keywords.substring(0, maxLength - 1) + '…'
+  }
+
+  // Fall back to truncating the message
+  return cleaned.substring(0, maxLength - 1) + '…'
+}
+
+const activeLabel = computed(() => {
+  // If there's a chat message and we're thinking/processing/speaking, show keywords
+  if (props.chatMessage && ['thinking', 'processing', 'speaking'].includes(props.status)) {
+    const keywords = extractKeywords(props.chatMessage, 25)
+    if (keywords) {
+      return keywords
+    }
+  }
+
+  // Otherwise show status labels
+  return {
+    idle: '你好，我是宜小智，想做什么？',
+    listening: '我在认真听你的想法',
+    thinking: '我正在理解并整理方案',
+    speaking: '我来向你介绍这份方案',
+    processing: '我正在生成预览和 3D 模型',
+    success: '方案完成，可以继续编辑或下载',
+  }[props.status]
+})
 const isSpeaking = computed(() => props.status === 'speaking')
 
 let renderer: THREE.WebGLRenderer | undefined
