@@ -1818,17 +1818,9 @@ const LIFE_ACTIONS: LifeAction[] = [
   // A small nod to nobody.  Kept short and kept rare; a nod that happens
   // every few seconds is a tic, and a nod that happens every half minute
   // is a person.
-  {
-    kind: 'nod',
-    channels: [
-      { bone: 'head', axis: 0, deg: 1.4 },
-    ],
-    dur: 2.2,
-    lead: 0.16,
-    hold: 0.08,
-    gaze: 0.2,
-    weight: 0.45,
-  },
+  // NOTE (2026-10-27): head-driven gestures (nod / headTilt) are disabled —
+  // they risk chin/face distortion on some rigs. Only non-face decorations
+  // (wings, halo) and authored body weight-shift remain active.
   {
     kind: 'wingFlick',
     channels: [
@@ -1853,36 +1845,9 @@ const LIFE_ACTIONS: LifeAction[] = [
     gaze: 0,
     weight: 0.6,
   },
-  // A small deliberate tilt of the head.
-  //
-  // The head's three axes belong to the attention model, which holds
-  // where it points rather than sweeping back to the middle -- and a
-  // head that comes back to the middle every few seconds is a
-  // metronome.  This one is different in the way that matters: it is
-  // rare, it is small, and it does not come back to the middle, it
-  // comes back to where it was, which is a correction rather than a
-  // look.  A tilt that holds for a moment and then straightens up is
-  // one of the most human things a standing figure does.
-  {
-    kind: 'headTilt',
-    channels: [
-      { bone: 'head', axis: 2, deg: 0.9 },
-      // The nod under the tilt.
-      //
-      // A tilt on its own is a degree of roll with no pitch anywhere
-      // near it, and one of those every half minute is enough to pull
-      // the head's two channels apart again -- which is the one thing
-      // this whole layer is trying to stop.  The reference's head
-      // never separates them, and a nod under the tilt is what she
-      // does instead.
-      { bone: 'head', axis: 0, deg: 0.45 },
-    ],
-    dur: 3.0,
-    lead: 0.2,
-    hold: 0.26,
-    gaze: 0.1,
-    weight: 0.5,
-  },
+  // A small deliberate tilt of the head.  Disabled for the same
+  // non-distortion reason as nod (see above): the head's only motion in
+  // this build is the micro-drift and the authored body weight-shift.
 ]
 
 // Which movements suit which state.
@@ -1895,37 +1860,25 @@ const LIFE_ACTIONS: LifeAction[] = [
 const LIFE_ACTION_BIAS: Record<YXZStatus, Record<string, number>> = {
   idle: {
     haloSettle: 1.2,
-    nod: 0.3,
-    headTilt: 0.55,
     wingFlick: 0.5,
   },
   listening: {
-    nod: 2.4,
-    headTilt: 0.8,
     wingFlick: 0.4,
   },
   thinking: {
-    headTilt: 0.6,
     haloSettle: 0.9,
-    nod: 0.25,
   },
   processing: {
     wingFlick: 1.6,
     haloSettle: 0.8,
-    headTilt: 0.5,
-    nod: 0.6,
   },
   speaking: {
-    nod: 1.9,
     haloSettle: 0.8,
-    headTilt: 0.5,
     wingFlick: 0.6,
   },
   success: {
     wingFlick: 2,
-    headTilt: 0.5,
     haloSettle: 0.9,
-    nod: 0.6,
   },
 }
 
@@ -2096,7 +2049,7 @@ const ATTENTION_SHAPE: Record<YXZStatus, {
   pitchBias: number
   rest: number
 }> = {
-  idle: { scale: 1, recentre: 0.18, dwell: 1, pitchBias: -0.1, rest: -0.1 },
+  idle: { scale: 0.35, recentre: 0.18, dwell: 1, pitchBias: -0.1, rest: -0.1 },
   listening: { scale: 0.72, recentre: 0.42, dwell: 0.85, pitchBias: -0.25, rest: -0.7 },
   thinking: { scale: 0.78, recentre: 0.16, dwell: 1.75, pitchBias: 1.5, rest: 2.3 },
   processing: { scale: 0.82, recentre: 0.3, dwell: 1.3, pitchBias: 0.9, rest: 1.4 },
@@ -3181,10 +3134,10 @@ interface HeadGestureSpec {
 }
 
 const HEAD_GESTURES: HeadGestureSpec[] = [
-  { kind: 'nod', pitch: [-0.9, -0.45], yaw: [0, 0.2], roll: [0, 0], follow: 0.75, sign: [], dur: [0.4, 0.68], weight: 1.1 },
-  { kind: 'lift', pitch: [0.4, 0.8], yaw: [0, 0.2], roll: [0, 0], follow: 0.75, sign: [], dur: [0.45, 0.72], weight: 0.7 },
-  { kind: 'tilt', pitch: [-0.25, 0.25], yaw: [0, 0.25], roll: [0.45, 0.9], follow: 0, sign: ['roll'], dur: [0.5, 0.78], weight: 0.9 },
-  { kind: 'glance', pitch: [-0.2, 0.2], yaw: [0.22, 0.5], roll: [-0.15, 0.15], follow: 0, sign: ['yaw'], dur: [0.45, 0.72], weight: 0.8 },
+  // NOTE (2026-10-27): all head gestures disabled — head-driven motion
+  // (nod / lift / tilt / glance) risks chin/face distortion on this rig.
+  // The head's only remaining motion is the attention micro-drift and the
+  // authored body weight-shift.
 ]
 
 interface HeadGesture {

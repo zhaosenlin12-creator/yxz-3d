@@ -273,14 +273,51 @@ def detect_software() -> list[dict[str, Any]]:
     return tools
 
 
-def open_export(executable: str, file_path: str) -> dict[str, Any]:
-    """Open an export in a selected application, without printing/cutting."""
+def open_export(executable: str, file_path: str, tool_id: str = "") -> dict[str, Any]:
+    """Open an export in a selected application, without printing/cutting.
+
+    ``tool_id`` selects the launch strategy:
+
+    * cli   – the app accepts the file as a positional argument (Orca,
+              PrusaSlicer, Cura, Blender, LightBurn, LaserGRBL). The file is
+              loaded directly into the app.
+    * manual – Bambu Studio and xTool Studio ignore file arguments (verified
+              on 2026-10-27). For them we start the app, then reveal the file
+              in Explorer (`explorer /select,`) so the user can drag it in or
+              paste the copied path in the app's import dialog. The path is
+              also returned so the UI can copy it to the clipboard.
+    """
     if not executable or not os.path.isfile(executable):
         raise FileNotFoundError("所选软件未安装或路径已失效")
     if not file_path or not os.path.isfile(file_path):
         raise FileNotFoundError("导出文件还没有生成")
+    no_cli = {"bambu", "xtool"}
+    method = "manual" if tool_id in no_cli else "cli"
+    if method == "cli":
+        try:
+            process = subprocess.Popen([executable, file_path], close_fds=True)
+        except OSError as exc:
+            raise RuntimeError(f"打开软件失败：{exc}") from exc
+        return {
+            "ok": True, "pid": process.pid, "executable": executable, "file": file_path,
+            "method": method,
+            "message": "已打开软件并加载文件，请确认参数后继续。",
+        }
+    # manual: start the app, then reveal the file for drag-in / paste.
     try:
-        process = subprocess.Popen([executable, file_path], close_fds=True)
+        subprocess.Popen([executable], close_fds=True)
     except OSError as exc:
         raise RuntimeError(f"打开软件失败：{exc}") from exc
-    return {"ok": True, "pid": process.pid, "executable": executable, "file": file_path}
+    folder = os.path.dirname(file_path)
+    revealed = False
+    if os.path.isdir(folder):
+        try:
+            subprocess.Popen(["explorer", "/select,", file_path], close_fds=True)
+            revealed = True
+        except OSError:
+            revealed = False
+    return {
+        "ok": True, "executable": executable, "file": file_path,
+        "method": method, "revealed": revealed,
+        "message": "软件已打开。该软件不支持命令行自动导入文件，已为您定位文件并复制路径：请在软件中点击导入/上传后粘贴路径（或直接拖入）。",
+    }

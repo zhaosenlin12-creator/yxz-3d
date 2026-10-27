@@ -1738,8 +1738,8 @@ def software_open(req: SoftwareOpenReq):
                     f"{tool['name']} 的自定义路径已失效，请在交付面板里修正路径或恢复自动检测"
                 )
             raise FileNotFoundError("所选软件未检测到，请在交付面板里确认安装路径")
-        result = software_integrations.open_export(tool["path"], candidate)
-        return {"message": f"已在 {tool['name']} 中打开，接下来请在软件内确认参数", "tool": tool, **result}
+        result = software_integrations.open_export(tool["path"], candidate, tool["id"])
+        return {"message": result.get("message", f"已在 {tool['name']} 中打开"), "tool": tool, **result}
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except RuntimeError as exc:

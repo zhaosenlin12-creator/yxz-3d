@@ -214,18 +214,35 @@ async function openInSoftware(tool: Awaited<ReturnType<typeof detectYXZLocalSoft
     return
   openingSoftwareId.value = tool.id
   softwareMessage.value = ''
+  softwareLoading.value = true
   try {
-    await openYXZExportInSoftware({
+    const resp = await openYXZExportInSoftware({
       softwareId: tool.id,
       sessionId: result.value.sessionId,
       format: tool.kind === 'laser' ? 'svg' : 'png',
     })
-    softwareMessage.value = `已打开 ${tool.name}，请在软件内确认参数后切割`
+    const data = (resp as any)?.data ?? (resp as any)
+    const method = data?.method
+    if (method === 'manual') {
+      // Bambu/xTool ignore CLI file args: reveal the file and copy its path
+      const filePath = data?.file
+      if (filePath) {
+        try {
+          await navigator.clipboard.writeText(filePath)
+        }
+        catch { /* clipboard unavailable – message below still guides */ }
+      }
+      softwareMessage.value = data?.message || `已打开 ${tool.name}；该软件需手动导入，文件路径已复制（或已选中），请在软件内点导入/上传后粘贴或拖入。`
+    }
+    else {
+      softwareMessage.value = data?.message || `已打开 ${tool.name} 并加载文件，请确认参数后切割`
+    }
   }
   catch (error) {
     softwareMessage.value = error instanceof Error ? error.message : '打开软件失败'
   }
   finally {
+    softwareLoading.value = false
     openingSoftwareId.value = undefined
   }
 }

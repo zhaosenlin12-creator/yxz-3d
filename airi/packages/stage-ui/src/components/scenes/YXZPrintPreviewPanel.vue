@@ -230,15 +230,30 @@ async function openInLocalSoftware(tool: Awaited<ReturnType<typeof detectYXZLoca
     return
   openingSoftwareId.value = tool.id
   softwareMessage.value = ''
+  softwareLoading.value = true
   try {
     const format = tool.kind === 'laser' ? 'png' : (tool.kind === '3d-edit' ? 'glb' : 'stl')
-    await openYXZExportInSoftware({ softwareId: tool.id, sessionId: sessionId.value, format })
-    softwareMessage.value = `已打开 ${tool.name}，请在软件内检查参数后再打印或切割`
+    const resp = await openYXZExportInSoftware({ softwareId: tool.id, sessionId: sessionId.value, format })
+    const data = (resp as any)?.data ?? (resp as any)
+    if (data?.method === 'manual') {
+      const filePath = data?.file
+      if (filePath) {
+        try {
+          await navigator.clipboard.writeText(filePath)
+        }
+        catch { /* clipboard unavailable */ }
+      }
+      softwareMessage.value = data?.message || `已打开 ${tool.name}；该软件需手动导入，文件路径已复制，请在软件内导入后粘贴路径。`
+    }
+    else {
+      softwareMessage.value = data?.message || `已打开 ${tool.name} 并加载模型，请确认参数后再打印或切割`
+    }
   }
   catch (error) {
     softwareMessage.value = error instanceof Error ? error.message : '打开软件失败'
   }
   finally {
+    softwareLoading.value = false
     openingSoftwareId.value = undefined
   }
 }
