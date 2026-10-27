@@ -65,6 +65,8 @@ if (Want 'sd') {
     # diffusers 结构配置（模型_index / unet / vae / text_encoder / tokenizer / scheduler）
     $cfgFiles = @(
         'model_index.json',
+        'feature_extractor/preprocessor_config.json',
+        'safety_checker/config.json',
         'scheduler/scheduler_config.json',
         'text_encoder/config.json',
         'tokenizer/merges.txt',

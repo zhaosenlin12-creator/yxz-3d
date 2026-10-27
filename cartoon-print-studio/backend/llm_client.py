@@ -40,6 +40,8 @@ def _classify_keys_from_file():
       minimax* / sk-cp-...            -> MiniMax
       deepseek*                       -> DeepSeek
     Keys without a label that look like sk-cp- go to MiniMax as before.
+    Labels that mark an image provider (contains 'image' / '生图') are
+    skipped: an image key must never be sent to a chat endpoint.
     """
     if not os.path.isfile(_KEYFILE):
         return
@@ -63,6 +65,10 @@ def _classify_keys_from_file():
             key = line.strip()
             label = ""
         if not key:
+            continue
+        # 生图 provider 的 key（aixj / minimax-image / jojo-image …）绝不能
+        # 发到对话端点，否则只会拿到 1004/401 白跑一次。
+        if "image" in label or "生图" in label:
             continue
         if "deepseek" in (label or "") or (not label and key.startswith("sk-f")):
             if key not in DEEPSEEK_API_KEYS:

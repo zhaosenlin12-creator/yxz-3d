@@ -1,0 +1,14 @@
+{
+  "providers": {
+    "minimax": {
+      "apiKey": "",
+      "baseUrl": "https://api.minimaxi.com/v1/"
+    },
+    "deepseek": {
+      "apiKey": "",
+      "baseUrl": "https://api.deepseek.com/"
+    }
+  },
+  "activeProvider": "minimax",
+  "activeModel": "MiniMax-M2.7"
+}

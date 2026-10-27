@@ -155,6 +155,9 @@ cartoon-print-studio/keys.txt
 !**/keys.txt.example
 !**/keys.example.txt
 
+# Frontend provider seed (holds browser-side LLM keys, local only)
+airi/apps/stage-web/public/provider-seed.json
+
 
 # Large 3D preset assets are shipped inside the release zip, not the git repo
 presets/models

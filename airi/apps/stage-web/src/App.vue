@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { OnboardingDialog, OnboardingStepAnalyticsNotice, ToasterRoot } from '@proj-airi/stage-ui/components'
+import { applyProviderSeedFromFile } from '@proj-airi/stage-ui/composables/use-provider-seed'
+import { ensureYXZProactiveIntro } from '@proj-airi/stage-ui/composables/use-yxz-proactive-intro'
 import { isPosthogAvailableInBuild, useSharedAnalyticsStore } from '@proj-airi/stage-ui/stores/analytics'
 import { useCharacterOrchestratorStore } from '@proj-airi/stage-ui/stores/character'
 import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
@@ -9,7 +11,6 @@ import { useContextBridgeStore } from '@proj-airi/stage-ui/stores/mods/api/conte
 import { useAiriCardStore } from '@proj-airi/stage-ui/stores/modules/airi-card'
 import { useOnboardingStore } from '@proj-airi/stage-ui/stores/onboarding'
 import { useSettings, useSettingsAudioDevice } from '@proj-airi/stage-ui/stores/settings'
-import { ensureYXZProactiveIntro } from '@proj-airi/stage-ui/composables/use-yxz-proactive-intro'
 import { useTheme } from '@proj-airi/ui'
 import { StageTransitionGroup } from '@proj-airi/ui-transitions'
 import { storeToRefs } from 'pinia'
@@ -84,6 +85,10 @@ onMounted(async () => {
   analyticsStore.initialize()
   await displayModelsStore.initialize()
   cardStore.initialize()
+
+  // Optional local provider seed (public/provider-seed.json, git-ignored).
+  // Lets the app talk to the LLM out of the box without the setup dialog.
+  await applyProviderSeedFromFile()
 
   if (onboardingStore.needsOnboarding) {
     onboardingStore.showingSetup = true
