@@ -379,6 +379,9 @@ async function startListening() {
           hasSpeechRecognition: typeof window !== 'undefined' && 'SpeechRecognition' in window,
         })
         isListening.value = false
+        toast.error('语音输入不可用', {
+          description: '当前浏览器不支持语音识别，请使用 Chrome 或 Edge 浏览器（或检查浏览器设置中的麦克风权限）。',
+        })
         return
       }
     }
@@ -399,6 +402,9 @@ async function startListening() {
         catch {
           console.error('[ChatArea] Timed out waiting for audio stream.')
           isListening.value = false
+          toast.error('麦克风启动超时', {
+            description: '请在浏览器地址栏左侧允许麦克风权限后重试。',
+          })
           return
         }
       }
@@ -408,6 +414,9 @@ async function startListening() {
       const errorMsg = 'Failed to get audio stream for transcription. Please check microphone permissions and ensure a device is selected.'
       console.error('[ChatArea]', errorMsg)
       isListening.value = false
+      toast.error('无法使用麦克风', {
+        description: '请点击浏览器地址栏的麦克风图标，允许本页使用麦克风，再重试。',
+      })
       return
     }
 
@@ -418,6 +427,9 @@ async function startListening() {
       // Clean up any existing sessions from other pages (e.g., test page) that might interfere
       await stopStreamingTranscription(true)
       isListening.value = false
+      toast.error('语音识别服务未就绪', {
+        description: '请尝试刷新页面后重试；仍不行时在 Chrome/Edge 浏览器中使用。',
+      })
       return
     }
 
@@ -462,6 +474,9 @@ async function startListening() {
   catch (err) {
     console.error('[ChatArea] Failed to start transcription:', err)
     isListening.value = false
+    toast.error('语音识别启动失败', {
+      description: '请检查麦克风权限与设备选择后重试。',
+    })
   }
 }
 

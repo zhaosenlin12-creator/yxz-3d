@@ -164,6 +164,18 @@ watch([stream, () => vadLoaded.value], async ([s, loaded]) => {
         <Header class="hidden md:flex" />
         <MobileHeader class="flex md:hidden" />
       </div>
+      <!-- 活动标题层（DOM 渲染，任何分辨率都不贴边、不越界） -->
+      <div class="stage-title-layer">
+        <div class="stage-title-brand">
+          <span class="stage-brand-mark">YCSL</span>
+          <span class="stage-brand-slogan">数理创未来·智慧启新程</span>
+        </div>
+        <div class="stage-title-block">
+          <h1 class="stage-title-line-1">宜昌市第四届中小学生数理文化活动</h1>
+          <h2 class="stage-title-line-2">暨人工智能教育成果交流研讨会</h2>
+        </div>
+        <div class="stage-title-year">2026</div>
+      </div>
       <!-- page -->
       <div relative flex="~ 1 row gap-y-0 gap-x-2 <md:col">
         <WidgetStage
@@ -184,6 +196,90 @@ watch([stream, () => vadLoaded.value], async ([s, loaded]) => {
     </div>
   </BackgroundProvider>
 </template>
+
+<style scoped>
+/* 活动标题层：DOM 文字叠加在无字背景之上，居中排布、安全边距充足 */
+.stage-title-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.stage-title-block {
+  position: absolute;
+  top: 4.5vh;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6vh;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.stage-title-line-1 {
+  margin: 0;
+  color: #f4f9ff;
+  font-size: clamp(20px, 2.7vw, 46px);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-shadow: 0 2px 14px rgba(6, 24, 52, 0.55), 0 0 30px rgba(80, 170, 255, 0.25);
+}
+
+.stage-title-line-2 {
+  margin: 0;
+  color: #cfe6ff;
+  font-size: clamp(14px, 1.6vw, 28px);
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-shadow: 0 1px 10px rgba(6, 24, 52, 0.5);
+}
+
+.stage-title-brand {
+  position: absolute;
+  top: 5vh;
+  left: 2.5vw;
+  display: flex;
+  align-items: center;
+  gap: 0.8vw;
+}
+
+.stage-brand-mark {
+  color: #ffffff;
+  font-size: clamp(13px, 1.15vw, 22px);
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-shadow: 0 1px 8px rgba(6, 24, 52, 0.6);
+}
+
+.stage-brand-slogan {
+  color: #bfe0ff;
+  font-size: clamp(11px, 0.95vw, 17px);
+  letter-spacing: 0.1em;
+  text-shadow: 0 1px 6px rgba(6, 24, 52, 0.55);
+}
+
+.stage-title-year {
+  position: absolute;
+  top: 4.5vh;
+  right: 2.5vw;
+  color: #e2f0ff;
+  font-size: clamp(18px, 2.2vw, 38px);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-shadow: 0 2px 10px rgba(6, 24, 52, 0.5);
+}
+
+@media (max-width: 900px) {
+  .stage-title-block { top: 3.5vh; }
+  .stage-title-line-1 { font-size: clamp(16px, 4.4vw, 26px); }
+  .stage-title-line-2 { font-size: clamp(12px, 3vw, 17px); }
+  .stage-brand-slogan { display: none; }
+  .stage-title-year { top: 3.5vh; }
+}
+</style>
 
 <route lang="yaml">
 name: IndexScenePage

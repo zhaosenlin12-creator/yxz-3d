@@ -496,10 +496,15 @@ function actionNameForStatus(status: YXZStatus) {
     return 'YXZ_Thinking'
   if (status === 'listening')
     return 'YXZ_Listening'
-  if (status === 'speaking')
-    return 'YXZ_Speaking'
   if (status === 'success')
     return 'YXZ_Success'
+  // Speaking keeps the body on the quiet idle pose: the mouth is the actor
+  // while talking.  The authored speaking clip moves the head and jaw on
+  // bones the auto-generated skin weights are weakest around, which reads
+  // as distortion on the lower-left jaw; the idle pose is gentle, and the
+  // viseme morphs carry the speech on top of it.
+  if (status === 'speaking')
+    return 'YXZ_Idle'
   return 'YXZ_Idle'
 }
 
@@ -1944,7 +1949,7 @@ const LIFE_STATE_WEIGHT: Record<YXZStatus, number> = {
   listening: 0.85,
   thinking: 0.72,
   processing: 0.72,
-  speaking: 0.5,
+  speaking: 0.28,
   success: 0.55,
 }
 
@@ -1958,7 +1963,7 @@ const ATTENTION_GAIN: Record<YXZStatus, number> = {
   listening: 0.92,
   thinking: 0.95,
   processing: 0.9,
-  speaking: 0.72,
+  speaking: 0.3,
   success: 0.85,
 }
 
@@ -4051,9 +4056,11 @@ function updateVisemes(delta: number, phase: number) {
   const measured = THREE.MathUtils.clamp(props.speakingLevel, 0, 1)
   if (speaking) {
     visemeClock += delta
-    // Roughly one vowel per 150ms reads as speech without buzzing.
-    if (visemeClock >= 0.15) {
-      visemeClock -= 0.15
+    // Roughly one vowel per 200ms reads as speech without buzzing.  Slower
+    // than the original 150ms: the auto-generated mouth morphs are small,
+    // and a fast cycle on top of the quiet body pose reads as fidgeting.
+    if (visemeClock >= 0.2) {
+      visemeClock -= 0.2
       visemeIndex = (visemeIndex + 1) % VISEMES.length
     }
   }
@@ -4064,7 +4071,10 @@ function updateVisemes(delta: number, phase: number) {
     : 0
   const smoothing = 1 - Math.exp(-delta * 18)
   mouthEnvelope = THREE.MathUtils.lerp(mouthEnvelope, target, smoothing)
-  const weight = mouthEnvelope > 0.12 ? THREE.MathUtils.clamp(mouthEnvelope, 0, 1) : 0
+  // Cap the morph weight well below full: the generated viseme shapes move
+  // the whole lower face region and at weight 1.0 they read as distortion.
+  // 0.45 keeps the mouth readable as speech without the jaw looking pulled.
+  const weight = mouthEnvelope > 0.12 ? THREE.MathUtils.clamp(mouthEnvelope * 0.45, 0, 0.45) : 0
   VISEMES.forEach((name, index) => {
     manager.setValue(name, index === visemeIndex ? weight : 0)
   })
