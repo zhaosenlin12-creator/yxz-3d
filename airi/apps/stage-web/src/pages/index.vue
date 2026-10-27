@@ -179,17 +179,18 @@ watch([stream, () => vadLoaded.value], async ([s, loaded]) => {
       <!-- page -->
       <div relative flex="~ 1 row gap-y-0 gap-x-2 <md:col">
         <WidgetStage
+          style="--yxz-bubble-top: 12%; margin-left: 2vw"
           flex-1 min-w="1/2"
           :paused="paused"
           :focus-at="{
             x: positionCursor.x.value,
             y: positionCursor.y.value,
           }"
-          :x-offset="`${isMobile ? position.x : position.x - 10}%`"
+          :x-offset="`${isMobile ? position.x : position.x - 16}%`"
           :y-offset="positionInPercentageString.y"
           :scale="scale"
         />
-        <InteractiveArea v-if="!isMobile" h="85dvh" absolute right-4 flex flex-1 flex-col max-w="500px" min-w="30%" />
+        <InteractiveArea v-if="!isMobile" h="85dvh" absolute right-3 flex flex-1 flex-col max-w="640px" min-w="32%" />
         <MobileInteractiveArea v-if="isMobile" @settings-open="handleSettingsOpen" />
       </div>
       <HoloCoupon />

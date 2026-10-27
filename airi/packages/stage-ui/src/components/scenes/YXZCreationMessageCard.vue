@@ -110,6 +110,7 @@ async function copyPreviewAddress() {
     <div v-if="status === 'model-building'" class="yxz-creation-card-building">
       <span class="yxz-creation-card-building-dot" />
       <span>{{ progressMsg || '正在制作 3D 模型，请耐心等待…' }}</span>
+      <div class="yxz-creation-card-building-track"><div class="yxz-creation-card-building-bar" /></div>
     </div>
     <img
       :src="previewSrc"
@@ -292,13 +293,41 @@ async function copyPreviewAddress() {
 
 .yxz-creation-card-building {
   display: flex;
+  flex-direction: column;
   gap: .45rem;
-  align-items: center;
+  align-items: stretch;
   padding: .5rem .6rem;
   border-radius: .6rem;
   background: rgba(24, 168, 224, .1);
   color: #087eae;
   font-size: .76rem;
+}
+
+.yxz-creation-card-building > span:nth-child(2) {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+}
+
+.yxz-creation-card-building-track {
+  width: 100%;
+  height: .28rem;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(24, 168, 224, .16);
+}
+
+.yxz-creation-card-building-bar {
+  width: 34%;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #18a8e0, #7cc6f5);
+  animation: yxz-progress 1.3s ease-in-out infinite;
+}
+
+@keyframes yxz-progress {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(320%); }
 }
 
 .yxz-creation-card-building-dot {
