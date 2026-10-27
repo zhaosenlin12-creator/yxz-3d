@@ -1,0 +1,25 @@
+# =====================================================================
+#  宜小智工作台 · API Key 模板（可安全入库）
+#  用法：复制本文件为 cartoon-print-studio\keys.txt，把冒号后面填上真实 key，保存后重启后端即可生效。
+#  格式：<标签>:<值>      标签大小写不敏感，冒号可为 : 或 ：
+#  留空的项会被自动跳过，后端降级到本地规则兜底，不会报错。
+#  本模板文件本身不含任何密钥；keys.txt 已被 .gitignore 排除，不会提交到 GitHub。
+# =====================================================================
+
+# ---- 对话 LLM（MiniMax 首选，DeepSeek 备用）----
+# 对话、思考、流式说话、口播文案都走这里
+minimax-key:
+minimax-key-2:
+deepseek-key:
+
+# ---- 生图（aixj 首选，minimax / jojo 备用）----
+# 生成 3D 摇件的预览图；全空则回退到本地 SD 1.5
+aixj-image-key:
+minimax-image-key:
+jojo-image-key:
+
+# ---- 3D 云端生成（Tripo 首选，混元 3D 备用）----
+# 全空则回退到本地 Hunyuan3D-2 mini / TripoSR
+TRIPO:
+hunyuan3d-secret-id:
+hunyuan3d-secret-key:

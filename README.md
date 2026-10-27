@@ -7,132 +7,223 @@
 
 ---
 
-## 一、首次安装（新电脑 / 全新环境）—— 按顺序操作
+## 一、首次安装（新电脑 / 全新环境）
 
-> ⚠️ **关键前提**：`pingdou-workstation.zip` 内**不含后端 Python 环境**（torch 等约 2GB，无法随包携带）。解压后第一次启动必须联网安装，**不要**一解压就直接双击「启动.bat」。
+> ⚠️ **前提**：仓库里**不含**后端 Python 环境，也**不含** AI 模型权重（都被 `.gitignore` 排除，只随作者发布的 zip 提供）。
+> 第一次启动必须联网拉依赖（约 6GB）和模型权重（约 9GB）。
 
-### 第 0 步：确认系统前提已安装（一次性）
+### 第 0 步：系统前提（一次性）
 
 | 软件 | 版本要求 | 下载 | 检查命令 |
 |---|---|---|---|
 | Git | 任意较新版本 | https://git-scm.com | `git --version` |
 | Node.js | **20 或以上** | https://nodejs.org | `node -v` |
-| Python | **3.10 或 3.11**（勾选 Add to PATH） | https://python.org | `python --version` |
+| Python | **3.12（推荐）/ 3.11** | https://python.org | `python --version` |
+| uv（可选但强烈建议） | 任意 | https://docs.astral.sh/uv/ | `uv --version` |
 
-> 安装 Python 时**务必勾选「Add python.exe to PATH」**；Node 装完后在终端执行一次 `corepack enable`。
+> **Python 版本说明**：`backend-requirements.txt` 里的 `contourpy==1.3.3` / `numpy==2.5.2` 已经要求 **Python ≥ 3.11**，
+> 3.10 会直接装不上。脚本会自动按 `3.12 > 3.11` 挑选本机已装的解释器。
+>
+> **uv 的作用**：pip 的新版解析器在这种「全量 freeze 快照」上会做指数级回溯（实测卡在 `aiohttp` 上 10 分钟不收敛）；
+> uv 解析同一份文件 **5 秒**出结果，下载并行且可断点续传。没有 uv 时脚本会自动回退到 pip（慢很多）。
 
-### 第 1 步：解压
+### 第 1 步：拉代码
 
-把 `pingdou-workstation.zip` 解压到任意目录（如 `C:\workstation`）。解压后目录里应有：
-
-```
-C:\workstation\
-├── 启动.bat                 # 已安装好后：双击启动
-├── 一键安装并启动.bat       # 新电脑：双击自动安装 + 启动
-├── start-all.ps1
-├── install-new-pc.ps1
-├── backend-requirements.txt
-├── README.md
-├── airi/                    # 前端
-└── cartoon-print-studio/    # 后端（含 keys.txt、名片模板）
+```bash
+git clone https://github.com/zhaosenlin12-creator/yxz-3d.git
+cd yxz-3d
 ```
 
-> 确认 `cartoon-print-studio\keys.txt` 存在（API key 文件，随 zip 自带；若缺失从原电脑拷贝）。
+### 第 2 步：一键安装并启动
 
-### 第 2 步（方式 A，推荐）：双击「一键安装并启动.bat」
-
-自动完成：① 检查 Node/Git/Python → ② 前端 `pnpm install`（数百 MB）→ ③ 后端建 venv + `pip install`（约 2GB，torch 较大）→ ④ 启动前后端并打开浏览器。
-
-- 全程**联网**，预计 20~40 分钟（取决于网速），窗口里会显示每步 OK/FAIL。
-- **不要中途关闭窗口**。若失败，看第 3 步手动分步。
-
-### 第 2 步（方式 B）：手动分步（更稳，推荐排障时用）
-
-打开 PowerShell（或 cmd），进入解压目录后依次执行：
+**双击「INSTALL-FIRST-TIME.bat」**，或手动：
 
 ```powershell
-# ① 安装依赖（前端 + 后端，需联网，时间较长）
-powershell -NoProfile -ExecutionPolicy Bypass -File install-new-pc.ps1
-
-# ② 启动前后端（自动打开浏览器）
-powershell -NoProfile -ExecutionPolicy Bypass -File start-all.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File install-new-pc.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File start-all.ps1
 ```
 
-### 第 3 步：验证是否启动成功
+安装脚本会自动完成：
+
+1. 检查 Node / Git / Python / pnpm / uv
+2. 配国内镜像（pip 清华源、npm npmmirror、Electron 镜像）
+3. 建 Python 3.12 venv，**用 uv** 装 `backend-requirements.txt`（torch 从本地 wheel 装，不走网络）
+4. `pnpm install --filter '@proj-airi/stage-web...'` 只装前端需要的依赖闭包
+5. 预置静态资源（VRM / Live2D / MediaPipe）
+6. 下载 AI 模型权重（SD 1.5 / Hunyuan3D-2 mini / TripoSR，约 9GB，支持断点续传）
+
+> **断点续装**：依赖清单 / Python 版本 / torch 通道都没变时，安装步骤**秒级跳过**。
+> 想强制重装用 `-Force`；只想补模型权重用 `-OnlyModels`；不想下模型用 `-SkipModels`。
+
+### 第 3 步：验证
 
 | 检查项 | 方法 | 期望 |
 |---|---|---|
-| 后端 | 浏览器打开 `http://127.0.0.1:8000/api/software/detect` | 返回 JSON（非报错） |
-| 前端 | 浏览器打开 `http://127.0.0.1:5199` | 看到宜小智对话界面 |
-| 日志 | 解压目录下的 `.run\backend-8000.err.log`、`.run\frontend-5199.err.log` | 无致命报错 |
+| 后端 | 浏览器打开 `http://127.0.0.1:8000/api/software/detect` | 返回 JSON（`tools` 数组） |
+| 前端 | 浏览器打开 `http://127.0.0.1:5199` | 看到宜小智对话界面 + 会动的宜小智形象 |
+| 预制模型 | `http://127.0.0.1:8000/api/presets/models` | 返回 3 个 pose_* 模型 |
+| 日志 | `.run\backend-8000.err.log`、`.run\frontend-5199.err.log` | 无致命报错 |
 
-前端首次冷编译可能需要 30~90 秒，请耐心等窗口提示「前端就绪」。
+> 端口 8000 被别的程序占用时，脚本会**自动顺延**到 8001/8002 并把真实端口注入前端，日志里会写明。
 
 ---
 
 ## 二、日常启动（装过一次之后）
 
-**双击「启动.bat」**即可，等价于：
+**双击「START.bat」**，等价于：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File start-all.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File start-all.ps1
 ```
 
-- 端口被占用时脚本会提示「已占用（跳过启动）」，不会误杀其它进程。
-- 自动读取 `cartoon-print-studio\keys.txt` 的 API key，自动打开浏览器。
+- 前后端**并行**启动、并**并行**等待就绪；已在运行时直接复用，不重复拉起。
+- 端口被占用自动顺延，不会误杀其它进程。
+- 自动打开浏览器。停止用 `stop-all.ps1`（或双击后 Ctrl+C）。
+
+常用参数：
+
+```powershell
+pwsh -File start-all.ps1 -NoBrowser      # 不自动开浏览器
+pwsh -File start-all.ps1 -NoBackend      # 只起前端
+pwsh -File start-all.ps1 -BackendPort 8100
+```
 
 ---
 
-## 三、常见问题（双击失败排查表）
+## 三、目录里的脚本
+
+| 文件 | 作用 |
+|---|---|
+| `START.bat` | 日常启动（双击） |
+| `INSTALL-FIRST-TIME.bat` | 新机器：安装 + 启动（双击） |
+| `install-new-pc.ps1` | 装依赖（uv / 镜像 / 断点续装 / 模型权重） |
+| `fetch-models.ps1` | 只下 AI 模型权重（SD 1.5 / Hunyuan3D / TripoSR） |
+| `start-all.ps1` | 起前后端 + 就绪探测 + 自动开浏览器 |
+| `stop-all.ps1` | 停掉前后端 |
+| `lib-common.ps1` | 共用函数（端口探测 / 镜像 / 断点续传下载 / uv 封装） |
+
+---
+
+## 四、常见问题
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| 双击后窗口一闪就关 | 未解压就直接双击了 .ps1，或运行环境问题 | 用「启动.bat」/「一键安装并启动.bat」双击；不要直接双击 .ps1 |
-| 双击后长时间没反应、像卡住 | 首次启动正在自动安装后端依赖（torch 约 2GB） | 耐心等待 10~30 分钟；或先手动跑 `install-new-pc.ps1` 看进度 |
-| 提示「pip install 失败」 | 网络超时 / Python 版本不对 / 磁盘不足 | 重跑 `install-new-pc.ps1`（断点续装）；确认 Python 3.10/3.11；预留 5GB 空间 |
-| 提示「pnpm install 失败」 | 网络问题 / Node 版本过旧 | 重试；确认 Node 20+ 且执行过 `corepack enable` |
-| 提示「未找到 Node.js / Git / Python」 | 系统前提未装 | 按「第 0 步」安装后重试 |
-| 前端一直「等待就绪」超时 | 首次冷编译慢 / vite 启动报错 | 查看 `.run\frontend-5199.err.log`；确认网络可访问 npm registry |
-| 页面打开但对话/生图报错 | keys.txt 缺失或 key 失效 | 确认 `cartoon-print-studio\keys.txt` 存在且格式正确（见下） |
-| 打开软件按钮无效 | 新电脑没装对应软件 / 路径变了 | 交付面板会列出「已检测到」的软件；未检测到时面板会提示手动指定 exe 路径（存 `data/software_paths.json`，每台机器自动适配，不需改代码） |
+| 双击后窗口一闪就关 | 直接双击了 .ps1 | 双击 `.bat`；或在终端里 `pwsh -File start-all.ps1` 看报错 |
+| 安装很慢 / 卡在 aiohttp | pip 解析器指数级回溯 | 装 `uv`（`pip install uv`）后重跑，解析从 10 分钟降到 5 秒 |
+| torch 下载卡住不动 | pip 走 download.pytorch.org 会零字节卡死 | 脚本已改为先落到本地 wheel 缓存再离线安装；缓存目录见 `YXZ_CACHE_DIR` |
+| 提示「端口 8000 被其它程序占用」 | 别的服务占了 8000 | 脚本会自动顺延到 8001，**不需要**手动处理 |
+| 页面打开但对话/生图报错 | `keys.txt` 缺失或 key 失效 | 确认 `cartoon-print-studio\keys.txt` 存在（见下） |
+| 本地生图不可用 | SD 1.5 权重没下全 | 跑 `pwsh -File fetch-models.ps1 -Only sd`，看 `.run` 下日志 |
+| 本地 3D 生成不可用 | Hunyuan3D / TripoSR 权重缺失 | `pwsh -File fetch-models.ps1 -Only hunyuan` / `-Only triposr` |
+| 舞台形象是「黑影」 | 旧的 VRM 形象缺失（.gitignore 排除） | 舞台形象已改成 **2D 分层精灵**，不再依赖 VRM；仅预览页需要 3D 时再从作者 zip 拷 `airi/packages/stage-ui-three/src/assets/vrm/models/yxz.vrm` |
+| 宜小智 表情/眼神不动 | 浏览器缓存了旧的精灵图 | `Ctrl+Shift+R` 强制刷新；精灵层在 `airi/packages/stage-ui/src/assets/yxz/layers/` |
+| 打开软件按钮无效 | 新电脑没装对应软件 | 交付面板会列出已检测到的软件；未检测到时手动指定 exe 路径（存 `data/software_paths.json`） |
 
 ---
 
-## 四、配置说明（跑服务自动读取，不写死）
+## 五、配置说明（跑服务自动读取，不写死）
 
 | 配置项 | 位置 | 说明 |
 |---|---|---|
 | LLM / 生图 / 3D API key | `cartoon-print-studio\keys.txt` | 按行标签分类：`minimax-key:`/`minimax-key-2:`(LLM)、`deepseek-key:`(LLM 备用)、`aixj-image-key:`(生图首选)、`minimax-image-key:`(生图备用)、`jojo-image-key:`、`TRIPO:`(3D 首选)、`HUNYUAN3D:`(3D 备用) |
-| 后端依赖 | `backend-requirements.txt` | 已冻结；torch/torchvision 的 `+cu121` 版本需从 PyTorch 官方索引安装（install-new-pc.ps1 已自动加 `--extra-index-url`） |
+| API key 空白模板 | `cartoon-print-studio\keys.txt.example` | 仓库内可提交；`install-new-pc.ps1` 发现缺 `keys.txt` 时会自动复制一份，填完 key 重启后端即生效 |
+| 后端依赖 | `backend-requirements.txt` | 已冻结；`open-clip-torch` 因 `protobuf<4` 与 `onnxruntime` 冲突，单独用 `--no-deps` 安装 |
+| 镜像 | `install-new-pc.ps1 -PypiIndex / -NpmRegistry` | 默认清华源 + npmmirror；`-SlowNetwork` 走官方源 |
+| 下载缓存 | 环境变量 `YXZ_CACHE_DIR` | 默认 `%LOCALAPPDATA%\yxz-3d-cache`；torch wheel 等大文件缓存在这里，可拷贝到新机器复用 |
+| HF 镜像 | `fetch-models.ps1 -Mirror` | 默认 `https://hf-mirror.com`；直连 huggingface.co 在国内基本不可达 |
 | 生图策略 | 后端 `backend/api_image.py` | aixj 优先 → minimax 备用 → 本地 SD 兜底；失败自动切换 |
 | LLM 策略 | 后端 `backend/llm_client.py` | MiniMax(.com) → DeepSeek → 本地规则 兜底 |
 | 3D 引擎 | 后端 `backend/` tripo/hunyuan runner | Tripo → 混元3D → 本地彩色 三级自动切换 |
-| 前端 API 地址 | 环境变量 `VITE_CARTOON_PRINT_API` | 默认 `http://127.0.0.1:8000`（start-all.ps1 自动注入） |
-| 软件路径 | 自动检测注册表/快捷方式/常见路径；修正存 `data/software_paths.json` | Bambu Studio(3D/STL)、xTool Studio(激光)、LightBurn、LaserGRBL、Orca/Prusa/Cura、Blender——每台机器自动检测，不写死 |
+| 前端 API 地址 | 环境变量 `VITE_CARTOON_PRINT_API` | 默认 `http://127.0.0.1:8000`（start-all.ps1 自动注入实际端口） |
+| 软件路径 | 自动检测注册表/快捷方式/常见路径；修正存 `data/software_paths.json` | Bambu Studio、xTool Studio、LightBurn、LaserGRBL、Orca/Prusa/Cura、Blender |
 
 ---
 
-## 五、关键流程（已验收）
+## 六、关键流程
 
 1. **对话**：宜小智思考走真实 LLM（MiniMax→DeepSeek），语音 TTS 走 MiniMax speech
 2. **3D 摆件**：聊天创作面板 → 描述 → 生图预览（aixj）→ 画布编辑器（加字/个性化/批注）→ 应用到 3D → 生成 STL/GLB → 检测本机软件 → 打开 Bambu Studio
 3. **激光切割名片**：聊天输入区左下「+」→「激光切割名片」→ 选模板（背面固定活动蓝底图，正面可编辑）→ 生成切割文件（SVG mm 单位，含切割红线/雕刻绿线/定位十字）→ 预览 → 检测本机激光软件 → 打开 xTool Studio / LightBurn
-4. **预制模型**：「+」→「宜小智 3D 模型」→ 打开 `/yxz-vrm-preview` 直接看主项目同款 3D 形象（轻动作、无扭曲）
+4. **预制模型**：「+」→「宜小智 3D 模型」→ 打开 `/yxz-vrm-preview` 直接看主项目同款 3D 形象
 
 ---
 
-## 六、GitHub 与隐私
+## 七、GitHub 与隐私
 
 - 仓库：`https://github.com/zhaosenlin12-creator/yxz-3d.git`（分支 `main`）
-- ⚠️ **不入 GitHub**（.gitignore 已强制排除）：`keys.txt`、`software_paths.json`、`.glb/.obj/.stl` 大模型文件
+- ⚠️ **不入 GitHub**（.gitignore 已强制排除）：`keys.txt`、`software_paths.json`、`.glb/.obj/.stl` 大模型文件、本地 AI 权重
 - 克隆仓库后需从原电脑拷贝 `cartoon-print-studio\keys.txt`；角色大模型随 ZIP 交付
 - 提交前检查：`git status` 出现 `keys.txt` 即禁止 `git add`；勿删除根 `.gitignore` 中的 `**/keys.txt` 规则
 
-## 七、大模型 / 运行数据（不入 GitHub）
+## 八、大模型 / 运行数据（不入 GitHub）
 
 | 资源 | 位置 | 说明 |
 |---|---|---|
-| 角色 3D 模型 | `cartoon-print-studio\data\yxz_character_tripo_jpg\model` | 宜小智角色主模型，ZIP 自带 |
-| API keys | `cartoon-print-studio\keys.txt` | 随 ZIP；克隆后需手动放入 |
-| 名片模板 | `cartoon-print-studio\data\laser\template\activity_blue.png` | 已入 GitHub |
-| 软件路径修正 | `cartoon-print-studio\data\software_paths.json` | 每台机器自动检测生成，不入库 |
+| 角色 3D 模型 | `airi/packages/stage-ui-three/src/assets/vrm/models/yxz.vrm` | 宜小智主角模型，ZIP 自带；缺失时脚本用公开 VRM 样例占位 |
+| 宜小智 2D 精灵层 | `airi/packages/stage-ui/src/assets/yxz/layers/` | 已入库：`body.png`（含光环的整身）、`glow.png`（光环辉光）、`eye_l/eye_r`、`mouth_*`、`manifest.json` |
+| 精灵切图脚本 | `airi/scripts/yxz-rebuild/cut_sprite_layers.py` | 从 `front-wave.png` 重新切层；改图后重跑即可再生成整套精灵 |
+| API keys | `cartoon-print-studio/keys.txt` | 随 ZIP；克隆后需手动放入 |
+| 名片模板 | `cartoon-print-studio/data/laser/template/activity_blue.png` | 缺失时后端 `/api/laser_card` 会报错 |
+| 预制摆件模型 | `presets/models/<pose>/*` | 缺失时 `/api/presets/models` 返回空数组 |
+| SD 1.5 权重 | `cartoon-print-studio/ai/forge-webui/models/Stable-diffusion/` | `fetch-models.ps1` 下载 |
+| Hunyuan3D-2 mini | `~/.cache/huggingface/hub/models--tencent--Hunyuan3D-2mini/` | `fetch-models.ps1` 下载 |
+| TripoSR | `cartoon-print-studio/models/cache/models/AI-ModelScope--TripoSR/` | `fetch-models.ps1` 下载 |
+| 软件路径修正 | `cartoon-print-studio/data/software_paths.json` | 每台机器自动检测生成，不入库 |
+
+---
+
+## 九、宜小智动态形象（2D 分层精灵）
+
+舞台上的宜小智不是 3D VRM，而是一套 **PNG 差分精灵**：一张完整的原画 + 抠出来的眼睛、嘴、光环辉光，
+用 Canvas 2D 实时合成并驱动。这套做法的好处是形象永远和原画完全一致（不会出现建模走形），
+同时眼神、眨眼、说话口型、呼吸、摇摆、光环呼吸都是真动。
+
+| 层 | 文件 | 作用 |
+|---|---|---|
+| 身体 | `body.png` | **原画整张**（光环已焊进身体），头盔 100% 完整，绝不会出现接缝裂开 |
+| 光环辉光 | `glow.png` | 头顶光环洒出的光晕，用叠加模式（`lighter`）画在身体之上，缓慢呼吸 |
+| 眼睛 | `eye_l.png` / `eye_r.png` | 跟随鼠标 gaze + 自动眨眼 + 按状态收窄 |
+| 嘴 | `mouth_*.png` | 微笑 / 说话 A-B-C / 张嘴 / 咧嘴 / 小嘴，按状态与音量切换 |
+
+- 组件：`airi/packages/stage-ui/src/components/scenes/YXZPetScene.vue`
+- 坐标：`airi/packages/stage-ui/src/assets/yxz/layers/manifest.json`（切图时自动写出，位置不会漂）
+- 重新切图（改了 `front-wave.png` 之后）：
+
+```powershell
+cartoon-print-studio\ai\forge-webui\venv\Scripts\python.exe `
+    airi\scripts\yxz-rebuild\cut_sprite_layers.py
+```
+
+> 切图脚本用「头盔轮廓几何拟合」把光环和身体分开：**光环整张留在身体层**，
+> 所以呼吸/摇摆时两层绝不会错位；会动的只有叠加的辉光。
+
+---
+
+## 十、配置 API Key（后端完全可用）
+
+后端所有联网能力都读同一个文件：`cartoon-print-studio\keys.txt`。
+**这个文件已被 `.gitignore` 排除，永远不会进 GitHub。**
+
+克隆仓库后：
+
+1. 复制仓库内的空白模板（安装脚本在你没建 `keys.txt` 时会自动复制）：
+
+```powershell
+copy cartoon-print-studio\keys.txt.example cartoon-print-studio\keys.txt
+```
+
+2. 打开 `keys.txt`，把冒号后面填上真实 key，保存：
+
+| 标签 | 用途 | 缺失时 |
+|---|---|---|
+| `minimax-key:` / `minimax-key-2:` | 对话 LLM、流式思考、口播文案、TTS | 回退 DeepSeek → 本地规则 |
+| `deepseek-key:` | 对话 LLM 备用 | 回退本地规则 |
+| `aixj-image-key:` | 生图（3D 摆件预览图）首选 | 回退 minimax → 本地 SD 1.5 |
+| `minimax-image-key:` / `jojo-image-key:` | 生图备用 | 同上 |
+| `TRIPO:` | 云端高质量 3D 生成首选 | 回退混元 3D → 本地 Hunyuan3D / TripoSR |
+| `hunyuan3d-secret-id:` / `hunyuan3d-secret-key:` | 混元 3D 云端备用 | 同上 |
+
+3. 重启后端（`start-all.ps1`）即可生效。留空的项会被自动跳过，**不会报错**，只是走本地兜底。
+
+> 也可以用环境变量覆盖：`MINIMAX_API_KEY`、`DEEPSEEK_API_KEY`、`TRIPO3D_KEY`、
+> `HUNYUAN3D_SECRET_ID`、`HUNYUAN3D_SECRET_KEY`。

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { YXZStatus } from '@proj-airi/stage-ui-three'
 
-import { YXZRealModelScene } from '@proj-airi/stage-ui-three'
+import { YXZPetScene } from '@proj-airi/stage-ui/components/scenes'
 import { ref } from 'vue'
 
 // Focused harness for judging the YXZ avatar: every interaction state is one
@@ -48,7 +48,7 @@ function cycleStatus() {
 <template>
   <main class="yxz-avatar-page">
     <section class="yxz-avatar-stage">
-      <YXZRealModelScene
+      <YXZPetScene
         v-model:state="mountState"
         :status="status"
         :speaking-level="speakingLevel"

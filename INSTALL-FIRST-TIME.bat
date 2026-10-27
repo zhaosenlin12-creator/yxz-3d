@@ -18,6 +18,6 @@ if errorlevel 1 (
 )
 echo.
 echo [2/2] Æô¶¯·þÎñ...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-all.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-all.ps1" %*
 echo.
 pause

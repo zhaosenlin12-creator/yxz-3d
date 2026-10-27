@@ -1,4 +1,8 @@
-﻿accelerate==1.15.0
+# NOTE: open-clip-torch==2.20.0 is installed separately with --no-deps.
+# It pins protobuf<4, which is incompatible with onnxruntime (protobuf>=4.25.8)
+# and the protobuf pin above. The backend does not import open_clip at runtime.
+# See install-new-pc.ps1 for the --no-deps install step.
+accelerate==1.15.0
 aiofiles==23.2.1
 altgraph==0.17.5
 annotated-types==0.8.0
@@ -71,7 +75,6 @@ numba==0.67.0
 numpy==2.5.2
 omegaconf==2.2.3
 onnxruntime==1.29.0
-open-clip-torch==2.20.0
 opencv-python==5.0.0.93
 opencv-python-headless==5.0.0.93
 orjson==3.12.0

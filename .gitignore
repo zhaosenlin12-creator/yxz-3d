@@ -137,6 +137,10 @@ apps/stage-tamagotchi/electron.vite.config.*.mjs
 # Local dev runtime artifacts
 .run/
 
+# Python bytecode
+__pycache__/
+*.py[cod]
+
 # Env files (clone-time to be created manually)
 .env
 .env.*
@@ -147,6 +151,9 @@ packages/stage-layouts/src/assets/activity-stage-2026-text-keep.png
 # Credentials — API keys & secrets must never be committed
 cartoon-print-studio/keys.txt
 **/keys.txt
+# ...but the blank template is safe to ship, so a fresh clone can fill it in
+!**/keys.txt.example
+!**/keys.example.txt
 
 
 # Large 3D preset assets are shipped inside the release zip, not the git repo
@@ -158,3 +165,8 @@ cartoon-print-studio/data/yxz_character_tripo
 cartoon-print-studio/data/yxz_character_tripo_jpg
 cartoon-print-studio/data/laser/template
 cartoon-print-studio/data/software_paths.json
+
+# Local AI model weights & their diffusers config (shipped in release zip only)
+cartoon-print-studio/ai/forge-webui/models/
+cartoon-print-studio/ai/forge-webui/backend/huggingface/
+cartoon-print-studio/models/

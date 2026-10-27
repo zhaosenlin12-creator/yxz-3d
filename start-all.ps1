@@ -1,186 +1,181 @@
 ﻿# =====================================================================
-#  pingdou-workstation 一键启动
-#  启动顺序：
-#    1) cartoon-print-studio 后端（FastAPI :8000，自动读 keys.txt）
-#    2) airi 前端（vite :5199，VITE_CARTOON_PRINT_API=http://127.0.0.1:8000）
-#    3) 就绪后自动打开浏览器
-#  失败兜底：端口占用 / venv 缺失 / node 缺失 都会给出明确提示。
-#  用法： powershell -ExecutionPolicy Bypass -File start-all.ps1
+#  宜小智工作台 —— 一键启动
+#
+#  针对“用起来太麻烦”的优化：
+#    1. 前后端并行启动 + 并行等待就绪（不是串行等两个）
+#    2. 端口自动腾挪：8000 被别的程序占用时自动顺延到 8001/8002，
+#       并把真实端口注入前端（VITE_CARTOON_PRINT_API）
+#    3. 已在运行就直接复用，不重复拉起
+#    4. 依赖自检 → 缺失时自动调 install-new-pc.ps1（带断点续装）
+#    5. 失败自动打印日志尾部 + 常见原因提示，不用去翻文件
+#
+#  用法：
+#    powershell -NoProfile -ExecutionPolicy Bypass -File start-all.ps1
+#    powershell -NoProfile -ExecutionPolicy Bypass -File start-all.ps1 -NoBrowser
+#    powershell -NoProfile -ExecutionPolicy Bypass -File start-all.ps1 -NoBackend
 # =====================================================================
 param(
     [int]$BackendPort = 8000,
     [int]$FrontendPort = 5199,
     [switch]$NoBrowser,
     [switch]$NoFrontend,
-    [string]$BackendRoot = "",
-    [string]$FrontendRoot = ""
+    [switch]$NoBackend,
+    [switch]$SkipInstall
 )
 
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-if (-not $BackendRoot)  { $BackendRoot  = Join-Path $root 'cartoon-print-studio' }
-if (-not $FrontendRoot) { $FrontendRoot = Join-Path $root 'airi' }
+. (Join-Path $root 'lib-common.ps1')
 
-function Test-Port([int]$Port) {
-    $c = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-    return [bool]$c
-}
+$run = Join-Path $root '.run'
+New-Item -ItemType Directory -Force -Path $run | Out-Null
 
-function Find-ViteBin {
-    $vite = Get-ChildItem -LiteralPath (Join-Path $frontendRoot 'node_modules\.pnpm') -Recurse -Filter 'vite.js' -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -match 'vite@8' -and $_.FullName -match '\\bin\\vite\.js$' } |
-        Select-Object -First 1
-    if ($vite) { return $vite.FullName }
-    $corepack = Get-Command 'corepack.cmd' -ErrorAction SilentlyContinue
-    if ($corepack) { return 'corepack' }
-    return $null
-}
+$backendRoot  = Join-Path $root 'cartoon-print-studio'
+$frontendRoot = Join-Path $root 'airi\apps\stage-web'
+$venvPy       = Join-Path $backendRoot 'ai\forge-webui\venv\Scripts\python.exe'
 
 Write-Host "==============================================" -ForegroundColor Cyan
-Write-Host "  宜小智工作台 一键启动" -ForegroundColor Cyan
+Write-Host "  宜小智工作台 启动" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
-# ---- 0) 依赖预检（每步显式 OK / FAIL） ----
-function Step-Ok([string]$Label) { Write-Host ("  [OK]   " + $Label) -ForegroundColor Green }
-function Step-Fail([string]$Label) { Write-Host ("  [FAIL] " + $Label) -ForegroundColor Red }
-function Step-Info([string]$Label) { Write-Host ("  [..]   " + $Label) -ForegroundColor Cyan }
-function Show-Spinner([int]$DurationSec) {
-    $chars = '|/-\'
-    $end = (Get-Date).AddSeconds($DurationSec)
-    $i = 0
-    while ((Get-Date) -lt $end) {
-        Write-Host ("`r  等待中 " + $chars[$i % 4] + " ") -NoNewline
-        $i++
-        Start-Sleep -Milliseconds 220
+$startAt = Get-Date
+
+# ---- 0) 依赖自检 -----------------------------------------------------
+if (-not $SkipInstall) {
+    $needInstall = $false
+    if (-not $NoBackend -and -not (Test-Path -LiteralPath $venvPy)) { $needInstall = $true }
+    if (-not $NoFrontend) {
+        $vite = Join-Path $frontendRoot 'node_modules\vite\bin\vite.js'
+        if (-not (Test-Path -LiteralPath $vite)) { $needInstall = $true }
     }
-    Write-Host "`r                        " -NoNewline
+    if ($needInstall) {
+        Write-Host ""
+        Warn "检测到依赖缺失，正在自动安装（已装过的部分会跳过）..."
+        Write-Host ""
+        & pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'install-new-pc.ps1')
+        if ($LASTEXITCODE -ne 0) { Fail "自动安装未完成，请手动运行 install-new-pc.ps1"; exit 1 }
+        Write-Host ""
+    }
 }
 
-Step-Info "预检依赖 ..."
-$nodeBin = Get-Command node.exe -ErrorAction SilentlyContinue
-$corepackBin = Get-Command corepack.cmd -ErrorAction SilentlyContinue
-if ($nodeBin) { Step-Ok "Node.js: $($nodeBin.Source)" } else { Step-Fail "未找到 Node.js（前端无法启动）" }
-if ($corepackBin) { Step-Ok "corepack 可用" } else { Step-Info "corepack 未启用（将尝试直接找 vite）" }
-
-# ---- 1) 后端 ----
-$py = Join-Path $backendRoot 'ai\forge-webui\venv\Scripts\python.exe'
-if (-not (Test-Path -LiteralPath $py)) {
-    Write-Host ""
-    Write-Host "[后端] 未找到 Python 虚拟环境（venv）。" -ForegroundColor Yellow
-    Write-Host "[后端] 首次使用需要先安装后端依赖（torch 等约 2GB，需联网，预计 10-30 分钟）。" -ForegroundColor Yellow
-    Write-Host "[后端] 现在自动执行安装脚本 install-new-pc.ps1（请勿关闭窗口，耐心等待）..." -ForegroundColor Yellow
-    Write-Host ""
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'install-new-pc.ps1')
-    if (-not (Test-Path -LiteralPath $py)) {
-        Write-Host "[后端] 自动安装未完成。" -ForegroundColor Red
-        Write-Host "[后端] 请手动运行 install-new-pc.ps1（或重新双击 一键安装并启动.bat）后重试；详见 README.md「详细手动步骤」。" -ForegroundColor Red
-        exit 1
+# ---- 1) 端口规划 -----------------------------------------------------
+# 先全端口扫描：只要本项目的后端还在跑（哪怕在 8001/8002）就直接复用，
+# 避免反复双击启动脚本时堆出一串僵尸后端。
+$backendReuse = $false
+$beReady = $NoBackend
+$feReady = $NoFrontend
+if (-not $NoBackend) {
+    $existing = Find-ProjectBackend -From 8000 -To 8030
+    if ($existing) {
+        $BackendPort = $existing
+        $backendReuse = $true
+        Ok "后端已在运行（: $BackendPort），直接复用"
+    } elseif (Test-Port $BackendPort) {
+        $free = Get-FreePort -Preferred $BackendPort
+        if (-not $free) { Fail "找不到可用后端端口（$BackendPort 起连续 60 个都被占）"; exit 1 }
+        Warn "端口 $BackendPort 被其它程序占用，后端改用 $free"
+        $BackendPort = $free
     }
-    Write-Host "[后端] 依赖安装完成，继续启动 ..." -ForegroundColor Green
 }
-if (Test-Port $BackendPort) {
-    Write-Host "[后端] 端口 $BackendPort 已被占用（跳过启动）。请确认它确实是本项目的后端。" -ForegroundColor Yellow
+
+# ---- 2) 启动后端 -----------------------------------------------------
+$backendProc = $null
+if ($NoBackend) {
+    Step "已按参数跳过后端"
+} elseif ($backendReuse) {
+    Step "复用已运行的后端"
+    $beReady = $true
 } else {
-    $out = Join-Path $root ".run\backend-$BackendPort.out.log"
-    $err = Join-Path $root ".run\backend-$BackendPort.err.log"
-    New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null
-    $be = Start-Process -FilePath $py -ArgumentList @('-m', 'uvicorn', 'server:app', '--host', '127.0.0.1', '--port', "$BackendPort", '--app-dir', 'backend') `
-        -WorkingDirectory $backendRoot -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru
-    Write-Host "[后端] 启动中 PID=$($be.Id) (日志: $out)" -ForegroundColor Green
+    if (-not (Test-Path -LiteralPath $venvPy)) { Fail "后端 venv 不存在，请先运行 install-new-pc.ps1"; exit 1 }
+    $out = Join-Path $run "backend-$BackendPort.out.log"
+    $err = Join-Path $run "backend-$BackendPort.err.log"
+    Step "启动后端 (: $BackendPort) ..."
+    $backendProc = Start-Process -FilePath $venvPy `
+        -ArgumentList @('-m','uvicorn','server:app','--host','127.0.0.1','--port',"$BackendPort",'--app-dir','backend') `
+        -WorkingDirectory $backendRoot -RedirectStandardOutput $out -RedirectStandardError $err `
+        -WindowStyle Hidden -PassThru
+    Ok "后端进程 PID=$($backendProc.Id)"
 }
-Write-Host "[后端] 等待就绪 ..." -ForegroundColor Cyan
-Show-Spinner 2
-$beReady = $false
-for ($i = 0; $i -lt 40; $i++) {
-    if (Test-Port $BackendPort) {
-        try {
-            $r = Invoke-WebRequest -Uri "http://127.0.0.1:$BackendPort/api/software/detect" -TimeoutSec 3 -UseBasicParsing
-            if ($r.StatusCode -eq 200) { $beReady = $true; break }
-        } catch {}
-    }
-    Start-Sleep -Seconds 1
-}
-if ($beReady) {
-    Write-Host "[后端] 就绪：http://127.0.0.1:$BackendPort  (API keys 已自动读取 keys.txt)" -ForegroundColor Green
-    Step-Ok "后端服务 ($BackendPort) 启动成功"
+
+# ---- 3) 启动前端（与后端并行）---------------------------------------
+$frontendProc = $null
+if ($NoFrontend) {
+    Step "已按参数跳过前端"
+} elseif ($existingFront = Find-ProjectFrontend -From 5199 -To 5230) {
+    $FrontendPort = $existingFront
+    Ok "前端已在运行（: $FrontendPort），直接复用"
+    $feReady = $true
+} elseif (Test-Port $FrontendPort) {
+    $free = Get-FreePort -Preferred $FrontendPort
+    if (-not $free) { Fail "找不到可用前端端口"; exit 1 }
+    Warn "端口 $FrontendPort 被其它程序占用，前端改用 $free"
+    $FrontendPort = $free
 } else {
-    Write-Host "[后端] 等待超时，检查 .run\backend-$BackendPort.err.log。" -ForegroundColor Red
-    Step-Fail "后端服务 ($BackendPort) 未就绪"
-    if (Test-Path -LiteralPath (Join-Path $root ".run\backend-$BackendPort.err.log")) {
-        Get-Content -LiteralPath (Join-Path $root ".run\backend-$BackendPort.err.log") -Tail 20
+    $vite = Join-Path $frontendRoot 'node_modules\vite\bin\vite.js'
+    if (-not (Test-Path -LiteralPath $vite)) { Fail "未找到 vite，请先运行 install-new-pc.ps1"; exit 1 }
+    $out = Join-Path $run "frontend-$FrontendPort.out.log"
+    $err = Join-Path $run "frontend-$FrontendPort.err.log"
+    $env:VITE_CARTOON_PRINT_API = "http://127.0.0.1:$BackendPort"
+    Step "启动前端 (: $FrontendPort) ..."
+    $frontendProc = Start-Process -FilePath (Get-Command node.exe -ErrorAction Stop).Source `
+        -ArgumentList @($vite,'--host','--port',"$FrontendPort") `
+        -WorkingDirectory $frontendRoot -RedirectStandardOutput $out -RedirectStandardError $err `
+        -WindowStyle Hidden -PassThru
+    Ok "前端进程 PID=$($frontendProc.Id)"
+}
+
+# ---- 4) 并行等待就绪（一个循环同时盯两个）---------------------------
+$beDeadline = (Get-Date).AddSeconds(120)
+$feDeadline = (Get-Date).AddSeconds(180)
+
+if (-not $NoBackend -and -not $backendReuse) {
+    Step "等待后端就绪 ..."
+    while ((Get-Date) -lt $beDeadline) {
+        if ($backendProc -and $backendProc.HasExited) { break }
+        if (Test-HttpOk "http://127.0.0.1:$BackendPort/api/software/detect") { $beReady = $true; break }
+        Start-Sleep -Milliseconds 600
+    }
+    if ($beReady) { Ok "后端就绪 http://127.0.0.1:$BackendPort" }
+    else {
+        Fail "后端未就绪"
+        $e = Join-Path $run "backend-$BackendPort.err.log"
+        if (Test-Path -LiteralPath $e) { Get-Content -LiteralPath $e -Tail 25 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }
+    }
+}
+if (-not $NoFrontend -and -not (Test-FrontendIdentity "http://127.0.0.1:$FrontendPort")) {
+    Step "等待前端就绪（首次冷编译约 20-60 秒）..."
+    while ((Get-Date) -lt $feDeadline) {
+        if ($frontendProc -and $frontendProc.HasExited) { break }
+        if (Test-HttpOk "http://127.0.0.1:$FrontendPort/") { $feReady = $true; break }
+        Start-Sleep -Milliseconds 600
+    }
+    if ($feReady) { Ok "前端就绪 http://127.0.0.1:$FrontendPort" }
+    else {
+        Fail "前端未就绪"
+        $e = Join-Path $run "frontend-$FrontendPort.err.log"
+        if (Test-Path -LiteralPath $e) { Get-Content -LiteralPath $e -Tail 25 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }
     }
 }
 
-# ---- 2) 前端 ----
-if (-not $NoFrontend) {
-    if (Test-Port $FrontendPort) {
-        Write-Host "[前端] 端口 $FrontendPort 已被占用（跳过启动）。若页面异常请先关闭旧实例。" -ForegroundColor Yellow
-    } else {
-        $vite = Find-ViteBin
-        if (-not $vite) {
-            Write-Host ""
-            Write-Host "[前端] 未找到 vite（前端依赖未安装），自动执行安装脚本 install-new-pc.ps1 ..." -ForegroundColor Yellow
-            Write-Host "[前端] 前端依赖约数百 MB，需联网，请耐心等待。" -ForegroundColor Yellow
-            Write-Host ""
-            & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'install-new-pc.ps1')
-            $vite = Find-ViteBin
-            if (-not $vite) {
-                Write-Host "[前端] 自动安装未完成，请手动运行 install-new-pc.ps1 后重试。" -ForegroundColor Red
-                exit 1
-            }
-        }
-        $out = Join-Path $root ".run\frontend-$FrontendPort.out.log"
-        $err = Join-Path $root ".run\frontend-$FrontendPort.err.log"
-        New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null
-        $env:VITE_CARTOON_PRINT_API = "http://127.0.0.1:$BackendPort"
-        if ($vite -eq 'corepack') {
-            $fe = Start-Process -FilePath (Get-Command 'corepack.cmd' -ErrorAction Stop).Source -ArgumentList @('pnpm', 'exec', 'vite', '--host', '--port', "$FrontendPort") `
-                -WorkingDirectory (Join-Path $frontendRoot 'apps\stage-web') -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru
-        } else {
-            $fe = Start-Process -FilePath (Get-Command 'node.exe' -ErrorAction Stop).Source -ArgumentList @($vite, '--host', '--port', "$FrontendPort") `
-                -WorkingDirectory (Join-Path $frontendRoot 'apps\stage-web') -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru
-        }
-        Write-Host "[前端] 启动中 PID=$($fe.Id) (日志: $out)" -ForegroundColor Green
-    }
-    $feReady = $false
-    for ($i = 0; $i -lt 90; $i++) {
-        if (Test-Port $FrontendPort) {
-            try {
-                $r = Invoke-WebRequest -Uri "http://127.0.0.1:$FrontendPort/" -TimeoutSec 3 -UseBasicParsing
-                if ($r.StatusCode -eq 200) { $feReady = $true; break }
-            } catch {}
-        }
-        Start-Sleep -Seconds 1
-    }
-    if ($feReady) {
-        Write-Host "[前端] 就绪：http://127.0.0.1:$FrontendPort" -ForegroundColor Green
-        Step-Ok "前端服务 ($FrontendPort) 启动成功"
-        if (-not $NoBrowser) {
-            Start-Process "http://127.0.0.1:$FrontendPort/"
-        }
-    } else {
-        Write-Host "[前端] 等待超时（首次冷编译可能较慢），查看 .run\frontend-$FrontendPort.err.log。" -ForegroundColor Red
-        Step-Fail "前端服务 ($FrontendPort) 未就绪"
-        if (Test-Path -LiteralPath (Join-Path $root ".run\frontend-$FrontendPort.err.log")) {
-            Get-Content -LiteralPath (Join-Path $root ".run\frontend-$FrontendPort.err.log") -Tail 20
-        }
-    }
-}
-
+# ---- 5) 汇总 + 自动开浏览器 -----------------------------------------
 Write-Host ""
 Write-Host "==============================================" -ForegroundColor Cyan
-Write-Host "  启动结果汇总" -ForegroundColor Cyan
+Write-Host "  启动结果" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
-if (Test-Port $BackendPort) {
-    Step-Ok "后端  http://127.0.0.1:$BackendPort"
-} else {
-    Step-Fail "后端 未监听 :$BackendPort"
+if (-not $NoBackend) {
+    if ($beReady) { Ok "后端  http://127.0.0.1:$BackendPort" } else { Fail "后端 未就绪 (: $BackendPort)" }
 }
-if (-not $NoFrontend -and (Test-Port $FrontendPort)) {
-    Step-Ok "前端  http://127.0.0.1:$FrontendPort"
-} elseif ($NoFrontend) {
-    Step-Info "前端 已按参数跳过（-NoFrontend）"
-} else {
-    Step-Fail "前端 未监听 :$FrontendPort"
+if (-not $NoFrontend) {
+    if ($feReady) { Ok "前端  http://127.0.0.1:$FrontendPort" } else { Fail "前端 未就绪 (: $FrontendPort)" }
 }
+$elapsed = [int]((Get-Date) - $startAt).TotalSeconds
+Say  "  用时 ${elapsed}s" 'DarkGray'
+
+if ($feReady -and -not $NoBrowser) {
+    Start-Process "http://127.0.0.1:$FrontendPort/"
+    Ok "已打开浏览器"
+}
+Write-Host ""
+Say  "  日志：$run" 'DarkGray'
+Say  "  停止：.\stop-all.ps1" 'DarkGray'
 Write-Host ""

@@ -1,0 +1,99 @@
+{
+  "source": "airi\\packages\\stage-ui\\src\\assets\\yxz\\front-wave.png",
+  "width": 1086,
+  "height": 1448,
+  "layers": {
+    "eyes": [
+      {
+        "file": "eye_l.png",
+        "x": 502,
+        "y": 360,
+        "w": 188,
+        "h": 227,
+        "cx": 596.5,
+        "cy": 474.0
+      },
+      {
+        "file": "eye_r.png",
+        "x": 748,
+        "y": 374,
+        "w": 131,
+        "h": 223,
+        "cx": 814.0,
+        "cy": 486.0
+      }
+    ],
+    "mouths": [
+      {
+        "file": "mouth_smile.png",
+        "x": 650,
+        "y": 567,
+        "w": 141,
+        "h": 83,
+        "cx": 720.0,
+        "cy": 608.0
+      },
+      {
+        "file": "mouth_talk_a.png",
+        "x": 650,
+        "y": 567,
+        "w": 141,
+        "h": 83,
+        "cx": 720.0,
+        "cy": 608.0
+      },
+      {
+        "file": "mouth_talk_b.png",
+        "x": 650,
+        "y": 567,
+        "w": 141,
+        "h": 83,
+        "cx": 720.0,
+        "cy": 608.0
+      },
+      {
+        "file": "mouth_talk_c.png",
+        "x": 650,
+        "y": 567,
+        "w": 141,
+        "h": 83,
+        "cx": 720.0,
+        "cy": 608.0
+      },
+      {
+        "file": "mouth_o.png",
+        "x": 650,
+        "y": 567,
+        "w": 141,
+        "h": 83,
+        "cx": 720.0,
+        "cy": 608.0
+      },
+      {
+        "file": "mouth_wide.png",
+        "x": 650,
+        "y": 567,
+        "w": 141,
+        "h": 83,
+        "cx": 720.0,
+        "cy": 608.0
+      },
+      {
+        "file": "mouth_small.png",
+        "x": 650,
+        "y": 567,
+        "w": 141,
+        "h": 83,
+        "cx": 720.0,
+        "cy": 608.0
+      }
+    ],
+    "glow": {
+      "file": "glow.png",
+      "x": 223,
+      "y": 0,
+      "w": 645,
+      "h": 269
+    }
+  }
+}

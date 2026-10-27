@@ -1,4 +1,5 @@
 export { default as WidgetStage } from './Stage.vue'
+export { default as YXZPetScene } from './YXZPetScene.vue'
 export { default as YXZLaserCardPanel } from './YXZLaserCardPanel.vue'
 export { default as YXZPrintPreviewPanel } from './YXZPrintPreviewPanel.vue'
 export {

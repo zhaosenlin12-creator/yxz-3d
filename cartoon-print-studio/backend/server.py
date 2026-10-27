@@ -2008,13 +2008,15 @@ def _startup():
                 sd_client.warmup()
                 print("[startup] SD ready", flush=True)
             else:
-                print("[startup] SD 1.5 unavailable (torch missing) - using cloud image chain", flush=True)
+                print("[startup] SD 1.5 unavailable - using cloud image chain "
+                      "(local checkpoint or torch missing)", flush=True)
             if triposr_runner.is_available():
                 print("[startup] loading TripoSR...", flush=True)
                 triposr_runner.warmup()
                 print("[startup] TripoSR ready", flush=True)
             else:
-                print("[startup] TripoSR unavailable (torch missing) - using cloud/cartoon chain", flush=True)
+                print("[startup] TripoSR unavailable - using cloud/cartoon chain "
+                      "(model weights or torch missing)", flush=True)
             print(f"[startup] jojo-image key loaded: {bool(api_image.JOJO_KEY)}", flush=True)
             print(f"[startup] AIXJ image keys: {len(api_image.AIXJ_IMAGE_KEYS)}", flush=True)
             print(f"[startup] LLM keys: {llm_client.key_counts()}", flush=True)
@@ -2027,7 +2029,11 @@ def _startup():
                 hunyuan_runner.warmup()
                 print("[startup] Hunyuan3D-2 mini ready", flush=True)
             else:
-                print("[startup] Hunyuan3D-2 mini unavailable (torch missing) - using Tripo3D/cartoon chain", flush=True)
+                # 打印真实原因（模型权重缺失 / 无 CUDA / torch 缺失），
+                # 原来的 "torch missing" 文案会误导排查方向。
+                print(f"[startup] Hunyuan3D-2 mini unavailable "
+                      f"({hunyuan_runner.get_status().get('reason', 'unknown')}) "
+                      f"- using Tripo3D/cartoon chain", flush=True)
         except Exception:
             traceback.print_exc()
             print("[startup] Hunyuan3D-2 mini FAILED to load - falling back to TripoSR", flush=True)

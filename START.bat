@@ -13,7 +13,7 @@ echo   首次使用请先运行 INSTALL-FIRST-TIME.bat 安装依赖
 echo ============================================================
 echo.
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-all.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-all.ps1" %*
 
 if errorlevel 1 (
     color 0C

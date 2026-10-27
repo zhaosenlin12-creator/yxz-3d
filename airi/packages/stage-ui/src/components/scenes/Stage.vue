@@ -16,6 +16,8 @@ import { wlipsyncProfile } from '@proj-airi/model-driver-lipsync/shared/wlipsync
 import { createPlaybackManager, createSpeechPipeline } from '@proj-airi/pipelines-audio'
 import { Live2DScene, useLive2d } from '@proj-airi/stage-ui-live2d'
 import { ThreeScene, YXZProceduralScene, YXZRealModelScene } from '@proj-airi/stage-ui-three'
+
+import YXZPetScene from './YXZPetScene.vue'
 import { animations } from '@proj-airi/stage-ui-three/assets/vrm'
 import { createQueue } from '@proj-airi/stream-kit'
 import { useBroadcastChannel } from '@vueuse/core'
@@ -548,6 +550,9 @@ const assistantResponseText = ref('')
 const welcomeSpeechBusy = ref(false)
 const welcomeSpeechNeedsGesture = ref(false)
 const yxzRealModelFailed = ref(false)
+// The sprite pet is the character the stage shows; the model is the
+// fallback for a stage that cannot draw it.
+const yxzPetFailed = ref(false)
 
 function handleYXZChatRecovery() {
   currentChatIntent?.cancel('chat-send-recovery')
@@ -755,6 +760,7 @@ onUnmounted(() => {
 
 watch(stageModelSelected, () => {
   yxzRealModelFailed.value = false
+  yxzPetFailed.value = false
 })
 
 defineExpose({
@@ -803,8 +809,22 @@ defineExpose({
         :y-offset="yOffset"
         :scale="scale"
       />
+      <YXZPetScene
+        v-if="stageModelRenderer === 'image' && stageModelSelected === 'preset-yxz' && showStage && !yxzPetFailed"
+        v-model:state="componentState"
+        min-w="50% <lg:full" min-h="100 sm:100"
+        h-full w-full flex-1
+        :status="yxzInteractionStatus"
+        :speaking-level="mouthOpenSize"
+        :paused="paused"
+        :focus-at="focusAt"
+        :x-offset="xOffset"
+        :y-offset="yOffset"
+        :scale="scale"
+        @error="yxzPetFailed = true"
+      />
       <YXZRealModelScene
-        v-if="stageModelRenderer === 'image' && stageModelSelected === 'preset-yxz' && showStage && !yxzRealModelFailed"
+        v-if="stageModelRenderer === 'image' && stageModelSelected === 'preset-yxz' && showStage && yxzPetFailed && !yxzRealModelFailed"
         v-model:state="componentState"
         min-w="50% <lg:full" min-h="100 sm:100"
         h-full w-full flex-1
