@@ -162,6 +162,7 @@ export function streamWebSpeechAPITranscription(
   options?: WebSpeechAPIExtraOptions & {
     onSentenceEnd?: (delta: string) => void
     onSpeechEnd?: (text: string) => void
+    onInterim?: (text: string) => void
   },
 ): StreamTranscriptionResult & { recognition?: any } {
   const deferredText = createDeferred<string>()
@@ -256,6 +257,9 @@ export function streamWebSpeechAPITranscription(
     // Log interim results for debugging (don't emit as final)
     if (interimTranscript && recognition.interimResults) {
       console.info('Web Speech API transcribed (interim):', interimTranscript)
+      // Stream interim text so the input box updates while the user is still
+      // speaking (immediate feedback); the final transcript replaces it.
+      options?.onInterim?.(interimTranscript)
     }
   }
 

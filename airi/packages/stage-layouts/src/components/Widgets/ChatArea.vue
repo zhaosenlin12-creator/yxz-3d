@@ -105,6 +105,59 @@ function insertTranscriptAtCaret(text: string) {
   messageInput.value = trimmed ? `${trimmed} ${text}` : text
 }
 
+// --- Live interim transcription ---
+// While the user is still speaking, interim text is shown at the caret right
+// away. When the sentence is finalised it replaces the placeholder instead of
+// being appended again, so the box never duplicates or lags.
+const interimPlaceholder = ref<{ anchor: number, length: number } | null>(null)
+
+function insertInterimAtCaret(text: string) {
+  const current = messageInput.value
+  const el = document.activeElement as HTMLTextAreaElement | null
+  const editable = el && el.tagName === 'TEXTAREA' && typeof el.selectionStart === 'number'
+  if (!editable) {
+    // No focused textarea: append plainly (no placeholder tracking).
+    const trimmed = current.trim()
+    messageInput.value = trimmed ? `${trimmed} ${text}` : text
+    return
+  }
+  if (interimPlaceholder.value) {
+    const { anchor, length } = interimPlaceholder.value
+    messageInput.value = current.slice(0, anchor) + text + current.slice(anchor + length)
+    interimPlaceholder.value = { anchor, length: text.length }
+  }
+  else {
+    const start = el.selectionStart
+    const end = el.selectionEnd
+    const replacement = start === end ? text : text
+    messageInput.value = current.slice(0, start) + replacement + current.slice(end)
+    interimPlaceholder.value = { anchor: start, length: replacement.length }
+  }
+  nextTick(() => {
+    if (!interimPlaceholder.value) return
+    const caret = interimPlaceholder.value.anchor + interimPlaceholder.value.length
+    el.focus()
+    el.setSelectionRange(caret, caret)
+  })
+}
+
+function commitInterimAsFinal(text: string) {
+  const el = document.activeElement as HTMLTextAreaElement | null
+  if (interimPlaceholder.value && el && el.tagName === 'TEXTAREA') {
+    const { anchor, length } = interimPlaceholder.value
+    const current = messageInput.value
+    messageInput.value = current.slice(0, anchor) + text + current.slice(anchor + length)
+    nextTick(() => {
+      el.focus()
+      el.setSelectionRange(anchor + text.length, anchor + text.length)
+    })
+    interimPlaceholder.value = null
+    return
+  }
+  interimPlaceholder.value = null
+  insertTranscriptAtCaret(text)
+}
+
 async function debouncedAutoSend(text: string) {
   // Double-check auto-send is enabled before proceeding
   if (!autoSendEnabled.value) {
@@ -439,11 +492,16 @@ async function startListening() {
     // Set listening state AFTER successful call
     try {
       await transcribeForMediaStream(stream.value, {
+        onInterim: (text: string) => {
+          if (text && text.trim()) {
+            insertInterimAtCaret(text)
+          }
+        },
         onSentenceEnd: (delta) => {
           if (delta && delta.trim()) {
             // Insert recognized speech at the caret position (fill into the
             // input box), never auto-send unless the user enabled auto-send.
-            insertTranscriptAtCaret(delta)
+            commitInterimAsFinal(delta)
             console.info('[ChatArea] Received transcription delta:', delta)
 
             // Auto-send if enabled - check the current value (not captured in closure)

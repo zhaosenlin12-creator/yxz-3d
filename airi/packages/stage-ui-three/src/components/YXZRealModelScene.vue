@@ -486,125 +486,43 @@ let visemeIndex = 0
 let visemeClock = 0
 let mouthEnvelope = 0
 
-/** When the next authored gesture is due. */
-let oneShotNextAt = 0
-/** The authored gesture currently playing, if any. */
-let oneShotPlaying = ''
+/**
+ * The one clip the body is ever in.
+ *
+ * The model file ships a clip per state -- listening, thinking,
+ * speaking, celebrating -- and switching between them is what used to
+ * make the figure look busy.  It is also what made it look broken:
+ * every switch is a cross-fade between two poses, and the arms of the
+ * thinking clip, the hand of the wave and the lean of the success
+ * clip all have to travel through the middle of that fade, which is
+ * where the twisted, half-way poses came from.
+ *
+ * So the body does not switch.  It stands in the idle's own pose, the
+ * one the model was drawn in, and the face does the rest: the eyes
+ * look, the lids blink, the mouth speaks, the expression answers the
+ * state.  A change of state is a change of expression, and nothing
+ * else.
+ */
+const HELD_POSE_CLIP = 'YXZ_Idle'
 
-function actionNameForStatus(status: YXZStatus) {
-  if (status === 'processing' || status === 'thinking')
-    return 'YXZ_Thinking'
-  if (status === 'listening')
-    return 'YXZ_Listening'
-  if (status === 'success')
-    return 'YXZ_Success'
-  // Speaking keeps the body on the quiet idle pose: the mouth is the actor
-  // while talking.  The authored speaking clip moves the head and jaw on
-  // bones the auto-generated skin weights are weakest around, which reads
-  // as distortion on the lower-left jaw; the idle pose is gentle, and the
-  // viseme morphs carry the speech on top of it.
-  if (status === 'speaking')
-    return 'YXZ_Idle'
-  return 'YXZ_Idle'
-}
-
-function selectAction(status: YXZStatus) {
+function selectAction() {
   if (!mixer || actionMap.size === 0)
     return
-  // A state clip always wins over an authored gesture: if the character
-  // starts speaking halfway through a wave, the wave is where it stops.
-  oneShotPlaying = ''
-  const next = actionMap.get(actionNameForStatus(status)) ?? actionMap.get('YXZ_Idle')
+  const next = actionMap.get(HELD_POSE_CLIP)
   if (!next)
     return
   if (next === activeAction) {
-    // Re-entering a one-shot should replay it instead of parking on its
-    // clamped final frame.
-    if (next.loop === THREE.LoopOnce && next.paused)
-      next.reset().play()
     return
   }
-  // The cross-fade is how a change of state reaches the body, and it has
-  // to be long enough to read as a movement.  A fifth of a second was
-  // quick enough for the small clips and far too quick for the ones that
-  // change the arms: the thinking gesture brings the hand up to the chin
-  // through forty degrees, and at a fifth of a second that is a snap
-  // rather than a gesture.  Half a second is about what a person takes
-  // to shift an arm, and it costs nothing when the two poses are close.
-  const FADE = 0.5
-  activeAction?.fadeOut(FADE)
-  const oneShot = status === 'success'
-  next.setLoop(oneShot ? THREE.LoopOnce : THREE.LoopRepeat, oneShot ? 1 : Infinity)
-  next.clampWhenFinished = oneShot
-  next.reset().fadeIn(FADE).play()
+  // The clip holds one pose, so the fade is only there to cover the one
+  // frame where the pose is handed over from whatever was on the rig
+  // before it.  It is not a movement and it is not meant to be read as
+  // one.
+  activeAction?.fadeOut(0.4)
+  next.setLoop(THREE.LoopRepeat, Infinity)
+  next.clampWhenFinished = false
+  next.reset().fadeIn(0.4).play()
   activeAction = next
-}
-
-// ---------------------------------------------------------------------
-// The authored one-shots.
-//
-// The gestures the behaviour layer improvises are small ones: a lean, a
-// nod, a shift of weight.  They are the punctuation of a standing
-// figure, not its vocabulary.
-//
-// The larger movements -- a wave, a greeting -- are not improvised at
-// all.  They are authored, once, as clips inside the model file, and
-// they are played the way a film is played: it starts, it runs to its
-// end, it stops, and the character goes back to whatever it was doing.
-// The only thing decided at runtime is which one, and when.
-//
-// This is the whole difference between a figure and a puppet.  A
-// puppet's arms are moved by the same code that moves its breathing,
-// and the eye can tell, because a hand that is halfway through a wave
-// is a hand that has stopped moving.
-const ONE_SHOT_CLIPS = [
-  'YXZ_Wave',
-]
-
-function playOneShot(name: string) {
-  if (!mixer)
-    return
-  const action = actionMap.get(name)
-  if (!action)
-    return
-  activeAction?.fadeOut(0.25)
-  action.setLoop(THREE.LoopOnce, 1)
-  action.clampWhenFinished = false
-  action.reset().fadeIn(0.3).play()
-  activeAction = action
-  oneShotPlaying = name
-}
-
-// When an authored gesture is due.
-//
-// Only while the character is standing and waiting.  A gesture that
-// cuts across a sentence reads as a stumble, and one that fires while
-// she is thinking reads as the thinking being interrupted.
-function updateOneShots(time: number) {
-  if (!mixer || actionMap.size === 0)
-    return
-  const status = props.status
-  if (status !== 'idle' && status !== 'listening') {
-    oneShotNextAt = time + 5 + Math.random() ** 1.5 * 9
-    return
-  }
-  if (oneShotPlaying)
-    return
-  if (activeAction && activeAction.loop === THREE.LoopOnce) {
-    oneShotNextAt = time + 3
-    return
-  }
-  if (time < oneShotNextAt)
-    return
-  const pick = ONE_SHOT_CLIPS[Math.floor(Math.random() * ONE_SHOT_CLIPS.length)]
-  if (!pick || !actionMap.has(pick)) {
-    oneShotNextAt = time + 15
-    return
-  }
-  playOneShot(pick)
-  // Long enough that the gesture is not something the viewer waits for,
-  // and long enough that it does not become the beat the scene is on.
-  oneShotNextAt = time + 26 + Math.random() ** 1.4 * 46
 }
 
 function emotionForStatus(status: YXZStatus) {
@@ -1098,6 +1016,52 @@ function guardModelShape(seconds: number) {
 // the part that swings around it.  A factor of one leaves the clip
 // alone; a factor of zero pins the bone to the pose it spends most of
 // its time in.
+//
+// The mean of a quaternion track is computed by `meanQuaternionTrack`,
+// which chains the keys into one hemisphere before summing them.
+function meanQuaternionTrack(values: Float32Array, out: THREE.Quaternion) {
+  let x = 0
+  let y = 0
+  let z = 0
+  let w = 0
+  // A quaternion track stores four components per key.
+  const keys = Math.floor(values.length / 4)
+  // Quaternions are double covered: q and -q are the same rotation, and
+  // an exporter is free to write either.  The exporter wrote half of
+  // the neck bone's keys with the sign flipped, and a plain sum of
+  // those cancels towards zero -- and a zero quaternion normalised is
+  // the identity, which is not a pose any bone was ever in.  The head
+  // hangs off the neck, so the head ends up somewhere it was never
+  // drawn and the helmet opens up.  Chaining the keys into a single
+  // hemisphere before summing is what makes the average mean anything.
+  let previousX = 0
+  let previousY = 0
+  let previousZ = 0
+  let previousW = 1
+  for (let index = 0; index < keys; index++) {
+    const at = index * 4
+    let qx = values[at]
+    let qy = values[at + 1]
+    let qz = values[at + 2]
+    let qw = values[at + 3]
+    if (qx * previousX + qy * previousY + qz * previousZ + qw * previousW < 0) {
+      qx = -qx
+      qy = -qy
+      qz = -qz
+      qw = -qw
+    }
+    previousX = qx
+    previousY = qy
+    previousZ = qz
+    previousW = qw
+    x += qx
+    y += qy
+    z += qz
+    w += qw
+  }
+  return out.set(x, y, z, w).normalize()
+}
+
 function calmClipMotion(clip: THREE.AnimationClip, keep: Record<string, number>) {
   const suffix = '.quaternion'
   const mean = new THREE.Quaternion()
@@ -1115,46 +1079,8 @@ function calmClipMotion(clip: THREE.AnimationClip, keep: Record<string, number>)
     // leaving it alone is better than corrupting it.
     if (!(values instanceof Float32Array))
       continue
-    let x = 0
-    let y = 0
-    let z = 0
-    let w = 0
-    // A quaternion track stores four components per key.
     const keys = Math.floor(values.length / 4)
-    // Quaternions are double covered: q and -q are the same rotation, and
-    // an exporter is free to write either.  The exporter wrote half of
-    // the neck bone's keys with the sign flipped, and a plain sum of
-    // those cancels towards zero -- and a zero quaternion normalised is
-    // the identity, which is not a pose any bone was ever in.  The head
-    // hangs off the neck, so the head ends up somewhere it was never
-    // drawn and the helmet opens up.  Chaining the keys into a single
-    // hemisphere before summing is what makes the average mean anything.
-    let previousX = 0
-    let previousY = 0
-    let previousZ = 0
-    let previousW = 1
-    for (let index = 0; index < keys; index++) {
-      const at = index * 4
-      let qx = values[at]
-      let qy = values[at + 1]
-      let qz = values[at + 2]
-      let qw = values[at + 3]
-      if (qx * previousX + qy * previousY + qz * previousZ + qw * previousW < 0) {
-        qx = -qx
-        qy = -qy
-        qz = -qz
-        qw = -qw
-      }
-      previousX = qx
-      previousY = qy
-      previousZ = qz
-      previousW = qw
-      x += qx
-      y += qy
-      z += qz
-      w += qw
-    }
-    mean.set(x, y, z, w).normalize()
+    meanQuaternionTrack(values, mean)
     for (let index = 0; index < keys; index++) {
       const at = index * 4
       key.set(values[at], values[at + 1], values[at + 2], values[at + 3])
@@ -1165,6 +1091,71 @@ function calmClipMotion(clip: THREE.AnimationClip, keep: Record<string, number>)
       values[at + 3] = out.w
     }
     touched++
+  }
+  return touched
+}
+
+// ---------------------------------------------------------------------
+// The held pose.
+//
+// Every track in a clip is rewritten so that all of its keys carry the
+// same value: the mean rotation for a rotation track, the mean offset
+// for a position, the mean factor for a scale.  What comes out is a
+// clip that can play for ever without moving anything, and what it
+// holds is the pose the clip spends most of its time in.
+//
+// For the idle clip that pose is the character's own: the exporter
+// wrote it with the arms down at her sides rather than in the rig's
+// rest shape, so averaging the idle's cycle gives the standing pose
+// the model was drawn in.  It is a better pose than any single frame
+// of the clip, because a single frame is whatever the animation
+// happened to be passing through.
+//
+// This is the whole body of the held-pose mode.  One clip, one pose,
+// written once and never fought over: a figure that stands in a good
+// pose and blinks is a figure, and a figure that four different
+// layers are re-posing every frame is a puppet.
+function freezeClipPose(clip: THREE.AnimationClip) {
+  const rotation = new THREE.Quaternion()
+  const mean = new THREE.Vector3()
+  let touched = 0
+  for (const track of clip.tracks) {
+    if (track instanceof THREE.QuaternionKeyframeTrack) {
+      const values = track.values
+      if (!(values instanceof Float32Array))
+        continue
+      meanQuaternionTrack(values, rotation)
+      for (let at = 0; at < values.length; at += 4) {
+        values[at] = rotation.x
+        values[at + 1] = rotation.y
+        values[at + 2] = rotation.z
+        values[at + 3] = rotation.w
+      }
+      touched++
+      continue
+    }
+    if (track instanceof THREE.VectorKeyframeTrack) {
+      const values = track.values
+      if (!(values instanceof Float32Array))
+        continue
+      const stride = track.getValueSize()
+      const count = Math.floor(values.length / stride)
+      mean.set(0, 0, 0)
+      for (let index = 0; index < count; index++) {
+        mean.x += values[index * stride]
+        mean.y += values[index * stride + 1]
+        mean.z += values[index * stride + 2]
+      }
+      if (count > 0)
+        mean.multiplyScalar(1 / count)
+      for (let index = 0; index < count; index++) {
+        const at = index * stride
+        values[at] = mean.x
+        values[at + 1] = mean.y
+        values[at + 2] = mean.z
+      }
+      touched++
+    }
   }
   return touched
 }
@@ -1625,7 +1616,7 @@ const LIFE_BONES: {
   // reads as a tic.  The only things that may move this bone are the
   // walk, the attention model, and the small movements -- all three of
   // which are further down, and none of which is a drift.
-  { bone: 'head', drift: 0, gain: 0, micro: 0.02, breath: 0, lag: 0.46, rate: 0.019, phase: 6.5, cell: 22.7, follow: 0, drive: 'head' },
+  { bone: 'head', drift: 0, gain: 0, micro: 0.06, breath: 0.045, lag: 0.46, rate: 0.019, phase: 6.5, cell: 22.7, follow: 0, drive: 'head' },
   // The arms and the wings ride on the shoulders, so they take the
   // shoulder rise and very little of their own.  They used to take a
   // seventh of a degree each on top of the chest's third, which put
@@ -2642,16 +2633,26 @@ let lifeMoveDeg = new Float32Array(0)
 const lifeGazeTurn = new THREE.Vector2()
 let lifeGazeStrength = 0
 
-// Debug switches, so the two halves of the motion can be compared against
-// each other without a rebuild: `?noCalm=1` leaves the clips as they were
-// authored, `?noLife=1` leaves the character standing perfectly still.
+// Debug switches, so the held pose and the old behaviour can be compared
+// against each other without a rebuild: `?noCalm=1` leaves the clips as
+// they were authored, `?authored=1` brings the authored idle back.
+//
+// The behaviour layer is on by default.  It carries the small gestures --
+// nod, lift, tilt, glance, the gaze and the breath -- that keep the figure
+// from reading as a mannequin between sentences.  Everything it moves is
+// low-gain and on its own clock, and the bones it owns are the head, the
+// arms (held), the wings and the ring; the authored idle keeps the
+// skeleton, so no bone is written twice and nothing distorts.
+// `?noLife=1` turns the layer off for comparison.
 let calmEnabled = true
 let lifeEnabled = true
+let authoredEnabled = false
 
 function readMotionFlags() {
   const params = new URLSearchParams(window.location.search)
   calmEnabled = !params.has('noCalm')
   lifeEnabled = !params.has('noLife')
+  authoredEnabled = params.has('authored')
 }
 
 function smoothstep(value: number) {
@@ -4123,10 +4124,6 @@ function animate(now: number) {
   // the pose the body is actually in.
   if (!still)
     applyLifeLayer(delta * motionScale * lifeTimeScale)
-  // And the authored gestures are scheduled on the same clock, so that
-  // they wait for a gap in the behaviour rather than cutting across it.
-  if (!still)
-    updateOneShots(lifeClock)
   guardModelShape(seconds)
 
   // Mirror the update order AIRI's own VRM stage uses, because we own the
@@ -4417,16 +4414,6 @@ onMounted(async () => {
         freeze: (value: boolean) => {
           poseFrozen = value
         },
-        // Fire one of the authored gestures on demand, so the visual QA
-        // harness can look at a wave without waiting for the scheduler to
-        // decide that it is time.
-        oneShot: (name: string) => {
-          if (!actionMap.has(name))
-            return false
-          playOneShot(name)
-          return true
-        },
-        oneShotPlaying: () => oneShotPlaying,
         // Run the character's clock faster than the wall clock, so a
         // capture in a slow browser can be asked for a minute of the
         // character's time instead of the three seconds it managed to
@@ -4652,14 +4639,29 @@ onMounted(async () => {
       // stock AnimationMixer drives them without humanoid conversion.
       mixer = new THREE.AnimationMixer(vrm.scene)
       for (const clip of loaded.animations) {
-        // The body belongs to the authored idle, and the wings and the
-        // ring belong to the behaviour layer.  The clip keeps the head
-        // and the arms -- the parts of the character that are hers --
-        // and hands the rest over.
-        releaseAuthoredBones(clip)
+        // The held pose is the idle clip, frozen: it keeps every bone it
+        // has, so the figure stands in the pose the model was drawn in
+        // rather than in the rig's rest shape, and it writes that pose
+        // and nothing else.
+        //
+        // The other clips give the skeleton over, as they always did.
+        // They are not played any more -- a change of state is a change
+        // of expression now, not a change of pose -- but they are left
+        // in a state where nothing is fighting over a bone if the
+        // authored idle is switched back on for comparison.
+        if (clip.name !== HELD_POSE_CLIP || authoredEnabled)
+          releaseAuthoredBones(clip)
+        // The keys are edited in place, so this has to happen before the
+        // action is created from the clip.
+        if (clip.name === HELD_POSE_CLIP && calmEnabled && !authoredEnabled) {
+          // One pose, held.  Every key of every track becomes the value
+          // the clip spends most of its time at, so the mixer can play it
+          // for ever and the figure will not move a millimetre.
+          freezeClipPose(clip)
+          continue
+        }
         // Take the visible loop out of the clip before the mixer ever sees
-        // it.  The keys are edited in place, so this has to happen before
-        // the action is created from the clip.
+        // it.
         const keep = CLIP_CALM[clip.name]
         if (keep && calmEnabled)
           calmClipMotion(clip, keep)
@@ -4687,13 +4689,12 @@ onMounted(async () => {
       }
       // The idle itself.
       //
-      // It is a second action rather than a track inside the state clips,
-      // and that is the point: the idle's clock runs on through every
-      // state change and every gesture, so the weight shift the character
-      // is standing in never jumps when she starts speaking.  Its own
-      // action also keeps it out of the state clips' cross-fade, which
-      // would otherwise average the two poses into a smear.
-      if (authoredRest) {
+      // The authored idle is the reference character's own weight shift,
+      // retargeted onto this rig.  It is off by default: the held pose
+      // stands on its own, and a second writer on the skeleton is what
+      // made the figure look like it was being pulled in two directions.
+      // `?authored=1` brings it back for a side-by-side comparison.
+      if (authoredRest && authoredEnabled) {
         const authoredClip = buildAuthoredIdleClip(
           decodeAuthoredIdle(authoredIdlePayload),
           vrm,
@@ -4712,29 +4713,7 @@ onMounted(async () => {
           authoredAction.play()
         }
       }
-      // `AnimationAction` has no listener of its own; the mixer reports
-      // `finished` and names the action.  An authored gesture goes back to
-      // the state clip when it runs out, and the celebration falls back to
-      // idle, otherwise the character freezes on its last pose for the rest
-      // of the session.
-      mixer.addEventListener('finished', (event) => {
-        if (event.action !== activeAction
-          || activeAction?.loop !== THREE.LoopOnce) {
-          return
-        }
-        if (oneShotPlaying) {
-          // The gesture has run to its end.  Back to what she was doing.
-          selectAction(props.status)
-          return
-        }
-        if (props.status === 'success')
-          selectAction('idle')
-      })
-      selectAction(props.status)
-      // The first authored gesture comes reasonably early, so that a
-      // visitor who opens the page sees the figure move on its own rather
-      // than assuming it is a still render.
-      oneShotNextAt = 10 + Math.random() * 8
+      selectAction()
     }
     if (token !== loadToken)
       return
@@ -4760,7 +4739,8 @@ onMounted(async () => {
 })
 
 watch(() => props.status, (status) => {
-  selectAction(status)
+  // The body does not change with the state any more; the face does.
+  selectAction()
   emote?.setEmotion(emotionForStatus(status))
 })
 
@@ -4815,8 +4795,6 @@ onUnmounted(() => {
   blinkStart = -1
   blinkQueue = 0
   blinkNextAt = 2
-  oneShotNextAt = 0
-  oneShotPlaying = ''
   mouthEnvelope = 0
   visemeClock = 0
   visemeIndex = 0
@@ -4874,7 +4852,13 @@ onUnmounted(() => {
 
 .yxz-real-model-bubble {
   position: absolute;
-  top: 4%;
+  /*
+   * The bubble is anchored to the top of the scene by default, which is
+   * where it belongs on a page that is nothing but the character.  A page
+   * that puts a title over the stage can move it out of the way without
+   * this component having to know that such a page exists.
+   */
+  top: var(--yxz-bubble-top, 4%);
   left: 50%;
   z-index: 2;
   display: flex;
