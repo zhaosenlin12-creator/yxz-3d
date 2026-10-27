@@ -235,21 +235,24 @@ export async function createYXZCartoonModel(request: YXZModelRequest, fetcher: t
   linked.signal.addEventListener('abort', onAbort, { once: true })
   const progressTask = pollYXZModelProgress(request.sessionId, progressController.signal, request.onProgress, fetcher)
 
-  // Quality-first engine chain: Hunyuan3D-2 (local, high) -> Tripo3D (cloud PBR) -> TripoSR cartoon (fallback).
+  // Quality-first engine chain: Tripo3D cloud PBR (coloured, high) ->
+  // local TripoSR reconstruction (painted from the front view) -> cartoon relief.
+  // Hunyuan3D-2 is left out of the automatic chain: it is slow on this machine
+  // and exports an unpainted mesh; the two fallbacks below both stay colourful.
   const engines: Array<{ endpoint: string, label: string, body: Record<string, unknown> }> = [
     {
-      endpoint: '/api/3d_hy',
-      label: 'Hunyuan3D',
-      body: { steps: 5, octree: 96 },
-    },
-    {
       endpoint: '/api/3d_tripo',
-      label: 'Tripo3D',
+      label: 'Tripo3D 高清',
       body: { target_height_mm: 70, model_version: 'v3.1-20260211', texture_quality: 'detailed' },
     },
     {
+      endpoint: '/api/3d_v2',
+      label: '本地彩色 3D',
+      body: { views: 1 },
+    },
+    {
       endpoint: '/api/3d_cartoon',
-      label: 'TripoSR',
+      label: 'TripoSR 浮雕',
       body: { layers: 6, layer_step_mm: 4, base_mm: 2, target_side: 384 },
     },
   ]

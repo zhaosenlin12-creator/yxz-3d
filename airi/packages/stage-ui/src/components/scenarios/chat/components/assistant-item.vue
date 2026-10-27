@@ -110,6 +110,7 @@ const hideInternalFailure = computed(() => !creation.value
             :previews="creation.previews"
             :model-url="creation.model?.glbUrl"
             :stl-url="creation.model?.stlUrl"
+            :session-id="creation.sessionId"
             :status="creation.status"
             :progress-msg="creation.progressMsg"
             :interactive="false"

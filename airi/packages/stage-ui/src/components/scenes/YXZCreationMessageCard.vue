@@ -41,6 +41,19 @@ const gallery = computed<YXZCardPreviewItem[]>(() => {
 const lightboxOpen = ref(false)
 const lightboxIndex = ref(0)
 
+function openStudio() {
+  const item = gallery.value[lightboxIndex.value]
+  if (!item || !props.sessionId)
+    return
+  const index = (props.previews?.length ? props.previews?.findIndex(p => p.src === item.src) : 0) ?? 0
+  const url = new URL('/yxz-studio', typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:5199')
+  url.searchParams.set('session', props.sessionId)
+  url.searchParams.set('image', String(Math.max(0, index)))
+  url.searchParams.set('src', item.src)
+  url.searchParams.set('caption', item.caption || props.caption)
+  window.open(url.toString(), '_blank', 'noopener,noreferrer')
+}
+
 function openLightbox(index: number) {
   lightboxIndex.value = index
   lightboxOpen.value = true
@@ -111,6 +124,7 @@ async function copyPreviewAddress() {
     <div class="yxz-creation-card-zoom-hint">
       <button type="button" @click="openLightbox(0)">点击放大预览</button>
       <a :href="previewSrc" target="_blank" rel="noopener noreferrer">在新页面打开</a>
+      <button v-if="sessionId && status !== 'model-building'" type="button" class="yxz-creation-card-studio" @click="openStudio">打开创作面板</button>
       <span v-if="gallery.length > 1">共 {{ gallery.length }} 张</span>
     </div>
     <p v-if="description" class="yxz-creation-card-description">{{ description }}</p>
@@ -323,6 +337,21 @@ async function copyPreviewAddress() {
   cursor: pointer;
   font-size: .7rem;
   text-decoration: underline;
+}
+
+.yxz-creation-card-zoom-hint .yxz-creation-card-studio {
+  margin-left: .2rem;
+  padding: .18rem .4rem;
+  border: 1px solid #18a8e0;
+  border-radius: .45rem;
+  background: rgba(24, 168, 224, .08);
+  color: #087eae;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.yxz-creation-card-zoom-hint .yxz-creation-card-studio:hover {
+  background: rgba(24, 168, 224, .16);
 }
 
 .yxz-lightbox {

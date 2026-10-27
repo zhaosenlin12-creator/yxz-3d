@@ -281,6 +281,14 @@ def generate_3d(image_paths, output_dir, *, mc_res=128, threshold=15.0, max_view
     # Surface the view count used so callers can log it
     used_views = len(views_to_use)
 
+    # Paint the white reconstruction with the front-view reference image so the
+    # preview/3D model is coloured even when the cloud Tripo3D PBR path is off.
+    try:
+        import mesh_postprocess as _mp
+        mesh = _mp.paint_mesh_from_front(mesh, fg_images[0], camera_axis="z")
+    except Exception as _pe:
+        print(f"[triposr] paint skipped: {_pe}", flush=True)
+
     glb_path = os.path.join(output_dir, "mesh.glb")
     obj_path = os.path.join(output_dir, "mesh.obj")
     stl_path = os.path.join(output_dir, "mesh.stl")

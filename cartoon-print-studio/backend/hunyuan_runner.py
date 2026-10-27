@@ -331,6 +331,16 @@ def generate_3d(image_paths, output_dir, *,
     if max(mesh.extents) > 0:
         mesh.apply_scale(100.0 / max(mesh.extents))
 
+    # Paint the white reconstruction with the front-view source image so the
+    # model carries colour even when cloud PBR is unavailable.
+    try:
+        from PIL import Image as _PILImage
+        import mesh_postprocess as _mp
+        _paint_src = _PILImage.open(image_paths[0]).convert("RGB") if isinstance(image_paths, list) else _PILImage.open(image_paths).convert("RGB")
+        mesh = _mp.paint_mesh_from_front(mesh, _paint_src, camera_axis="z")
+    except Exception as _pe:
+        print(f"[hunyuan] paint skipped: {_pe}", flush=True)
+
     glb_path = os.path.join(output_dir, "mesh.glb")
     obj_path = os.path.join(output_dir, "mesh.obj")
     stl_path = os.path.join(output_dir, "mesh.stl")

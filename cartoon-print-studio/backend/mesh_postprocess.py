@@ -11,6 +11,58 @@ PRINT_LENGTH_MM = 100.0
 MAX_DEBRIS_DIAMETER_MM = 5.0
 
 
+def paint_mesh_from_front(mesh, ref_image, *, camera_axis="z"):
+    """Paint a white/grey reconstruction mesh with a front-view reference image.
+
+    Planar projection: the camera sits on `camera_axis` (default +z), the image
+    plane covers the other two axes. Vertex colours are attached so GLB/OBJ
+    exports keep the cartoon paint; STL stays colourless (slicer format).
+
+    Returns the same mesh with `visual` replaced. If the image has no alpha
+    (or projection fails) the mesh is returned unchanged.
+    """
+    try:
+        from PIL import Image as _PILImage
+        rgb = np.asarray(_PILImage.fromarray(np.asarray(ref_image)).convert("RGB")).astype(np.float32) / 255.0
+    except Exception as _e:
+        print(f"[mesh] paint skip (image): {_e}", flush=True)
+        return mesh
+    if mesh is None or not len(mesh.vertices):
+        return mesh
+    try:
+        H, W = rgb.shape[:2]
+        if H < 4 or W < 4:
+            return mesh
+        v = mesh.vertices
+        if camera_axis == "z":
+            xs, ys = v[:, 0], v[:, 1]
+        elif camera_axis == "y":
+            xs, ys = v[:, 0], v[:, 2]
+        elif camera_axis == "x":
+            xs, ys = v[:, 1], v[:, 2]
+        else:
+            xs, ys = v[:, 0], v[:, 1]
+        lo_x, hi_x = float(xs.min()), float(xs.max())
+        lo_y, hi_y = float(ys.min()), float(ys.max())
+        if (hi_x - lo_x) < 1e-9 or (hi_y - lo_y) < 1e-9:
+            return mesh
+        u = (xs - lo_x) / (hi_x - lo_x)
+        vv = (ys - lo_y) / (hi_y - lo_y)
+        px = np.clip((u * (W - 1)).astype(np.int64), 0, W - 1)
+        py = np.clip(((1.0 - vv) * (H - 1)).astype(np.int64), 0, H - 1)
+        colors = rgb[py, px]
+        rgba = np.zeros((len(mesh.vertices), 4), dtype=np.uint8)
+        rgba[:, 0] = (colors[:, 0] * 255).astype(np.uint8)
+        rgba[:, 1] = (colors[:, 1] * 255).astype(np.uint8)
+        rgba[:, 2] = (colors[:, 2] * 255).astype(np.uint8)
+        rgba[:, 3] = 255
+        mesh.visual = trimesh.visual.ColorVisuals(mesh=mesh, vertex_colors=rgba)
+        print(f"[mesh] painted {len(mesh.vertices)} vertices from front view ({camera_axis})", flush=True)
+    except Exception as _e:
+        print(f"[mesh] paint skip (projection): {_e}", flush=True)
+    return mesh
+
+
 def _sanitize_printable_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     """Make a generated mesh acceptable to a slicer.
 

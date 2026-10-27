@@ -40,6 +40,28 @@ Write-Host "==============================================" -ForegroundColor Cya
 Write-Host "  宜小智工作台 一键启动" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
+# ---- 0) 依赖预检（每步显式 OK / FAIL） ----
+function Step-Ok([string]$Label) { Write-Host ("  [OK]   " + $Label) -ForegroundColor Green }
+function Step-Fail([string]$Label) { Write-Host ("  [FAIL] " + $Label) -ForegroundColor Red }
+function Step-Info([string]$Label) { Write-Host ("  [..]   " + $Label) -ForegroundColor Cyan }
+function Show-Spinner([int]$DurationSec) {
+    $chars = '|/-\'
+    $end = (Get-Date).AddSeconds($DurationSec)
+    $i = 0
+    while ((Get-Date) -lt $end) {
+        Write-Host ("`r  等待中 " + $chars[$i % 4] + " ") -NoNewline
+        $i++
+        Start-Sleep -Milliseconds 220
+    }
+    Write-Host "`r                        " -NoNewline
+}
+
+Step-Info "预检依赖 ..."
+$nodeBin = Get-Command node.exe -ErrorAction SilentlyContinue
+$corepackBin = Get-Command corepack.cmd -ErrorAction SilentlyContinue
+if ($nodeBin) { Step-Ok "Node.js: $($nodeBin.Source)" } else { Step-Fail "未找到 Node.js（前端无法启动）" }
+if ($corepackBin) { Step-Ok "corepack 可用" } else { Step-Info "corepack 未启用（将尝试直接找 vite）" }
+
 # ---- 1) 后端 ----
 $py = Join-Path $backendRoot 'ai\forge-webui\venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $py)) {
@@ -61,6 +83,8 @@ if (Test-Port $BackendPort) {
         -WorkingDirectory $backendRoot -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru
     Write-Host "[后端] 启动中 PID=$($be.Id) (日志: $out)" -ForegroundColor Green
 }
+Write-Host "[后端] 等待就绪 ..." -ForegroundColor Cyan
+Show-Spinner 2
 $beReady = $false
 for ($i = 0; $i -lt 40; $i++) {
     if (Test-Port $BackendPort) {
@@ -73,8 +97,10 @@ for ($i = 0; $i -lt 40; $i++) {
 }
 if ($beReady) {
     Write-Host "[后端] 就绪：http://127.0.0.1:$BackendPort  (API keys 已自动读取 keys.txt)" -ForegroundColor Green
+    Step-Ok "后端服务 (8000) 启动成功"
 } else {
     Write-Host "[后端] 等待超时，检查 .run\backend-*.err.log。" -ForegroundColor Red
+    Step-Fail "后端服务 (8000) 未就绪"
     if (Test-Path -LiteralPath (Join-Path $root ".run\backend-$BackendPort.err.log")) {
         Get-Content -LiteralPath (Join-Path $root ".run\backend-$BackendPort.err.log") -Tail 20
     }
@@ -120,11 +146,13 @@ if (-not $NoFrontend) {
     }
     if ($feReady) {
         Write-Host "[前端] 就绪：http://127.0.0.1:$FrontendPort" -ForegroundColor Green
+        Step-Ok "前端服务 (5199) 启动成功"
         if (-not $NoBrowser) {
             Start-Process "http://127.0.0.1:$FrontendPort/"
         }
     } else {
         Write-Host "[前端] 等待超时（首次冷编译可能较慢），查看 .run\frontend-*.err.log。" -ForegroundColor Red
+        Step-Fail "前端服务 (5199) 未就绪"
         if (Test-Path -LiteralPath (Join-Path $root ".run\frontend-$FrontendPort.err.log")) {
             Get-Content -LiteralPath (Join-Path $root ".run\frontend-$FrontendPort.err.log") -Tail 20
         }
@@ -132,4 +160,19 @@ if (-not $NoFrontend) {
 }
 
 Write-Host ""
-Write-Host "完成。前端 http://127.0.0.1:$FrontendPort ，后端 http://127.0.0.1:$BackendPort" -ForegroundColor Cyan
+Write-Host "==============================================" -ForegroundColor Cyan
+Write-Host "  启动结果汇总" -ForegroundColor Cyan
+Write-Host "==============================================" -ForegroundColor Cyan
+if (Test-Port $BackendPort) {
+    Step-Ok "后端  http://127.0.0.1:$BackendPort"
+} else {
+    Step-Fail "后端 未监听 :$BackendPort"
+}
+if (-not $NoFrontend -and (Test-Port $FrontendPort)) {
+    Step-Ok "前端  http://127.0.0.1:$FrontendPort"
+} elseif ($NoFrontend) {
+    Step-Info "前端 已按参数跳过（-NoFrontend）"
+} else {
+    Step-Fail "前端 未监听 :$FrontendPort"
+}
+Write-Host ""
