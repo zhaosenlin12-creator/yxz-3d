@@ -125,7 +125,7 @@ pwsh -File start-all.ps1 -BackendPort 8100
 
 | 配置项 | 位置 | 说明 |
 |---|---|---|
-| LLM / 生图 / 3D API key | `cartoon-print-studio\keys.txt` | 按行标签分类：`minimax-key:`/`minimax-key-2:`(LLM)、`deepseek-key:`(LLM 备用)、`aixj-image-key:`(生图首选)、`minimax-image-key:`(生图备用)、`jojo-image-key:`、`TRIPO:`(3D 首选)、`HUNYUAN3D:`(3D 备用) |
+| LLM / 生图 / 3D API key | `cartoon-print-studio\keys.txt` | 按行标签分类：`minimax-key:`/`minimax-key-2:`(LLM)、`deepseek-key:`(LLM 备用)、`aixj-image-key:`(生图首选)、`minimax-image-key:`(生图备用)、`jojo-image-key:`、`TRIPO:`(3D 首选，值需为 `tsk_...`)、`hunyuan3d-secret-id:`/`hunyuan3d-secret-key:`(3D 备用)；详见第十节 |
 | API key 空白模板 | `cartoon-print-studio\keys.txt.example` | 仓库内可提交；`install-new-pc.ps1` 发现缺 `keys.txt` 时会自动复制一份，填完 key 重启后端即生效 |
 | 后端依赖 | `backend-requirements.txt` | 已冻结；`open-clip-torch` 因 `protobuf<4` 与 `onnxruntime` 冲突，单独用 `--no-deps` 安装 |
 | 镜像 | `install-new-pc.ps1 -PypiIndex / -NpmRegistry` | 默认清华源 + npmmirror；`-SlowNetwork` 走官方源 |
