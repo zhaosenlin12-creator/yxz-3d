@@ -64,13 +64,35 @@ RINGS = (0.0, 0.18, 0.36, 0.54, 0.72, 0.88)
 # fraction of the rim's own radius.  Without it there is a hairline gap
 # between the hole and the dish, and what shows through that gap is the
 # pale inside of the muzzle.
+#
+# This is a fraction and not a number of millimetres, and the difference
+# is the whole bug.  The rim of a closed mouth is a very flat shape --
+# sixty millimetres across and two deep -- so an outset of a fixed
+# number of millimetres does not tuck the edge under the plate by that
+# many millimetres: the outset is applied along the rim's own radius,
+# and the radius of a flat shape is almost zero in the direction that
+# matters, so the dish's short axis is inflated by the whole of it.  A
+# twelve millimetre outset turned a two millimetre slit into a
+# twenty-six millimetre lens, eighty-four millimetres wide, and that
+# lens is what was lying across the face like a sheet of red plastic.
 OUTSET = 0.012
 
 # How far behind the plate's edge the dish's edge sits, in metres.  The
 # plate is a sheet with no thickness, so its edge is where the face ends
 # and the hole begins; the dish has to be behind that edge or it shows
 # through as a dark line round the mouth.
-SETBACK = 0.0040
+#
+# "Behind" is towards the model's own positive z, and the sign matters:
+# the mouth's plate is modelled with the face looking down the negative z
+# axis, so a dish that is built a few millimetres towards the negative z
+# is not inside the mouth at all -- it is a red sheet lying on the front
+# of the face, which is what the last build of this looked like.
+#
+# It also has to be small.  The inside of the muzzle is only five
+# millimetres behind the plate, so a dish that is set back further than
+# that has gone through the inside of the head and comes out on the far
+# side of the mouth.
+SETBACK = 0.0015
 
 # How much deeper the middle of the dish is than its own edge.
 DEPTH = 0.0018
@@ -84,24 +106,47 @@ THROAT = np.array([40.0, 11.0, 15.0])
 SHADE = (0.44, 0.14, 0.16)
 
 
+def rim_normals(rim: np.ndarray) -> np.ndarray:
+    """The outward normal of the rim, in the plane of the mouth.
+
+    The rim is a ring of points around the hole, and the dish's edge has
+    to sit outside that ring all the way round -- by the same amount,
+    measured square to the ring.  A radial direction would not do it:
+    the radius of a flat shape and its normal are different directions
+    except at the ends, so a radial push slides along the ring instead
+    of away from it, and by a different amount at every point.
+    """
+    xy = rim[:, :2]
+    centre = xy.mean(axis=0)
+    tangent = np.roll(xy, -1, axis=0) - np.roll(xy, 1, axis=0)
+    lengths = np.linalg.norm(tangent, axis=1, keepdims=True)
+    lengths[lengths < 1e-9] = 1.0
+    tangent = tangent / lengths
+    normal = np.column_stack([tangent[:, 1], -tangent[:, 0]])
+    # Point it away from the middle of the mouth, whatever way round the
+    # ring was wound.
+    pointing = np.sum((xy - centre) * normal, axis=1, keepdims=True)
+    normal = normal * np.where(pointing < 0, -1.0, 1.0)
+    return normal
+
+
 def dish_from_rim(rim: np.ndarray) -> np.ndarray:
     """The interior that fills the hole whose rim this is."""
     centre = rim.mean(axis=0)
-    outward = rim[:, :2] - centre[:2]
-    length = np.linalg.norm(outward, axis=1, keepdims=True)
-    length[length < 1e-9] = 1.0
-    outward = outward / length
+    outward = rim_normals(rim)
+    radius = float(np.max(np.linalg.norm(rim[:, :2] - centre[:2], axis=1)))
+    tuck = OUTSET * radius
 
     rings = []
     for step in RINGS:
         scale = 1.0 - step
         xy = centre[:2] + (rim[:, :2] - centre[:2]) * scale
-        xy = xy + outward * (OUTSET * (1.0 - step))
-        z = rim[:, 2] - SETBACK - DEPTH * step * step
+        xy = xy + outward * (tuck * (1.0 - step))
+        z = rim[:, 2] + SETBACK + DEPTH * step * step
         rings.append(np.column_stack([xy, z]))
 
     middle = np.array([[centre[0], centre[1],
-                        rim[:, 2].mean() - SETBACK - DEPTH * RINGS[-1] ** 2]])
+                        rim[:, 2].mean() + SETBACK + DEPTH * RINGS[-1] ** 2]])
     return np.concatenate(rings + [middle], axis=0)
 
 
@@ -229,6 +274,18 @@ def main() -> None:
     weights[:, 0] = 1.0
 
     # The texture.
+    #
+    # A previous build of this script left its own picture behind in the
+    # file, and rebuilding on top of that stacks another copy of it every
+    # time.  The cavity's texture is the last one in the file, so
+    # dropping it here and appending the new one below leaves every other
+    # material's texture index exactly where it was.
+    textures = document.get("textures", [])
+    images = document.get("images", [])
+    if textures and textures[-1].get("name") == "YXZ_MouthCavityTex":
+        source = textures.pop().get("source")
+        if source is not None and source == len(images) - 1:
+            images.pop(source)
     picture = mouth_texture()
     view = asset.append_view(picture)
     document.setdefault("images", []).append({

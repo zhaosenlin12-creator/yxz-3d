@@ -32,11 +32,25 @@ const props = withDefaults(defineProps<{
   speakingLevel?: number
   paused?: boolean
   src?: string
+  // Where the stage wants the character to sit.
+  //
+  // The home page floats the chat column over the right half of the
+  // stage, so a character centred in the canvas is half covered.  The
+  // stage already carries an offset and a scale for its other scenes;
+  // these are the same numbers, read the same way, so the 3D
+  // character can be pushed clear of the panel without the page
+  // having to know anything about cameras.
+  xOffset?: number | string
+  yOffset?: number | string
+  scale?: number
 }>(), {
   status: 'idle',
   speakingLevel: 0,
   paused: false,
   src: yxzVrmUrl,
+  xOffset: 0,
+  yOffset: 0,
+  scale: 1,
 })
 
 const emit = defineEmits<{
@@ -538,6 +552,30 @@ function emotionForStatus(status: YXZStatus) {
   return 'relaxed'
 }
 
+// The stage's offset, read as a fraction of the canvas.
+//
+// The stage hands the offset over as a number of percent, or as a CSS
+// length, because that is what the other scenes on the stage already
+// take.  A percent is a percent of the canvas; a pixel length is a
+// pixel length, and it is divided by the canvas to make it a fraction
+// of the same thing.
+function stageOffsetFraction(value: number | string | undefined, basis: number): number {
+  if (typeof value === 'number')
+    return Number.isFinite(value) ? value / 100 : 0
+  const text = String(value ?? '').trim()
+  if (!text)
+    return 0
+  const amount = Number.parseFloat(text)
+  if (!Number.isFinite(amount))
+    return 0
+  if (text.endsWith('%'))
+    return amount / 100
+  if (text.endsWith('px'))
+    return amount / Math.max(1, basis)
+  // A bare number in a string is a pixel length, the way CSS reads it.
+  return amount / Math.max(1, basis)
+}
+
 function resize() {
   if (!renderer || !camera || !canvasContainer.value)
     return
@@ -546,8 +584,24 @@ function resize() {
   camera.aspect = width / height
   // Keep the whole silhouette inside narrow embeds as well as desktop stages.
   const halfFov = THREE.MathUtils.degToRad(camera.fov * 0.5)
-  camera.position.z = Math.max(8.8, baselineWorldSize.x * 0.65 / (Math.tan(halfFov) * camera.aspect))
-  camera.lookAt(0, 2.05, 0)
+  const distance = Math.max(8.8, baselineWorldSize.x * 0.65 / (Math.tan(halfFov) * camera.aspect))
+  // The stage's zoom.  A bigger character is a closer camera, not a
+  // scaled model, so the light and the shadow stay where they were put.
+  const zoom = Math.max(0.1, props.scale || 1)
+  camera.position.z = distance / zoom
+  // And the stage's nudge.
+  //
+  // The camera pans rather than the model moving, so the character
+  // keeps its own place in the world -- the shadow it casts, the light
+  // on it and the ground it stands on do not travel with it.  The
+  // offset is a fraction of the canvas, which is what makes the same
+  // number work on a phone and on a desktop.
+  const visibleWidth = 2 * camera.position.z * Math.tan(halfFov) * camera.aspect
+  const visibleHeight = 2 * camera.position.z * Math.tan(halfFov)
+  const targetX = -stageOffsetFraction(props.xOffset, width) * visibleWidth
+  const targetY = -stageOffsetFraction(props.yOffset, height) * visibleHeight
+  camera.position.set(targetX, 2.25 + targetY, camera.position.z)
+  camera.lookAt(targetX, 2.05 + targetY, 0)
   camera.updateProjectionMatrix()
   renderer.setSize(width, height, false)
   // `composer.setSize` forwards to every pass, which is what keeps the edge
@@ -1115,12 +1169,21 @@ function calmClipMotion(clip: THREE.AnimationClip, keep: Record<string, number>)
 // written once and never fought over: a figure that stands in a good
 // pose and blinks is a figure, and a figure that four different
 // layers are re-posing every frame is a puppet.
-function freezeClipPose(clip: THREE.AnimationClip) {
+function freezeClipPose(clip: THREE.AnimationClip, live: Set<string> = new Set()) {
   const rotation = new THREE.Quaternion()
   const mean = new THREE.Vector3()
   let touched = 0
   for (const track of clip.tracks) {
     if (track instanceof THREE.QuaternionKeyframeTrack) {
+      // The bones the figure's life owns are left as the model drew them.
+      //
+      // Their curves are the artist's own -- a wing that flaps and a ring
+      // that floats -- and they were drawn for this rig on bones the skin
+      // says are rigid, so they cannot tear the mesh the way a pose that
+      // is averaged out of a cross-fade does.
+      const bone = track.name.slice(0, track.name.lastIndexOf('.'))
+      if (live.has(bone))
+        continue
       const values = track.values
       if (!(values instanceof Float32Array))
         continue
@@ -1159,6 +1222,52 @@ function freezeClipPose(clip: THREE.AnimationClip) {
   }
   return touched
 }
+
+// ---------------------------------------------------------------------
+// The life of the figure.
+//
+// The body holds one pose.  Four bones do not.
+//
+// Which four is not a matter of taste.  It is decided by the skin.  A
+// joint that owns its geometry rigidly -- every vertex it dominates
+// carrying the full weight -- can be turned and the geometry travels
+// with it as one solid piece.  A joint that shares its geometry with
+// its neighbours cannot: the band between them stretches, and a
+// stretched band across a shoulder or a cheek is the torn, twisted look
+// that made every earlier version of this figure read as broken.
+//
+// Measured on the shipped model by `scripts/probe_yxz_safe_bones.py`:
+//
+//   halo         6104 /  6104 vertices at full weight    rigid
+//   head        61428 / 61437                           rigid
+//   upperChest   7121 /  7121                           rigid
+//   wingL          916 /  3251                           rigid along the blade
+//   wingR          921 /  3321                           the same
+//   shoulders, arms, hands, spine, hips, legs            soft
+//
+// So the wings and the ring are left alone in the held clip, and the
+// mixer plays the artist's own flap and float -- smooth by
+// construction, and drawn for exactly this model.  The head is written
+// by the behaviour layer instead, because what the head does has to
+// answer to where the character is looking, and no clip can know that.
+//
+// Everything else is held.  A figure whose arms and legs are held and
+// whose wings, ring and head move is a figure standing and breathing; a
+// figure with eighteen independent drifts is a puppet, and a figure with
+// none of them is a render.
+//
+// These three are left alone in the frozen clip, so the mixer plays the
+// artist's own curves for them: the wing's flap and the ring's float.
+// Both are curves that were drawn for this rig and this mesh, which is
+// the strongest guarantee there is that they cannot tear it -- and the
+// ring is measured at zero weight shared with anything else at all, so
+// it is free to turn by any amount.
+//
+// The wings share about half their weight with the body, so their root
+// is the one place the flap could drag the mesh.  The root is inside
+// the shoulder blades, and the flap was authored against this body, so
+// the drag is covered by the geometry that is already there.
+const LIVE_ROTATION_BONES = new Set(['halo', 'wingL', 'wingR'])
 
 // The bones this clip never moves.
 //
@@ -1305,10 +1414,13 @@ const AUTHORED_BONES = [
  * flapped on their own clock, on top of a body that was barely moving,
  * which is the loudest single thing a figure like this can do wrong.
  *
- * The behaviour layer owns them instead, and it holds them the same way
- * in every state.
+ * The behaviour layer used to own them instead, and it held them the
+ * same way in every state -- which meant they never moved at all.  The
+ * mixer owns them now, and what it plays is the model's own: the flap
+ * and the float out of the idle clip, on the idle's own clock, so they
+ * are the same in every state and they are actually moving.
  */
-const BEHAVIOUR_BONES = ['wingL', 'wingR', 'halo']
+const BEHAVIOUR_BONES: string[] = []
 
 function releaseAuthoredBones(clip: THREE.AnimationClip) {
   const owned = new Set([...AUTHORED_BONES, ...BEHAVIOUR_BONES])
@@ -1603,12 +1715,23 @@ const LIFE_BONES: {
   // *together*, and eighteen independent parts do not move together no
   // matter how small each of them is.
   //
-  // The skeleton is not in this list any more.  It is driven by the
-  // authored idle -- one movement, retargeted onto this rig -- and the
-  // behaviour layer adds nothing to it.  What is left here is the head,
-  // which is aimed rather than animated, the two arms, which hold their
-  // pose and ride the shoulders, and the wings and the ring, which are
-  // the character's own and not the skeleton's.
+  // The skeleton is not in this list any more, and neither are the
+  // wings and the ring.  What is left here is the head and nothing
+  // else.
+  //
+  // The head is here because it is the one bone that has to answer to
+  // where the character is looking: it is aimed, and the eyes follow
+  // the aim.  The wings and the ring are not here because the mixer
+  // owns them now -- it plays the artist's own flap and float out of
+  // the model's own idle clip -- and two writers on one bone is not a
+  // blend but an argument, with the mixer and this layer each pulling
+  // the bone towards their own answer and the mesh reading the
+  // difference as a tremble.
+  //
+  // The arms were here too, holding a pose of zero degrees.  They are
+  // gone for the same reason the rest of the skeleton is: a bone that
+  // is written every frame is a bone that can drift, and the arms are
+  // soft-skinned all the way down to the fingers.
   //
   // The head keeps nothing at all.
   //
@@ -1617,11 +1740,11 @@ const LIFE_BONES: {
   // walk, the attention model, and the small movements -- all three of
   // which are further down, and none of which is a drift.
   { bone: 'head', drift: 0, gain: 0, micro: 0.06, breath: 0.045, lag: 0.46, rate: 0.019, phase: 6.5, cell: 22.7, follow: 0, drive: 'head' },
-  // The arms and the wings ride on the shoulders, so they take the
-  // shoulder rise and very little of their own.  They used to take a
-  // seventh of a degree each on top of the chest's third, which put
+  // The arms and the wings used to ride on the shoulders here, taking
+  // the shoulder rise and very little of their own.  They used to take
+  // a seventh of a degree each on top of the chest's third, which put
   // nearly half a degree of the same five second nod into them.
-  // The arms are held, not animated.
+  // The arms are held now -- not animated, not even written.
   //
   // They used to take a share of their own noise, which meant that each
   // arm was drifting on a signal of its own while the shoulders it is
@@ -1634,21 +1757,9 @@ const LIFE_BONES: {
   // already carry the whole body's movement.  A raised arm that moves
   // with the chest and does nothing else is a raised arm; an arm with
   // its own drift is a broken joint.
-  { bone: 'leftUpperArm', drift: 0, gain: 0, micro: 0, breath: 0, lag: 0.26, rate: 0.047, phase: 7.8, cell: 12.7, follow: 0, drive: 'noise' },
-  { bone: 'rightUpperArm', drift: 0, gain: 0, micro: 0, breath: 0, lag: 0.26, rate: 0.051, phase: 9.1, cell: 15.7, follow: 0, drive: 'noise' },
-  { bone: 'wingL', drift: 0.12, gain: 0.34, micro: 0.02, breath: 0.02, lag: 0.34, rate: 0.059, phase: 10.4, cell: 10.9, follow: 0, lead: 0.05, drive: 'noise' },
-  { bone: 'wingR', drift: 0.12, gain: 0.34, micro: 0.02, breath: 0.02, lag: 0.34, rate: 0.063, phase: 11.7, cell: 14.3, follow: 0, lead: 0.05, drive: 'noise' },
-  // The ring carries almost nothing and takes an age to get anywhere: a
-  // degree and a bit of wander on a quarter-minute period.  Enough that it
-  // is not a decal stuck to the model, far short of a spin -- a halo that
-  // visibly turns is the single most mechanical thing a character like
-  // this can do.
   //
-  // It used to wander four times as far as this.  A ring that drifts is a
-  // ring the eye can watch going round, and the ring is the largest single
-  // shape on screen, so a drift on it reads as the whole character
-  // circling rather than as the halo settling.
-  { bone: 'halo', drift: 0.12, gain: 0.10, micro: 0.03, breath: 0.04, lag: 0.44, rate: 0.038, phase: 13.0, cell: 21.1, follow: 0, lead: 0.12, drive: 'noise' },
+  // The wings and the ring are not here.  They are the model's own, and
+  // the model already says what they do.
 ]
 
 // The weight shift, and who takes how much of it.
@@ -1702,14 +1813,10 @@ const WEIGHT_SWAY: Record<string, { roll: number, yaw: number, pitch: number }> 
   // edge of, and it reads as a mistake however small it is.
   leftFoot: { roll: -1.30, yaw: 0, pitch: 0 },
   rightFoot: { roll: -1.30, yaw: 0, pitch: 0 },
-  // The ring leans a little with the figure.
-  //
-  // It is held in its own frame, so it does not follow the body the way
-  // the rest of the figure does, and a ring that does not move at all
-  // while the body leans under it reads as a sticker.  A third of the
-  // body's lean is enough to tie the two together and far short of
-  // enough to look like the ring is being carried around.
-  halo: { roll: 0.40, yaw: 0, pitch: 0 },
+  // The ring is not here.  It leans with the figure no longer, because
+  // the figure does not lean: the mixer plays the ring's own float, and
+  // a ring that floats on its own clock is a ring that reads as a
+  // separate object of light rather than as a decal stuck to the model.
 }
 
 // ---------------------------------------------------------------------
@@ -1818,36 +1925,25 @@ const LIFE_ACTIONS: LifeAction[] = [
   // A small nod to nobody.  Kept short and kept rare; a nod that happens
   // every few seconds is a tic, and a nod that happens every half minute
   // is a person.
-  // NOTE (2026-10-27): head-driven gestures (nod / headTilt) are disabled —
-  // they risk chin/face distortion on some rigs. Only non-face decorations
-  // (wings, halo) and authored body weight-shift remain active.
-  {
-    kind: 'wingFlick',
-    channels: [
-      { bone: 'wingL', axis: 1, deg: 2.6 },
-      { bone: 'wingR', axis: 1, deg: -2.3 },
-    ],
-    dur: 2.0,
-    lead: 0.14,
-    hold: 0.08,
-    gaze: 0,
-    weight: 0.6,
-  },
-  {
-    kind: 'haloSettle',
-    channels: [
-      { bone: 'halo', axis: 2, deg: 1.0 },
-      { bone: 'halo', axis: 1, deg: 0.7 },
-    ],
-    dur: 3.4,
-    lead: 0.24,
-    hold: 0.3,
-    gaze: 0,
-    weight: 0.6,
-  },
-  // A small deliberate tilt of the head.  Disabled for the same
-  // non-distortion reason as nod (see above): the head's only motion in
-  // this build is the micro-drift and the authored body weight-shift.
+  //
+  // The list is empty.
+  //
+  // It used to hold a flick of the wings and a settle of the ring.  Both
+  // are gone: the mixer plays the model's own flap and float out of the
+  // idle clip now, and a bone that two layers both write is a bone that
+  // is pulled between them -- which reads on screen as a tremble rather
+  // than as a movement.  What is left for this layer to do is aim the
+  // head, and the head's own life is the whole of that.
+  //
+  // The head-driven gestures (a nod, a tilt) were disabled in the last
+  // pass for a reason that has since been measured and found to be the
+  // wrong one: they were thought to risk distorting the chin.  The head
+  // bone owns 61428 of its 61437 vertices outright, so turning it cannot
+  // tear the face -- the risk was always the neck, which shares its
+  // geometry with the chest, and the neck is held.  They stay off
+  // because they are redundant, not because they are dangerous: the
+  // attention model already decides where the head looks, and a scripted
+  // nod on top of that reads as a tic.
 ]
 
 // Which movements suit which state.
@@ -1858,28 +1954,14 @@ const LIFE_ACTIONS: LifeAction[] = [
 // as a render with a status label on it.  Unlisted movements keep their
 // own weight.
 const LIFE_ACTION_BIAS: Record<YXZStatus, Record<string, number>> = {
-  idle: {
-    haloSettle: 1.2,
-    wingFlick: 0.5,
-  },
-  listening: {
-    wingFlick: 0.4,
-  },
-  thinking: {
-    haloSettle: 0.9,
-  },
-  processing: {
-    wingFlick: 1.6,
-    haloSettle: 0.8,
-  },
-  speaking: {
-    haloSettle: 0.8,
-    wingFlick: 0.6,
-  },
-  success: {
-    wingFlick: 2,
-    haloSettle: 0.9,
-  },
+  // Empty, because the movement list is.  The table is kept so that the
+  // shape of the code does not change if a movement is added back.
+  idle: {},
+  listening: {},
+  thinking: {},
+  processing: {},
+  speaking: {},
+  success: {},
 }
 
 // How much of the living layer each state gets.
@@ -2030,14 +2112,23 @@ interface AttentionTarget {
 // reads them completely differently.
 //
 // So the ceiling here is three degrees of yaw, which is a glance and not
-// a scan, and the head's living comes from the rock below instead.
+// a scan, and the head's living comes from the drift below instead.
 //
 // The pitch and the roll are not independent ceilings.  The tilt is
 // given a larger one because the tilt follows the rock: every degree
 // of rock carries a degree and a third of tilt with it, and the
 // ceiling has to be wide enough to let that through, or the coupling
 // is undone by the clamp and the head is back to two channels.
-const ATTENTION_CEILING = { yaw: 0.38, pitch: 0.34, roll: 0.46 }
+//
+// These numbers used to be a tenth of this: 0.38 of yaw, 0.34 of pitch,
+// 0.46 of roll.  The comment above has said "three degrees of yaw" all
+// along, and the branch that clamps the yaw uses the ceiling minus one
+// and a half as its limit -- which on 0.38 is a *negative* number, so
+// every look was being snapped to the wrong side of the middle.  A
+// third of a degree of head movement is not a decision: it is below the
+// threshold at which the eye reads a change at all, which is why the
+// figure sat there like a photograph while the head technically moved.
+const ATTENTION_CEILING = { yaw: 3.0, pitch: 2.6, roll: 3.4 }
 
 // Per state: how big a step is typical, how often the character comes back
 // to the middle, and how much longer it settles somewhere while thinking
@@ -2049,7 +2140,12 @@ const ATTENTION_SHAPE: Record<YXZStatus, {
   pitchBias: number
   rest: number
 }> = {
-  idle: { scale: 0.35, recentre: 0.18, dwell: 1, pitchBias: -0.1, rest: -0.1 },
+  // The idle is the state the figure spends most of its life in, so it
+  // is the state in which "alive" has to come from.  It used to be a
+  // third of the others' scale, on top of a ceiling that was a tenth of
+  // what it should have been, which together made the head a still
+  // photograph.  It is back in line with the other states now.
+  idle: { scale: 0.9, recentre: 0.18, dwell: 1, pitchBias: -0.1, rest: -0.1 },
   listening: { scale: 0.72, recentre: 0.42, dwell: 0.85, pitchBias: -0.25, rest: -0.7 },
   thinking: { scale: 0.78, recentre: 0.16, dwell: 1.75, pitchBias: 1.5, rest: 2.3 },
   processing: { scale: 0.82, recentre: 0.3, dwell: 1.3, pitchBias: 0.9, rest: 1.4 },
@@ -3134,10 +3230,25 @@ interface HeadGestureSpec {
 }
 
 const HEAD_GESTURES: HeadGestureSpec[] = [
-  // NOTE (2026-10-27): all head gestures disabled — head-driven motion
-  // (nod / lift / tilt / glance) risks chin/face distortion on this rig.
-  // The head's only remaining motion is the attention micro-drift and the
-  // authored body weight-shift.
+  // Empty.
+  //
+  // These used to be a nod, a lift, a tilt and a glance, and they were
+  // switched off in the last pass for a reason that has since been
+  // measured and found to be the wrong one: the note said they "risk
+  // chin/face distortion on this rig".
+  //
+  // They do not.  The head bone owns 61428 of its 61437 vertices
+  // outright -- the nine that it shares are at the neck -- so a turn of
+  // the head moves the whole head as one solid piece and there is
+  // nothing there to distort.  What the chin does is follow the head,
+  // which is what a chin is for.
+  //
+  // They stay off for the reason that is actually true: the attention
+  // model already decides where the head looks, and it does it as a
+  // target that is held and then changed, which is what a person does.
+  // A scripted nod on top of that is the same movement the attention
+  // model would have made, arriving on a different clock, and the two
+  // together read as a tic.
 ]
 
 interface HeadGesture {
@@ -3303,6 +3414,26 @@ const headAccentQuat = new THREE.Quaternion()
 const headCycleQuat = new THREE.Quaternion()
 const headCycleEuler = new THREE.Euler()
 
+// How far the head's own life is allowed to drift.
+//
+// The head is most of this character's silhouette, so a degree here is a
+// degree of the whole figure.
+//
+// These are the limits of the signal, not the sizes it actually takes:
+// the noise is a sum of three octaves that rarely line up, so in
+// practice it runs to about two fifths of its ceiling.  Three and a
+// half of pitch and two and a half of roll therefore come out as a
+// figure that settles and drifts and settles again -- enough that the
+// viewer does not read it as a still frame, little enough that nobody
+// could point at the head and say it moved.
+//
+// The reference character does the same thing and nothing else: her
+// yaw channel is flat for the whole of a two-minute idle, and all she
+// does with her head is rise and settle and tilt.  That is why there
+// is no yaw here either.
+const HEAD_LIFE_PITCH = 3.6
+const HEAD_LIFE_ROLL = 2.4
+
 function updateHeadShape(time: number, status: YXZStatus, out: THREE.Quaternion, actionPitch: number, actionYaw: number, actionRoll: number) {
   updateMotionLevels(time)
   updateHeadGestures(time, status)
@@ -3334,13 +3465,42 @@ function updateHeadShape(time: number, status: YXZStatus, out: THREE.Quaternion,
   )
   headAccentQuat.setFromEuler(headAccentEuler)
 
-  // Compose the idle posture as a normal humanoid Euler pose.  Treating
-  // pitch/yaw/roll as one axis-angle vector makes the rotation axis itself
-  // orbit as the values change, which is perceived as the head circling.
+  // The life under the aim.
+  //
+  // This used to be the "rock": three sums of harmonics of a single
+  // phase, read as pitch, yaw and roll.  Measured on the running figure
+  // it swung the head through eleven degrees, and because all three
+  // channels came off the same phase it drew a closed curve in the plane
+  // of the face -- a slow circle, which is the one thing the eye cannot
+  // stop watching.  That was the "the head is turning round and round"
+  // that this figure was always accused of.
+  //
+  // What is here now is value noise on two axes and never the third.
+  //
+  // The yaw is the one that is left out.  A head that tips while it also
+  // turns, and turns again while it is still tipped, goes round in slow
+  // circles, and the yaw is what closes the loop: the tip and the turn
+  // have to be independent for the head to read as a line rather than a
+  // wheel.  Where the head *looks* is the attention model's business,
+  // and that is a decision -- one axis, then another -- rather than a
+  // drift.
+  //
+  // The signal is value noise and not a sum of sines.  A sum of sines
+  // has a period however long the period is: the eye finds the fastest
+  // one, waits for it to come round again, and from then on it is
+  // watching a clock.  Value noise has no period at all, so the head is
+  // never in the same place twice and never repeats a shape.
+  //
+  // Two and a bit degrees of pitch and a degree and a half of roll is
+  // enough to read as a person standing and thinking, and it is safe:
+  // the head bone owns 61428 of its 61437 vertices outright, so a turn
+  // of the head moves the whole head as one solid piece and the only
+  // geometry it can drag is the nine vertices at the neck, which is
+  // nothing at all.
   headCycleEuler.set(
-    THREE.MathUtils.degToRad(swayHead.x),
-    THREE.MathUtils.degToRad(swayHead.y),
-    THREE.MathUtils.degToRad(swayHead.z),
+    THREE.MathUtils.degToRad(motionFbm(time / 12.7 + 2.3, MOTION_SEED + 311.7) * HEAD_LIFE_PITCH),
+    0,
+    THREE.MathUtils.degToRad(motionFbm(time / 15.3 + 7.9, MOTION_SEED + 317.3) * HEAD_LIFE_ROLL),
     'YXZ',
   )
   headCycleQuat.setFromEuler(headCycleEuler)
@@ -4053,7 +4213,7 @@ function animate(now: number) {
   // ever sees a lingering offset.
   if (introStart >= 0) {
     const introT = Math.min(1, (now - introStart) / INTRO_DURATION_MS)
-    const settle = 1 - Math.pow(1 - introT, 3)
+    const settle = 1 - (1 - introT) ** 3
     // Rise in the first third, then a soft landing bounce on the last third.
     const bouncePhase = Math.max(0, (introT - 0.62) / 0.38)
     const bounce = Math.sin(Math.min(1, bouncePhase) * Math.PI)
@@ -4323,6 +4483,19 @@ onMounted(async () => {
         // loaded.  A head that makes none is a rock and a head that
         // makes them all the time is a toy, and the rate says which.
         gestures: () => headGestureCount,
+        // Where the head is being aimed, and where it is aimed at.
+        // The difference between the two is the movement: the head is
+        // always somewhere, and the question is whether it is going
+        // anywhere.
+        attention: () => ({
+          yaw: +attentionNow.yaw.toFixed(3),
+          pitch: +attentionNow.pitch.toFixed(3),
+          roll: +attentionNow.roll.toFixed(3),
+          targetYaw: +attention.yaw.toFixed(3),
+          targetPitch: +attention.pitch.toFixed(3),
+          targetRoll: +attention.roll.toFixed(3),
+          ceiling: ATTENTION_CEILING,
+        }),
         clip: () => activeAction?.getClip().name ?? null,
         clipTime: () => activeAction?.time ?? null,
         // The authored idle runs on its own clock, underneath whatever
@@ -4610,7 +4783,14 @@ onMounted(async () => {
           // One pose, held.  Every key of every track becomes the value
           // the clip spends most of its time at, so the mixer can play it
           // for ever and the figure will not move a millimetre.
-          freezeClipPose(clip)
+          //
+          // Except for the three bones the skin says are safe: the wings
+          // and the ring keep the artist's own curves, and the mixer
+          // plays them.  They are drawn for this rig and this mesh, so
+          // they are the one movement in the figure that is guaranteed
+          // not to tear it, and they are what stops a standing figure
+          // from reading as a still frame.
+          freezeClipPose(clip, LIVE_ROTATION_BONES)
           continue
         }
         // Take the visible loop out of the clip before the mixer ever sees
@@ -4696,6 +4876,15 @@ watch(() => props.status, (status) => {
   selectAction()
   emote?.setEmotion(emotionForStatus(status))
 })
+
+// The stage can move the character after the scene is up -- the chat
+// column opens, the window changes shape -- and the camera has to
+// follow, or the character stays where it was and ends up under the
+// panel again.
+watch(
+  () => [props.xOffset, props.yOffset, props.scale],
+  () => resize(),
+)
 
 onUnmounted(() => {
   loadToken++

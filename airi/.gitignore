@@ -142,3 +142,8 @@ apps/stage-tamagotchi/electron.vite.config.*.mjs
 .env.*
 !.env.example
 
+packages/stage-layouts/src/assets/activity-stage-2026-text-keep.png
+
+# YXZ avatar QA capture output and probe bytecode
+.tmp/
+scripts/__pycache__/

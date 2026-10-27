@@ -1,140 +1,105 @@
-"""Show where the mesh is torn.
+"""How far a joint drags the mesh around it when it turns.
 
-The scan came apart along a boundary: one long open rim runs around the
-top of the helmet, and the sheets that were meant to close it are still
-there, standing up like torn flaps.  A picture of that rim settles
-which piece is which, so the rim is drawn on the model and the model is
-rendered from the front.
+`probe_yxz_safe_bones.py` answers "does this joint own its geometry".
+That is necessary but not sufficient: a joint can own almost all of its
+vertices and still share a thin band with its neighbour, and that band
+is the part that stretches when the joint turns against the neighbour.
+
+So this measures the band.  For every vertex that carries any weight on
+a joint, the share of that vertex the joint does *not* own is the part
+that lags behind when the joint turns:
+
+    deficit = 1 - weight_of_this_joint
+
+Turning the joint by theta drags that vertex by `deficit * theta` away
+from where the neighbouring joints would have put it.  Summed over the
+vertices and divided by the count, the mean deficit is the average
+angular lag, in degrees per degree of joint rotation, that the mesh
+around that joint has to absorb.
+
+    0.0   the joint owns all of its geometry: nothing to stretch
+    0.05  a 10 degree turn makes the seam slip half a degree: invisible
+    0.30  a 3 degree turn makes the seam slip a degree: a visible crease
 
 Usage:
-  blender -b -P scripts/probe_yxz_tear.py -- \
-    --glb <glb> --out <png> [--yaw 0] [--pitch 0] [--size 900]
+  python scripts/probe_yxz_tear.py <model.vrm|glb> [joint ...]
 """
 
 from __future__ import annotations
 
 import json
-import math
-import os
 import sys
+from collections import defaultdict
+from pathlib import Path
 
-import bpy
-import bmesh
-from mathutils import Vector
+sys.path.insert(0, str(Path(__file__).parent))
 
-
-def value_after(name, default=None):
-    if name not in sys.argv:
-        return default
-    return sys.argv[sys.argv.index(name) + 1]
+from probe_yxz_safe_bones import read_glb, accessor  # noqa: E402
 
 
-def setup_world():
-    world = bpy.data.worlds.new("probe")
-    bpy.context.scene.world = world
-    world.use_nodes = True
-    background = world.node_tree.nodes["Background"]
-    background.inputs[0].default_value = (0.06, 0.07, 0.09, 1.0)
-    background.inputs[1].default_value = 1.0
+def main() -> None:
+    document, binary = read_glb(Path(sys.argv[1]))
+    nodes = document["nodes"]
+    names = [node.get("name", "") for node in nodes]
+    only = set(sys.argv[2:]) or None
 
-    data = bpy.cameras.new("camera")
-    camera = bpy.data.objects.new("camera", data)
-    bpy.context.scene.collection.objects.link(camera)
-    data.lens = 85.0
-    data.clip_start = 0.01
-    data.clip_end = 100.0
-    scene = bpy.context.scene
-    scene.camera = camera
+    # joint -> sum of deficits, count of influenced vertices, and the
+    # joints it shares its vertices with.
+    deficit_sum: dict[str, float] = defaultdict(float)
+    influenced: dict[str, int] = defaultdict(int)
+    rigid: dict[str, int] = defaultdict(int)
+    partners: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    total_verts = 0
 
-    for name, location, energy in (
-            ("key", (-1.6, -2.0, 2.4), 420.0),
-            ("fill", (2.4, -1.6, 0.6), 160.0),
-            ("rim", (0.4, 2.6, 1.8), 200.0)):
-        light = bpy.data.lights.new(name, type="AREA")
-        light.energy = energy
-        light.size = 2.5
-        holder = bpy.data.objects.new(name, light)
-        scene.collection.objects.link(holder)
-        holder.location = Vector(location)
-        holder.rotation_euler = (Vector((0.0, 0.0, 0.28)) - holder.location).to_track_quat("-Z", "Y").to_euler()
+    for skin in document.get("skins", []):
+        joint_nodes = skin["joints"]
+        for node in nodes:
+            if node.get("skin") != document["skins"].index(skin):
+                continue
+            mesh = document["meshes"][node["mesh"]]
+            for primitive in mesh.get("primitives", []):
+                joint_attribute = primitive["attributes"].get("JOINTS_0")
+                weight_attribute = primitive["attributes"].get("WEIGHTS_0")
+                if joint_attribute is None or weight_attribute is None:
+                    continue
+                joint_rows = accessor(document, binary, joint_attribute)
+                weight_rows = accessor(document, binary, weight_attribute)
+                for joint_row, weight_row in zip(joint_rows, weight_rows):
+                    total_verts += 1
+                    for slot, weight in enumerate(weight_row):
+                        if weight <= 0.001:
+                            continue
+                        # `joint_row[slot]` is the index of the joint this
+                        # weight belongs to; the slot itself is only a
+                        # position in the four-weight list.
+                        joint_name = names[joint_nodes[joint_row[slot]]]
+                        if only is not None and joint_name not in only:
+                            continue
+                        deficit_sum[joint_name] += 1.0 - weight
+                        influenced[joint_name] += 1
+                        if weight >= 0.999:
+                            rigid[joint_name] += 1
+                        for other_slot, other_weight in enumerate(weight_row):
+                            if other_slot == slot or other_weight <= 0.001:
+                                continue
+                            partners[joint_name][names[joint_nodes[joint_row[other_slot]]]] += other_weight
 
-    for engine in ("BLENDER_EEVEE_NEXT", "BLENDER_EEVEE"):
-        try:
-            scene.render.engine = engine
-            break
-        except TypeError:
-            continue
-    bpy.context.view_layer.update()
+    report = {}
+    for joint in sorted(deficit_sum):
+        count = influenced[joint]
+        mean = deficit_sum[joint] / count if count else 0.0
+        top = sorted(partners[joint].items(), key=lambda kv: -kv[1])[:4]
+        report[joint] = {
+            "influenced": count,
+            "rigid": rigid[joint],
+            "meanDeficit": round(mean, 4),
+            "lagDegPerDeg": round(mean, 4),
+            "topPartners": [
+                {"joint": name, "sharedWeight": round(weight, 1)} for name, weight in top
+            ],
+        }
 
-
-def flat_material(name, colour):
-    material = bpy.data.materials.new(name)
-    material.use_nodes = True
-    shader = material.node_tree.nodes.get("Principled BSDF")
-    shader.inputs["Base Color"].default_value = colour
-    shader.inputs["Roughness"].default_value = 0.6
-    return material
-
-
-def main():
-    source = value_after("--glb")
-    out = value_after("--out", "docs/yxz-diag/tear.png")
-    yaw = math.radians(float(value_after("--yaw", 0.0)))
-    pitch = math.radians(float(value_after("--pitch", 0.0)))
-    size = int(value_after("--size", 900))
-    center = Vector([float(part) for part in value_after("--center", "0,0,0.28").split(",")])
-    scale = float(value_after("--scale", 0.55))
-    distance = float(value_after("--distance", 2.0))
-
-    bpy.ops.wm.read_factory_settings(use_empty=True)
-    bpy.ops.import_scene.gltf(filepath=source)
-    for stray in [o for o in bpy.context.scene.objects if o.type == "MESH" and not o.data.materials]:
-        mesh = stray.data
-        bpy.data.objects.remove(stray, do_unlink=True)
-        bpy.data.meshes.remove(mesh)
-    body = max(
-        (o for o in bpy.context.scene.objects if o.type == "MESH"),
-        key=lambda o: len(o.data.vertices),
-    )
-
-    bm = bmesh.new()
-    bm.from_mesh(body.data)
-    bm.verts.ensure_lookup_table()
-    boundary = [edge for edge in bm.edges if len(edge.link_faces) == 1]
-    print("YXZ_TEAR boundary_edges=%d" % len(boundary))
-    if boundary:
-        points = np.array([[v.co.x, v.co.y, v.co.z] for edge in boundary for v in edge.verts])
-        print("YXZ_TEAR bbox " + json.dumps({
-            "low": [round(float(c), 4) for c in points.min(axis=0)],
-            "high": [round(float(c), 4) for c in points.max(axis=0)],
-        }))
-
-    body.data.materials.clear()
-    body.data.materials.append(flat_material("shell", (0.62, 0.64, 0.68, 1.0)))
-    body.data.materials.append(flat_material("tear", (0.95, 0.08, 0.35, 1.0)))
-    marked = set()
-    for edge in boundary:
-        for face in edge.link_faces:
-            marked.add(face.index)
-    for polygon in body.data.polygons:
-        polygon.material_index = 1 if polygon.index in marked else 0
-    body.data.update()
-
-    setup_world()
-    scene = bpy.context.scene
-    scene.render.resolution_x = size
-    scene.render.resolution_y = size
-    scene.render.film_transparent = False
-    camera = scene.camera
-    camera.location = center + Vector((
-        math.sin(yaw) * math.cos(pitch),
-        -math.cos(yaw) * math.cos(pitch),
-        math.sin(pitch),
-    )) * distance
-    camera.rotation_euler = (center - camera.location).to_track_quat("-Z", "Y").to_euler()
-    scene.render.filepath = os.path.abspath(out)
-    bpy.ops.render.render(write_still=True)
-    print("YXZ_TEAR_RENDER " + out)
+    print(json.dumps({"totalVerts": total_verts, "joints": report}, indent=2))
 
 
 if __name__ == "__main__":

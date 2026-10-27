@@ -811,6 +811,9 @@ defineExpose({
         :status="yxzInteractionStatus"
         :speaking-level="mouthOpenSize"
         :paused="paused"
+        :x-offset="xOffset"
+        :y-offset="yOffset"
+        :scale="scale"
         @error="yxzRealModelFailed = true"
       />
       <YXZProceduralScene
@@ -854,7 +857,12 @@ defineExpose({
 <style scoped>
 .yxz-welcome-replay {
   position: absolute;
-  right: 1rem;
+  /* The chat column floats over the right hand side of the stage, and a
+     button behind a panel is a button nobody can see or click.  The
+     greeting is the one thing the visitor has to be able to hear
+     again, so it goes to the empty stage on the left. */
+  left: 1rem;
+  right: auto;
   bottom: 1rem;
   z-index: 4;
   padding: .45rem .7rem;
