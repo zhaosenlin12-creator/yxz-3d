@@ -2794,13 +2794,50 @@ function chainWorldPosition(node: THREE.Object3D, out: THREE.Vector3) {
 // not by name from the scene.  three-vrm keeps a second, normalized rig
 // whose nodes carry the same names as the raw ones, and a name lookup
 // would find either of them; the skeleton is unambiguous.
+function sanitizeSkeletonHoles(root: THREE.Object3D) {
+  // Tripo-authored VRMs occasionally carry a JOINTS/humanoid mismatch that
+  // three-vrm's normalize rig turns into a hole (undefined entry) in
+  // SkinnedMesh.skeleton.bones.  Skeleton.update then throws on
+  // `boneInverses[i].copy(...)` for the null parent path and the whole
+  // scene stops rendering.  Replace each hole with a detached dummy Bone:
+  // Skeleton.update skips bones with no parent (safe path), the live rig
+  // never touches it, and skinned geometry bound to that slot is a no-op.
+  root.traverse((object) => {
+    if (object instanceof THREE.SkinnedMesh && object.skeleton) {
+      const bones = object.skeleton.bones ?? []
+      const inverses = object.skeleton.boneInverses ?? []
+      for (let bi = 0; bi < bones.length; bi++) {
+        if (!bones[bi]) {
+          const dummy = new THREE.Bone()
+          dummy.name = `__yxz_dummy_${bi}`
+          bones[bi] = dummy
+        }
+        if (!inverses[bi]) {
+          // Skeleton.update reads boneInverses[i] even for the null-parent
+          // (skipped) branch; an undefined entry there throws inside
+          // Matrix4.multiplyMatrices.  Give every slot a matrix.
+          inverses[bi] = new THREE.Matrix4()
+        }
+      }
+    }
+  })
+}
 function collectLifeBones(root: THREE.Object3D) {
   const skeletonBones = new Map<string, THREE.Bone>()
   const everyBone = new Map<string, THREE.Bone>()
   root.traverse((object) => {
     if (object instanceof THREE.SkinnedMesh) {
-      for (const bone of object.skeleton?.bones ?? [])
+      const bones = object.skeleton?.bones ?? []
+      for (let bi = 0; bi < bones.length; bi++) {
+        const bone = bones[bi]
+        if (!bone) {
+          // Robustness: a GLB with out-of-range JOINTS can yield holes here.
+          // Log the mesh and continue rather than crashing the whole scene.
+          if (import.meta.env.DEV) console.warn('collectLifeBones: hole in skeleton.bones of', object.name, 'at', bi)
+          continue
+        }
         skeletonBones.set(bone.name, bone)
+      }
     }
   })
   root.traverse((object) => {
@@ -4509,7 +4546,14 @@ onMounted(async () => {
     // bones, because the living layer measures its motion against the
     // frame the character was built in.
     vrmGroup.updateMatrixWorld(true)
+    sanitizeSkeletonHoles(vrmGroup)
     collectLifeBones(vrmGroup)
+    // DIAG: expose the live scene for headless verification
+    if (import.meta.env.DEV) {
+      try {
+        ;(globalThis as any).__yxzDebug = { vrmGroup, vrm }
+      } catch { /* noop */ }
+    }
     // The same rest pose is what the authored idle is retargeted onto.
     // The idle says how far a bone travels in the world; this rig says
     // where the bone sits and which way it points, and the two together

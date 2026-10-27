@@ -7,7 +7,6 @@ import analyserWorklet from '@nekopaw/tempora/worklet?url'
 
 import { defineInvoke, defineInvokeHandler } from '@moeru/eventa'
 import { startAnalyser as startTemporaAnalyser } from '@nekopaw/tempora'
-import { setupElectronScreenCapture } from '@proj-airi/electron-screen-capture/renderer'
 
 import { isStageTamagotchi, isStageWeb, StageEnvironment } from '../environment'
 import { isElectronWindow } from '../window'
@@ -162,6 +161,7 @@ export function createBeatSyncDetector(options: CreateBeatSyncDetectorOptions): 
 
         // FIXME(Makito): Will refactor later
         const { createContext } = await import('@moeru/eventa/adapters/electron/renderer')
+        const { setupElectronScreenCapture } = await import('@proj-airi/electron-screen-capture/renderer')
         const { selectWithSource } = setupElectronScreenCapture(createContext(window.electron.ipcRenderer).context)
 
         const stream = await selectWithSource(

@@ -20,6 +20,7 @@ import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 
 import IndicatorMicVolume from './IndicatorMicVolume.vue'
+import CameraCapture from './CameraCapture.vue'
 
 import { ChatSendTimeoutError, notifyYXZChatRecovery, withChatSendTimeout } from './chat-send-recovery'
 
@@ -28,6 +29,8 @@ const hearingPopoverOpen = ref(false)
 const isComposing = ref(false)
 const isListening = ref(false) // Transcription listening state (separate from microphone enabled)
 const laserCardOpen = ref(false)
+const cameraModalOpen = ref(false)
+const uploadedImagePath = ref<string>()
 const DOUBLE_ENTER_INTERVAL_MS = 300
 const TRAILING_NEWLINES_REGEX = /[\r\n]+$/
 const SEND_MODES = ['enter', 'ctrl-enter', 'double-enter'] as const
@@ -292,6 +295,62 @@ async function sendQuickStart(prompt: string) {
 function openPresetYXZ3D() {
   const url = `${window.location.origin}/yxz-studio`
   window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+// Camera capture: handle photo taken from camera
+async function handleCameraImage(imageDataUrl: string, blob: Blob) {
+  try {
+    // Create form data for upload
+    const formData = new FormData()
+    formData.append('image', blob, 'camera-capture.jpg')
+    formData.append('source', 'camera')
+
+    // Show uploading toast
+    const uploadingToast = toast.loading('正在上传照片...')
+
+    // Upload to backend
+    const response = await fetch('http://localhost:8000/api/upload-image', {
+      method: 'POST',
+      body: formData,
+    })
+
+    if (!response.ok) {
+      throw new Error(`上传失败: ${response.statusText}`)
+    }
+
+    const result = await response.json()
+    uploadedImagePath.value = result.image_path
+
+    // Dismiss uploading toast
+    toast.dismiss(uploadingToast)
+
+    // Show success
+    toast.success('照片已上传', {
+      description: result.description || '可以开始创作了',
+    })
+
+    // Auto-fill message input with context
+    const description = result.description || '我的照片'
+    messageInput.value = `[已上传照片: ${description}] 帮我用这张照片`
+
+    // Close camera modal
+    cameraModalOpen.value = false
+
+    // Focus on textarea
+    await nextTick()
+    const textarea = document.querySelector('textarea')
+    if (textarea) {
+      textarea.focus()
+      // Move cursor to end
+      textarea.setSelectionRange(messageInput.value.length, messageInput.value.length)
+    }
+  }
+  catch (error) {
+    console.error('照片上传失败:', error)
+    toast.error('照片上传失败', {
+      description: '请检查网络连接或稍后重试',
+    })
+  }
 }
 
 function sendFromKeyboard() {

@@ -7,11 +7,9 @@ import VueI18n from '@intlify/unplugin-vue-i18n/vite'
 import templateCompilerOptions from '@tresjs/core/template-compiler-options'
 import Vue from '@vitejs/plugin-vue'
 import Unocss from 'unocss/vite'
-import Info from 'unplugin-info/vite'
 import VueRouter from 'unplugin-vue-router/vite'
 import Yaml from 'unplugin-yaml/vite'
 import Mkcert from 'vite-plugin-mkcert'
-import VueDevTools from 'vite-plugin-vue-devtools'
 import Layouts from 'vite-plugin-vue-layouts'
 import VueMacros from 'vue-macros/vite'
 
@@ -67,6 +65,9 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      // Web build never uses electron screen capture; stub it so the
+      // package does not need to be prebuilt on machines without electron.
+      '@proj-airi/electron-screen-capture/renderer': resolve(join(import.meta.dirname, 'src', 'stubs', 'electron-screen-capture-renderer.ts')),
       '@proj-airi/server-sdk': resolve(join(import.meta.dirname, '..', '..', 'packages', 'server-sdk', 'src')),
       '@proj-airi/i18n': resolve(join(import.meta.dirname, '..', '..', 'packages', 'i18n', 'src')),
       '@proj-airi/stage-ui': resolve(join(import.meta.dirname, '..', '..', 'packages', 'stage-ui', 'src')),
@@ -114,8 +115,6 @@ export default defineConfig({
           })())]
         : []
     ),
-
-    Info(),
 
     Yaml(),
 
@@ -205,9 +204,6 @@ export default defineConfig({
       compositionOnly: true,
       fullInstall: true,
     }),
-
-    // https://github.com/webfansplz/vite-plugin-vue-devtools
-    VueDevTools(),
 
     DownloadLive2DSDK(),
     Download('https://dist.ayaka.moe/live2d-models/hiyori_free_zh.zip', 'hiyori_free_zh.zip', 'live2d/models', { parentDir: stageUIAssetsRoot, cacheDir: sharedCacheDir }),
