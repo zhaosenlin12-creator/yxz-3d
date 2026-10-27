@@ -9,6 +9,8 @@
 
 ## 快速开始（本机）
 
+**最简单：双击根目录的「启动.bat」**（等价于下面命令）。
+
 ```powershell
 # 1) 一键启动后端 + 前端（自动读 keys.txt，自动打开浏览器）
 powershell -ExecutionPolicy Bypass -File start-all.ps1
@@ -20,8 +22,10 @@ powershell -ExecutionPolicy Bypass -File start-all.ps1
 
 1. 安装 Git、Node.js 20+（`corepack enable`）、Python 3.10/3.11（Add to PATH）
 2. 解压 `pingdou-workstation.zip` 到任意目录
-3. 运行 `install-new-pc.ps1`（自动 pnpm install + 创建 venv + pip install）
-4. 运行 `start-all.ps1`
+3. **双击「一键安装并启动.bat」** —— 自动完成依赖安装（pnpm install + 创建 venv + pip install）并拉起前后端
+   （等价于手动依次运行 `install-new-pc.ps1` → `start-all.ps1`；start-all 检测到依赖缺失时也会自动补装）
+
+> ⚠️ **请勿直接双击 .ps1 文件**：Windows 默认用记事本打开、不会执行。请用「.bat」双击，或在终端运行 `powershell -ExecutionPolicy Bypass -File xxx.ps1`。
 
 > ⚠️ **keys.txt 必须随包携带**（不入 GitHub）：文件在 `cartoon-print-studio\keys.txt`，
 > 含带标签的 API key（`minimax-key:` / `minimax-key-2:` 用于 LLM、`deepseek-key:` LLM 备用、

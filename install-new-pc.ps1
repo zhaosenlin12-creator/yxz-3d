@@ -27,6 +27,12 @@ if (-not $py)   { Write-Host "[x] 未找到 Python，请先安装 https://python
 Write-Host "[ok] node=$($node.Source)" -ForegroundColor Green
 Write-Host "[ok] git =$($git.Source)" -ForegroundColor Green
 Write-Host "[ok] py  =$($py.Source)" -ForegroundColor Green
+$pyVer = (& $py --version 2>&1 | Out-String).Trim()
+Write-Host "[ok] $pyVer" -ForegroundColor Green
+if ($pyVer -notmatch 'Python 3\.(10|11)\.') {
+    Write-Host "[!] 后端 torch(cu121) 目前只支持 Python 3.10/3.11，$pyVer 可能安装失败。" -ForegroundColor Yellow
+    Write-Host "    建议安装 Python 3.10/3.11（勾选 Add to PATH）后重跑本脚本。" -ForegroundColor Yellow
+}
 
 # ---- 1) 前端依赖 ----
 $airi = Join-Path $root 'airi'

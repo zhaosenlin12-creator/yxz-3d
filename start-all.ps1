@@ -43,9 +43,13 @@ Write-Host "==============================================" -ForegroundColor Cya
 # ---- 1) 后端 ----
 $py = Join-Path $backendRoot 'ai\forge-webui\venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $py)) {
-    Write-Host "[后端] 未找到 venv：$py" -ForegroundColor Red
-    Write-Host "[后端] 请先运行 install-new-pc.ps1 创建 Python 环境。" -ForegroundColor Yellow
-    exit 1
+    Write-Host "[后端] 未找到 venv，自动执行安装脚本 install-new-pc.ps1 ..." -ForegroundColor Yellow
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'install-new-pc.ps1')
+    if (-not (Test-Path -LiteralPath $py)) {
+        Write-Host "[后端] 自动安装未完成，请手动运行 install-new-pc.ps1 后重试。" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "[后端] 依赖安装完成，继续启动 ..." -ForegroundColor Green
 }
 if (Test-Port $BackendPort) {
     Write-Host "[后端] 端口 $BackendPort 已被占用（跳过启动）。请确认它确实是本项目的后端。" -ForegroundColor Yellow
@@ -83,8 +87,13 @@ if (-not $NoFrontend) {
     } else {
         $vite = Find-ViteBin
         if (-not $vite) {
-            Write-Host "[前端] 未找到 vite / corepack，请先运行 install-new-pc.ps1 安装前端依赖。" -ForegroundColor Red
-            exit 1
+            Write-Host "[前端] 未找到 vite / corepack，自动执行安装脚本 install-new-pc.ps1 ..." -ForegroundColor Yellow
+            & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'install-new-pc.ps1')
+            $vite = Find-ViteBin
+            if (-not $vite) {
+                Write-Host "[前端] 自动安装未完成，请手动运行 install-new-pc.ps1 后重试。" -ForegroundColor Red
+                exit 1
+            }
         }
         $out = Join-Path $root ".run\frontend-$FrontendPort.out.log"
         $err = Join-Path $root ".run\frontend-$FrontendPort.err.log"
