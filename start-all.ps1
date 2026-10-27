@@ -16,7 +16,7 @@ param(
     [string]$FrontendRoot = ""
 )
 
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $BackendRoot)  { $BackendRoot  = Join-Path $root 'cartoon-print-studio' }
 if (-not $FrontendRoot) { $FrontendRoot = Join-Path $root 'airi' }
@@ -65,10 +65,15 @@ if ($corepackBin) { Step-Ok "corepack 可用" } else { Step-Info "corepack 未�
 # ---- 1) 后端 ----
 $py = Join-Path $backendRoot 'ai\forge-webui\venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $py)) {
-    Write-Host "[后端] 未找到 venv，自动执行安装脚本 install-new-pc.ps1 ..." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "[后端] 未找到 Python 虚拟环境（venv）。" -ForegroundColor Yellow
+    Write-Host "[后端] 首次使用需要先安装后端依赖（torch 等约 2GB，需联网，预计 10-30 分钟）。" -ForegroundColor Yellow
+    Write-Host "[后端] 现在自动执行安装脚本 install-new-pc.ps1（请勿关闭窗口，耐心等待）..." -ForegroundColor Yellow
+    Write-Host ""
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'install-new-pc.ps1')
     if (-not (Test-Path -LiteralPath $py)) {
-        Write-Host "[后端] 自动安装未完成，请手动运行 install-new-pc.ps1 后重试。" -ForegroundColor Red
+        Write-Host "[后端] 自动安装未完成。" -ForegroundColor Red
+        Write-Host "[后端] 请手动运行 install-new-pc.ps1（或重新双击 一键安装并启动.bat）后重试；详见 README.md「详细手动步骤」。" -ForegroundColor Red
         exit 1
     }
     Write-Host "[后端] 依赖安装完成，继续启动 ..." -ForegroundColor Green
@@ -76,8 +81,8 @@ if (-not (Test-Path -LiteralPath $py)) {
 if (Test-Port $BackendPort) {
     Write-Host "[后端] 端口 $BackendPort 已被占用（跳过启动）。请确认它确实是本项目的后端。" -ForegroundColor Yellow
 } else {
-    $out = Join-Path $root '.run\backend-$BackendPort.out.log'
-    $err = Join-Path $root '.run\backend-$BackendPort.err.log'
+    $out = Join-Path $root ".run\backend-$BackendPort.out.log"
+    $err = Join-Path $root ".run\backend-$BackendPort.err.log"
     New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null
     $be = Start-Process -FilePath $py -ArgumentList @('-m', 'uvicorn', 'server:app', '--host', '127.0.0.1', '--port', "$BackendPort", '--app-dir', 'backend') `
         -WorkingDirectory $backendRoot -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru
@@ -97,10 +102,10 @@ for ($i = 0; $i -lt 40; $i++) {
 }
 if ($beReady) {
     Write-Host "[后端] 就绪：http://127.0.0.1:$BackendPort  (API keys 已自动读取 keys.txt)" -ForegroundColor Green
-    Step-Ok "后端服务 (8000) 启动成功"
+    Step-Ok "后端服务 ($BackendPort) 启动成功"
 } else {
-    Write-Host "[后端] 等待超时，检查 .run\backend-*.err.log。" -ForegroundColor Red
-    Step-Fail "后端服务 (8000) 未就绪"
+    Write-Host "[后端] 等待超时，检查 .run\backend-$BackendPort.err.log。" -ForegroundColor Red
+    Step-Fail "后端服务 ($BackendPort) 未就绪"
     if (Test-Path -LiteralPath (Join-Path $root ".run\backend-$BackendPort.err.log")) {
         Get-Content -LiteralPath (Join-Path $root ".run\backend-$BackendPort.err.log") -Tail 20
     }
@@ -113,7 +118,10 @@ if (-not $NoFrontend) {
     } else {
         $vite = Find-ViteBin
         if (-not $vite) {
-            Write-Host "[前端] 未找到 vite / corepack，自动执行安装脚本 install-new-pc.ps1 ..." -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "[前端] 未找到 vite（前端依赖未安装），自动执行安装脚本 install-new-pc.ps1 ..." -ForegroundColor Yellow
+            Write-Host "[前端] 前端依赖约数百 MB，需联网，请耐心等待。" -ForegroundColor Yellow
+            Write-Host ""
             & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'install-new-pc.ps1')
             $vite = Find-ViteBin
             if (-not $vite) {
@@ -146,13 +154,13 @@ if (-not $NoFrontend) {
     }
     if ($feReady) {
         Write-Host "[前端] 就绪：http://127.0.0.1:$FrontendPort" -ForegroundColor Green
-        Step-Ok "前端服务 (5199) 启动成功"
+        Step-Ok "前端服务 ($FrontendPort) 启动成功"
         if (-not $NoBrowser) {
             Start-Process "http://127.0.0.1:$FrontendPort/"
         }
     } else {
-        Write-Host "[前端] 等待超时（首次冷编译可能较慢），查看 .run\frontend-*.err.log。" -ForegroundColor Red
-        Step-Fail "前端服务 (5199) 未就绪"
+        Write-Host "[前端] 等待超时（首次冷编译可能较慢），查看 .run\frontend-$FrontendPort.err.log。" -ForegroundColor Red
+        Step-Fail "前端服务 ($FrontendPort) 未就绪"
         if (Test-Path -LiteralPath (Join-Path $root ".run\frontend-$FrontendPort.err.log")) {
             Get-Content -LiteralPath (Join-Path $root ".run\frontend-$FrontendPort.err.log") -Tail 20
         }
