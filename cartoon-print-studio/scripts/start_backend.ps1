@@ -63,7 +63,12 @@ if (-not (Test-PortFree $Port)) {
     exit 1
 }
 
-Set-Location (Join-Path $root "ai\forge-webui")
+$fwDir = Join-Path $root "ai\forge-webui"
+if (Test-Path $fwDir) {
+    Set-Location $fwDir
+} else {
+    Set-Location $root
+}
 $exe = $Python
 if (-not $exe) {
     $exe = Join-Path $root "ai\forge-webui\venv\Scripts\python.exe"

@@ -152,3 +152,9 @@ cartoon-print-studio/keys.txt
 # Large 3D preset assets are shipped inside the release zip, not the git repo
 presets/models
 presets/models/**
+
+# Character model assets & runtime data (shipped in zip only)
+cartoon-print-studio/data/yxz_character_tripo
+cartoon-print-studio/data/yxz_character_tripo_jpg
+cartoon-print-studio/data/laser/template
+cartoon-print-studio/data/software_paths.json
