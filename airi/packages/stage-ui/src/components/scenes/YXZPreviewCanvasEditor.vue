@@ -55,6 +55,7 @@ const activeTool = ref<Tool>('brush')
 const operations = ref<Operation[]>([])
 const isDrawing = ref(false)
 const imageReady = ref(false)
+const imageError = ref('')
 const imageRect = ref({ x: 0, y: 0, width: CANVAS_SIZE, height: CANVAS_SIZE })
 const placingText = ref(false)
 let activeStroke: Operation & { kind: 'stroke' } | undefined
@@ -258,16 +259,22 @@ function requestRefine() {
 
 async function loadImage() {
   imageReady.value = false
+  imageError.value = ''
   await nextTick()
   const image = new Image()
   image.onload = () => {
     baseImage = image
     imageReady.value = true
+    imageError.value = ''
     redraw()
   }
   image.onerror = () => {
     baseImage = undefined
     imageReady.value = false
+    // NOTICE: without this the canvas stayed on "正在加载预览…" forever when
+    // the preview image could not be fetched (backend down, session gone),
+    // which looked like the page was stuck.
+    imageError.value = '预览图加载失败'
   }
   image.crossOrigin = 'anonymous'
   image.src = props.imageSrc
@@ -337,7 +344,11 @@ watch(() => props.imageSrc, loadImage)
         @pointercancel="stopDrawing"
         @pointerleave="stopDrawing"
       />
-      <span v-if="!imageReady" class="yxz-canvas-loading">正在加载预览…</span>
+      <span v-if="!imageReady && !imageError" class="yxz-canvas-loading">正在加载预览…</span>
+      <span v-if="imageError" class="yxz-canvas-loading yxz-canvas-load-error">
+        {{ imageError }}
+        <button type="button" class="yxz-canvas-retry" @click="loadImage">重试</button>
+      </span>
       <span v-if="activeTool === 'text' && imageReady" class="yxz-canvas-tip">
         点哪里，文字就加在哪里 ✦
       </span>
@@ -508,6 +519,23 @@ watch(() => props.imageSrc, loadImage)
   color: #9fc6e6;
   font-size: .8rem;
   transform: translate(-50%, -50%);
+}
+
+.yxz-canvas-load-error {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  color: #ffb4b4;
+}
+
+.yxz-canvas-retry {
+  padding: .2rem .6rem;
+  border: 1px solid rgba(255, 180, 180, .45);
+  border-radius: .4rem;
+  background: rgba(255, 180, 180, .12);
+  color: #ffd7d7;
+  font-size: .75rem;
+  cursor: pointer;
 }
 
 .yxz-canvas-tip {

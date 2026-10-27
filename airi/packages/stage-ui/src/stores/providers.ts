@@ -210,6 +210,10 @@ export interface ProviderRuntimeState {
   modelLoadError: string | null
 }
 
+// Providers that need no credentials and are expected to work offline, so
+// they are probed even when the visitor never touched their settings.
+const CREDENTIAL_FREE_PROVIDER_IDS = ['speech-noop', 'browser-web-speech-api']
+
 export const useProvidersStore = defineStore('providers', () => {
   const providerCredentials = useLocalStorage<Record<string, Record<string, unknown>>>('settings/credentials/providers', {})
   const addedProviders = useLocalStorage<Record<string, boolean>>('settings/providers/added', {})
@@ -1390,6 +1394,17 @@ export const useProvidersStore = defineStore('providers', () => {
       createProvider: async (config) => {
         const baseUrl = typeof config.baseUrl === 'string' && config.baseUrl.trim() ? config.baseUrl.trim() : 'https://api.minimaxi.com/v1/'
         const apiKey = typeof config.apiKey === 'string' ? config.apiKey.trim() : ''
+        // NOTICE: a single MiniMax key can silently run out of Token Plan
+        // quota while the app still looks correctly configured. Allow a list
+        // of keys and rotate through them when one is rejected.
+        const apiKeys = [
+          apiKey,
+          ...(Array.isArray((config as Record<string, unknown>).apiKeys)
+            ? ((config as Record<string, unknown>).apiKeys as unknown[])
+                .filter((key): key is string => typeof key === 'string' && key.trim().length > 0)
+                .map(key => key.trim())
+            : []),
+        ].filter((key, index, all) => key.length > 0 && all.indexOf(key) === index)
         const speechBaseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
 
         function hexToBytes(hex: string): Uint8Array {
@@ -1422,33 +1437,56 @@ export const useProvidersStore = defineStore('providers', () => {
                 : undefined
               const minimaxBody = JSON.stringify(buildMinimaxTtsBody(rawBody))
 
-              const response = await fetch(`${speechBaseUrl}t2a_v2`, {
-                method: 'POST',
-                headers: {
-                  'content-type': 'application/json',
-                  'authorization': `Bearer ${apiKey}`,
-                },
-                body: minimaxBody,
-              })
+              // MiniMax business errors (invalid key / exhausted quota / bad
+              // voice) come back as HTTP 200 with the real reason inside
+              // `base_resp.status_code`. Those are worth retrying with the
+              // next key; anything else is a hard failure.
+              const KEY_LEVEL_ERROR_CODES = new Set([1002, 1004, 1008, 1027, 2056])
+              let lastError: Error | undefined
 
-              const json = await response.json()
-              const hexAudio = json?.data?.audio || json?.data?.audio_hex || json?.data?.audioData || json?.data?.base64_audio || json?.audio || json?.result?.audio
-              if (!response.ok) {
-                throw new Error(json?.base_resp?.status_msg || json?.message || `MiniMax TTS failed: ${response.status} ${response.statusText}`)
-              }
-              if (!hexAudio || typeof hexAudio !== 'string') {
-                throw new Error('MiniMax TTS returned no audio data')
+              for (const key of apiKeys.length > 0 ? apiKeys : ['']) {
+                const response = await fetch(`${speechBaseUrl}t2a_v2`, {
+                  method: 'POST',
+                  headers: {
+                    'content-type': 'application/json',
+                    'authorization': `Bearer ${key}`,
+                  },
+                  body: minimaxBody,
+                })
+
+                const json = await response.json()
+                const hexAudio = json?.data?.audio || json?.data?.audio_hex || json?.data?.audioData || json?.data?.base64_audio || json?.audio || json?.result?.audio
+                const baseResp = json?.base_resp
+                const statusCode = typeof baseResp?.status_code === 'number' ? baseResp.status_code : undefined
+
+                if (!response.ok) {
+                  lastError = new Error(baseResp?.status_msg || json?.message || `MiniMax TTS failed: ${response.status} ${response.statusText}`)
+                  continue
+                }
+                if (statusCode !== undefined && statusCode !== 0) {
+                  const statusMsg = baseResp?.status_msg || 'unknown error'
+                  lastError = new Error(`MiniMax TTS error ${statusCode}: ${statusMsg}`)
+                  if (KEY_LEVEL_ERROR_CODES.has(statusCode))
+                    continue
+                  throw lastError
+                }
+                if (!hexAudio || typeof hexAudio !== 'string') {
+                  lastError = new Error(`MiniMax TTS returned no audio data (trace_id: ${json?.trace_id ?? 'unknown'})`)
+                  continue
+                }
+
+                const bytes = hexToBytes(hexAudio)
+                const audioBuffer = new Uint8Array(bytes.byteLength)
+                audioBuffer.set(bytes)
+                return new Response(new Blob([audioBuffer], { type: 'audio/mpeg' }), {
+                  status: 200,
+                  headers: {
+                    'content-type': 'audio/mpeg',
+                  },
+                })
               }
 
-              const bytes = hexToBytes(hexAudio)
-              const audioBuffer = new Uint8Array(bytes.byteLength)
-              audioBuffer.set(bytes)
-              return new Response(new Blob([audioBuffer], { type: 'audio/mpeg' }), {
-                status: 200,
-                headers: {
-                  'content-type': 'audio/mpeg',
-                },
-              })
+              throw lastError ?? new Error('MiniMax TTS failed: no API key configured')
             },
           }),
         }
@@ -2244,11 +2282,40 @@ export const useProvidersStore = defineStore('providers', () => {
     }
   }
 
+  /**
+   * Whether a provider is worth probing.
+   *
+   * The catalog holds dozens of entries whose default configuration points at
+   * a remote service or at a local server that is not running here. Validating
+   * all of them on every page load fires a storm of doomed requests, slows the
+   * first paint, and fills the console with failures that mean nothing in
+   * this deployment.
+   *
+   * A provider is probed when the visitor actually set it up: it was added
+   * explicitly, its stored configuration differs from the shipped default, or
+   * it carries credentials. The credential-free providers that are expected to
+   * work offline are always probed so they can be offered to the visitor.
+   */
+  function shouldValidateProvider(providerId: string) {
+    if (addedProviders.value[providerId])
+      return true
+
+    if (isProviderConfigDirty(providerId))
+      return true
+
+    const config = providerCredentials.value[providerId] ?? {}
+    if (typeof config.apiKey === 'string' && config.apiKey.trim())
+      return true
+    if (typeof config.accountId === 'string' && config.accountId.trim())
+      return true
+
+    return CREDENTIAL_FREE_PROVIDER_IDS.includes(providerId)
+  }
+
   // Update configuration status for all configured providers
   async function updateConfigurationStatus() {
     await Promise.all(Object.entries(providerMetadata)
-      // TODO: ignore un-configured provider
-      // .filter(([_, provider]) => provider.configured)
+      .filter(([providerId]) => shouldValidateProvider(providerId))
       .map(async ([providerId]) => {
         try {
           if (providerRuntimeState.value[providerId]) {

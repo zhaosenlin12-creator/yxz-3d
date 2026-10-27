@@ -140,6 +140,11 @@ export function useChatHistoryScroll<TMessage extends { role?: string }>({
   const stopListening = shallowRef<(() => void) | null>(null)
   const didInitialScroll = shallowRef(false)
   const isProgrammaticScroll = shallowRef(false)
+  // The scroll position this code asked for, if any. Scroll events are
+  // dispatched after the current task, so the `isProgrammaticScroll` flag is
+  // already cleared by the time they arrive; matching the expected position
+  // is what tells the handler that the movement was ours.
+  const programmaticScrollTarget = shallowRef<number | null>(null)
 
   function getContainer() {
     return containerRef.value
@@ -235,10 +240,33 @@ export function useChatHistoryScroll<TMessage extends { role?: string }>({
 
     isProgrammaticScroll.value = true
     container.scrollTo({ top: container.scrollHeight })
+    programmaticScrollTarget.value = container.scrollTop
     nextTick(() => {
       isProgrammaticScroll.value = false
       updateFollowingTail()
       syncConversationFollowFromTail()
+    })
+  }
+
+  /**
+   * Re-engage the live edge and pull the viewport to the newest content.
+   *
+   * The follow heuristics deliberately disengage as soon as the visitor
+   * scrolls away from the tail, rests the pointer on an older message, or
+   * selects text in the history. On a kiosk the pointer sits on the chat
+   * panel almost permanently, so those signals fire constantly and new
+   * replies end up below the fold with no way to notice them.
+   *
+   * Sending a message is an unambiguous "show me what happens next" intent,
+   * so callers use this to restore the follow before the reply arrives.
+   */
+  function followLiveEdge() {
+    isInspectingOlderMessage.value = false
+    isSelectionInspectingHistory.value = false
+    isFollowingTail.value = true
+    isFollowingConversation.value = true
+    nextTick(() => {
+      scrollToBottom()
     })
   }
 
@@ -258,11 +286,29 @@ export function useChatHistoryScroll<TMessage extends { role?: string }>({
 
   function bindContainer(container: HTMLDivElement) {
     const handleScroll = () => {
+      const container = getContainer()
+      const expected = programmaticScrollTarget.value
+      const isOwnScroll = !!container
+        && expected != null
+        && Math.abs(container.scrollTop - expected) <= 4
+
+      if (isOwnScroll)
+        programmaticScrollTarget.value = null
+
       updateFollowingTail()
-      if (!isFollowingTail.value && !isProgrammaticScroll.value)
-        disengageConversationFollow()
-      else
+
+      if (isOwnScroll) {
+        // We moved the viewport ourselves. This must never be read as the
+        // visitor scrolling away from the live edge, otherwise the follow
+        // dies and every later reply stays hidden below the fold.
         syncConversationFollowFromTail()
+      }
+      else if (!isFollowingTail.value && !isProgrammaticScroll.value) {
+        disengageConversationFollow()
+      }
+      else {
+        syncConversationFollowFromTail()
+      }
 
       if (isFollowingTail.value && !isSelectionInspectingHistory.value)
         isInspectingOlderMessage.value = false
@@ -399,6 +445,9 @@ export function useChatHistoryScroll<TMessage extends { role?: string }>({
     // Align to the top of the new message so the start of a long reply remains visible.
     isProgrammaticScroll.value = true
     target.scrollIntoView({ block: 'start' })
+    const container = getContainer()
+    if (container)
+      programmaticScrollTarget.value = container.scrollTop
     nextTick(() => {
       isProgrammaticScroll.value = false
       isFollowingConversation.value = true
@@ -423,5 +472,6 @@ export function useChatHistoryScroll<TMessage extends { role?: string }>({
     isFollowingTail: readonly(isFollowingTail),
     isInspectingHistory: readonly(isInspectingHistory),
     scrollToBottom,
+    followLiveEdge,
   }
 }

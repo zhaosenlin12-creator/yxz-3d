@@ -261,23 +261,34 @@ def image_to_model(image_path: str, out_dir: str, *,
     print(f"[hunyuan3d] downloaded {size} bytes", flush=True)
 
     glb_src = None
-    with zipfile.ZipFile(zip_path, "r") as z:
-        names = z.namelist()
-        for n in names:
-            if n.lower().endswith(".glb"):
-                glb_src = os.path.join(out_dir, "result" + os.path.splitext(n)[1])
-                with open(glb_src, "wb") as f:
-                    f.write(z.read(n))
-                break
-        if glb_src is None:
-            # extract everything and look for a glb
-            z.extractall(out_dir)
+    with open(zip_path, "rb") as fh:
+        magic = fh.read(4)
+    if magic[:2] == b"PK":
+        # 结果是 zip 包：解包后取 .glb
+        with zipfile.ZipFile(zip_path, "r") as z:
+            names = z.namelist()
             for n in names:
                 if n.lower().endswith(".glb"):
-                    glb_src = os.path.join(out_dir, n)
+                    glb_src = os.path.join(out_dir, "result" + os.path.splitext(n)[1])
+                    with open(glb_src, "wb") as f:
+                        f.write(z.read(n))
                     break
+            if glb_src is None:
+                # extract everything and look for a glb
+                z.extractall(out_dir)
+                for n in names:
+                    if n.lower().endswith(".glb"):
+                        glb_src = os.path.join(out_dir, n)
+                        break
+    elif magic == b"glTF":
+        # 部分 COS 链接直接分发 glTF 二进制而不是 zip，无需解包
+        glb_src = os.path.join(out_dir, "result.glb")
+        if os.path.abspath(glb_src) != os.path.abspath(zip_path):
+            shutil.move(zip_path, glb_src)
+    else:
+        raise RuntimeError(f"hunyuan3d 结果文件格式无法识别 (magic={magic!r})")
     if glb_src is None:
-        raise RuntimeError(f"hunyuan3d zip contains no .glb: {names}")
+        raise RuntimeError(f"hunyuan3d 结果中没有 .glb 文件")
     info = process_glb(glb_src, out_dir, target_height_mm=target_height_mm)
     info["job_id"] = job_id
     info["credits_consumed"] = resp.get("ResultCreditConsumed")

@@ -55,6 +55,7 @@ interface LocalProviderBootstrapConfig {
 
 const STORAGE_KEYS = {
   revision: 'airi/local-provider-bootstrap/revision',
+  bootstrappedCredentials: 'airi/local-provider-bootstrap/credentials',
   providers: 'settings/credentials/providers',
   addedProviders: 'settings/providers/added',
   cards: 'airi-cards',
@@ -213,22 +214,50 @@ export function applyLocalProviderBootstrap() {
   const shouldApplyAll = appliedRevision !== config.revision
   const shouldApplyFallback = shouldApplyAll || !hasFallbackConfig(existingFallbackConfig)
 
+  // NOTICE: the shipped bootstrap carries the API keys this installation is
+  // expected to use, so the credentials must be refreshed on every load.
+  // Previously they were only written when the revision changed, which meant
+  // a browser that had cached an expired / exhausted key kept failing (TTS and
+  // chat silently stopped working) until the user cleared localStorage by
+  // hand.
+  //
+  // A key that the operator changed by hand in the settings UI is left
+  // alone: we only overwrite the credential when the stored one still is the
+  // value we wrote last time (or when there is no value at all). Credentials
+  // are merged field by field so any extra fields the settings UI stored for
+  // the same provider are preserved.
+  const storedProviders = parseJsonObject<Record<string, Record<string, unknown>>>(localStorage.getItem(STORAGE_KEYS.providers), {})
+  const lastBootstrapped = parseJsonObject<Record<string, unknown>>(localStorage.getItem(STORAGE_KEYS.bootstrappedCredentials), {})
+  const mergedProviders = { ...storedProviders }
+  const appliedCredentials: Record<string, unknown> = {}
+  for (const [providerId, providerConfig] of Object.entries(config.providers ?? {})) {
+    const stored = storedProviders[providerId]
+    const storedApiKey = stored?.apiKey
+    const lastApplied = lastBootstrapped[providerId]
+    const operatorOverrode = lastApplied !== undefined && storedApiKey !== lastApplied
+
+    if (operatorOverrode) {
+      mergedProviders[providerId] = stored
+      appliedCredentials[providerId] = storedApiKey
+      continue
+    }
+
+    mergedProviders[providerId] = { ...(stored ?? {}), ...providerConfig }
+    appliedCredentials[providerId] = providerConfig.apiKey
+  }
+  localStorage.setItem(STORAGE_KEYS.providers, JSON.stringify(mergedProviders))
+  localStorage.setItem(STORAGE_KEYS.bootstrappedCredentials, JSON.stringify(appliedCredentials))
+
+  const addedProviders = parseJsonObject<Record<string, boolean>>(localStorage.getItem(STORAGE_KEYS.addedProviders), {})
+  for (const providerId of config.addedProviders ?? []) {
+    addedProviders[providerId] = true
+  }
+  localStorage.setItem(STORAGE_KEYS.addedProviders, JSON.stringify(addedProviders))
+
   if (!shouldApplyAll && !shouldApplyFallback)
     return
 
   if (shouldApplyAll) {
-    const mergedProviders = {
-      ...parseJsonObject<Record<string, Record<string, unknown>>>(localStorage.getItem(STORAGE_KEYS.providers), {}),
-      ...config.providers,
-    }
-    localStorage.setItem(STORAGE_KEYS.providers, JSON.stringify(mergedProviders))
-
-    const addedProviders = parseJsonObject<Record<string, boolean>>(localStorage.getItem(STORAGE_KEYS.addedProviders), {})
-    for (const providerId of config.addedProviders ?? []) {
-      addedProviders[providerId] = true
-    }
-    localStorage.setItem(STORAGE_KEYS.addedProviders, JSON.stringify(addedProviders))
-
     if (config.cards) {
       const existingCards = parseJsonObject<Record<string, BootstrapAiriCard>>(localStorage.getItem(STORAGE_KEYS.cards), {})
       localStorage.setItem(STORAGE_KEYS.cards, JSON.stringify({
