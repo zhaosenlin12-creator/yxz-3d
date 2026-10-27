@@ -287,9 +287,10 @@ async function sendQuickStart(prompt: string) {
   await handleSend()
 }
 
-// + menu: open the preset YXZ 3D model showcase (same model as the main stage).
+// + menu: open the preset YXZ 3D creation studio (printable models, not the
+// animated VRM). The studio shows 3 preset poses and the full edit pipeline.
 function openPresetYXZ3D() {
-  const url = `${window.location.origin}/yxz-vrm-preview`
+  const url = `${window.location.origin}/yxz-studio`
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 

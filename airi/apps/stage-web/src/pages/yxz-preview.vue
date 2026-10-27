@@ -57,10 +57,18 @@ function startViewer() {
     if (!scene || !camera || !controls)
       return
     const model = gltf.scene
-    // The print backend exports meshes with Z-up coordinates. The web viewer
-    // is Y-up, so normalize the orientation before framing; otherwise a
-    // plaque/figurine is presented edge-on and appears stretched or clipped.
-    model.rotation.x = -Math.PI / 2
+    // Models may come from Tripo (Y-up), Hunyuan3D (Z-up after print prep) or
+    // local export. Normalize the orientation automatically: whichever axis is
+    // the tallest becomes the up axis, so the figure always stands upright.
+    const rawBox = new THREE.Box3().setFromObject(model)
+    const rawSize = rawBox.getSize(new THREE.Vector3())
+    const axes = [['x', rawSize.x], ['y', rawSize.y], ['z', rawSize.z]] as const
+    axes.sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))
+    const up = axes[0][0]
+    if (up === 'z')
+      model.rotation.x = -Math.PI / 2
+    else if (up === 'x')
+      model.rotation.z = Math.PI / 2
     const box = new THREE.Box3().setFromObject(model)
     const size = box.getSize(new THREE.Vector3())
     const center = box.getCenter(new THREE.Vector3())

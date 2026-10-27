@@ -147,3 +147,8 @@ packages/stage-layouts/src/assets/activity-stage-2026-text-keep.png
 # Credentials — API keys & secrets must never be committed
 cartoon-print-studio/keys.txt
 **/keys.txt
+
+
+# Large 3D preset assets are shipped inside the release zip, not the git repo
+presets/models
+presets/models/**

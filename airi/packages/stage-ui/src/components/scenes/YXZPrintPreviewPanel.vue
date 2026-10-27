@@ -368,6 +368,15 @@ onUnmounted(() => controller.value?.abort())
           <small>聊天负责沟通，这里负责设计、画布编辑和 3D 文件输出</small>
         </div>
         <div class="yxz-print-header-actions">
+          <a
+            v-if="sessionId"
+            class="yxz-print-open-studio"
+            :href="`/yxz-studio?session=${encodeURIComponent(sessionId)}`"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            在新标签页打开创作面板 ↗
+          </a>
           <button type="button" class="yxz-print-memory-clear" @click="clearRequirementMemory">
             清除记忆
           </button>

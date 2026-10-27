@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
 import YXZPreviewCanvasEditor from '../../../../packages/stage-ui/src/components/scenes/YXZPreviewCanvasEditor.vue'
-import { createYXZCartoonModel, type YXZModelProgress } from '../../../../packages/stage-ui/src/composables/use-yxz-print-preview'
+import { createYXZCartoonModel, getYXZPrintApiBase, type YXZModelProgress } from '../../../../packages/stage-ui/src/composables/use-yxz-print-preview'
 
 const route = useRoute()
 const sessionId = String(route.query.session ?? '')
@@ -11,13 +11,49 @@ const imageIndex = Number(route.query.image ?? 0)
 const previewSrc = String(route.query.src ?? '')
 const caption = String(route.query.caption ?? '宜小智创作方案')
 
+interface YXZPresetModel {
+  id: string
+  name: string
+  desc: string
+  thumbUrl: string | null
+  glbUrl: string
+  stlUrl: string | null
+}
+
 const editedDataUrl = ref('')
 const building = ref(false)
 const progress = ref<YXZModelProgress | null>(null)
 const model = ref<{ glbUrl: string, stlUrl: string } | null>(null)
 const errorMessage = ref('')
+const presets = ref<YXZPresetModel[]>([])
+const presetsLoading = ref(true)
 // '2d' = canvas editing, '3d' = model preview (scene switching like Tripo)
 const activeView = ref<'2d' | '3d'>('2d')
+
+async function loadPresets() {
+  presetsLoading.value = true
+  try {
+    const resp = await fetch(`${getYXZPrintApiBase()}/api/presets/models`)
+    if (resp.ok) {
+      const data = await resp.json()
+      presets.value = Array.isArray(data.items) ? data.items : []
+    }
+  }
+  catch { /* offline – presets section stays hidden */ }
+  finally {
+    presetsLoading.value = false
+  }
+}
+
+onMounted(loadPresets)
+
+function presetPreviewUrl(p: YXZPresetModel) {
+  return `/yxz-preview?model=${encodeURIComponent(`${getYXZPrintApiBase()}${p.glbUrl}`)}`
+}
+
+function presetStlDownload(p: YXZPresetModel) {
+  return p.stlUrl ? `${getYXZPrintApiBase()}${p.stlUrl}` : ''
+}
 
 function onSave(dataUrl: string) {
   editedDataUrl.value = dataUrl
@@ -103,6 +139,43 @@ function goBack() {
         <small v-if="model" class="yxz-view-badge">已生成</small>
       </button>
     </nav>
+
+    <!-- Preset printable models (3 poses, built with Tripo / Hunyuan3D) -->
+    <section v-if="presets.length" class="yxz-studio-presets" aria-label="宜小智预制模型示例">
+      <header class="yxz-studio-presets-head">
+        <strong>宜小智预制 3D 模型示例</strong>
+        <small>可 3D 打印的成品 · 点击预览，可直接下载 STL 交给打印机</small>
+      </header>
+      <div class="yxz-studio-presets-grid">
+        <article v-for="p in presets" :key="p.id" class="yxz-studio-preset">
+          <a
+            class="yxz-studio-preset-thumb"
+            :href="presetPreviewUrl(p)"
+            target="_blank"
+            rel="noopener noreferrer"
+            :title="`打开 ${p.name} 3D 预览`"
+          >
+            <img v-if="p.thumbUrl" :src="`${getYXZPrintApiBase()}${p.thumbUrl}`" :alt="p.name" loading="lazy" />
+            <span v-else class="yxz-studio-preset-ph">🧊</span>
+            <span class="yxz-studio-preset-preview">点开 3D 预览 ↗</span>
+          </a>
+          <div class="yxz-studio-preset-body">
+            <h4>{{ p.name }}</h4>
+            <p>{{ p.desc }}</p>
+            <div class="yxz-studio-preset-actions">
+              <a class="yxz-studio-preset-link" :href="presetPreviewUrl(p)" target="_blank" rel="noopener noreferrer">3D 预览</a>
+              <a
+                v-if="p.stlUrl"
+                class="yxz-studio-preset-link"
+                :href="`${getYXZPrintApiBase()}${p.stlUrl}?download=1`"
+                download
+                rel="noreferrer"
+              >下载 STL</a>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
 
     <main class="yxz-studio-main">
       <!-- Central working area -->
@@ -294,6 +367,126 @@ function goBack() {
   gap: 18px;
   max-width: 1320px;
   margin: 0 auto;
+}
+
+.yxz-studio-presets {
+  max-width: 1320px;
+  margin: 14px auto 0;
+  padding: 14px 18px;
+  border: 1px solid rgba(96, 165, 250, .32);
+  border-radius: 14px;
+  background: rgba(13, 37, 66, .55);
+}
+
+.yxz-studio-presets-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.yxz-studio-presets-head strong {
+  font-size: 15px;
+  color: #dff1ff;
+}
+
+.yxz-studio-presets-head small {
+  color: #8fb8dd;
+  font-size: 12px;
+}
+
+.yxz-studio-presets-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 14px;
+}
+
+.yxz-studio-preset {
+  border: 1px solid rgba(96, 165, 250, .22);
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, .04);
+  display: flex;
+  flex-direction: column;
+}
+
+.yxz-studio-preset-thumb {
+  position: relative;
+  display: block;
+  aspect-ratio: 1 / 1;
+  background: linear-gradient(160deg, #0d2542, #123a63);
+  overflow: hidden;
+}
+
+.yxz-studio-preset-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.yxz-studio-preset-ph {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 44px;
+}
+
+.yxz-studio-preset-preview {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 6px 0;
+  text-align: center;
+  font-size: 12px;
+  color: #eaf6ff;
+  background: rgba(6, 21, 39, .72);
+  opacity: 0;
+  transition: opacity .2s;
+}
+
+.yxz-studio-preset-thumb:hover .yxz-studio-preset-preview {
+  opacity: 1;
+}
+
+.yxz-studio-preset-body {
+  padding: 10px 12px 12px;
+}
+
+.yxz-studio-preset-body h4 {
+  font-size: 14px;
+  color: #e4f3ff;
+  margin: 0 0 4px;
+}
+
+.yxz-studio-preset-body p {
+  font-size: 11.5px;
+  color: #93b7d9;
+  margin: 0 0 8px;
+  line-height: 1.45;
+}
+
+.yxz-studio-preset-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.yxz-studio-preset-link {
+  font-size: 12px;
+  color: #b9e2ff;
+  text-decoration: none;
+  border: 1px solid rgba(150, 205, 255, .4);
+  border-radius: 6px;
+  padding: 5px 10px;
+  background: rgba(255, 255, 255, .06);
+}
+
+.yxz-studio-preset-link:hover {
+  background: rgba(255, 255, 255, .12);
 }
 
 @media (max-width: 900px) {

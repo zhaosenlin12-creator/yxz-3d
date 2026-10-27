@@ -1941,6 +1941,63 @@ def serve_data(sid: str, rest: str):
     ext = os.path.splitext(p)[1].lower()
     mt = EXT_MIME.get(ext, "application/octet-stream")
     return FileResponse(p, media_type=mt)
+
+
+# ---------------------------------------------------------------------------
+# YXZ preset printable models (created once with Tripo / Hunyuan3D)
+# ---------------------------------------------------------------------------
+_PRESET_ROOT = None
+for _candidate in (
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "presets", "models"),
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "presets", "models"),
+):
+    if os.path.isdir(_candidate):
+        _PRESET_ROOT = _candidate
+        break
+if _PRESET_ROOT is None:
+    _PRESET_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "presets", "models")
+_PRESET_NAMES = {
+    "pose_wave": ("招手打招呼", "白色宇航服宜小智 · 右手挥动打招呼 · 可 3D 打印摆件"),
+    "pose_hip": ("双手叉腰", "白色宇航服宜小智 · 双手叉腰自信站姿 · 可 3D 打印摆件"),
+    "pose_salute": ("举手敬礼", "白色宇航服宜小智 · 举手敬礼精神站姿 · 可 3D 打印摆件"),
+}
+
+
+@app.get("/api/presets/models")
+def list_preset_models():
+    if not os.path.isdir(_PRESET_ROOT):
+        return {"items": []}
+    items = []
+    for name in sorted(os.listdir(_PRESET_ROOT)):
+        d = os.path.join(_PRESET_ROOT, name)
+        if not os.path.isdir(d):
+            continue
+        glb = os.path.join(d, "model.glb")
+        if not os.path.isfile(glb):
+            continue
+        stl = os.path.join(d, "model.stl")
+        thumb = os.path.join(d, "thumb.png")
+        label, desc = _PRESET_NAMES.get(name, (name, "宜小智 3D 预制模型"))
+        items.append({
+            "id": name,
+            "name": label,
+            "desc": desc,
+            "thumbUrl": f"/api/presets/{name}/thumb.png" if os.path.isfile(thumb) else None,
+            "glbUrl": f"/api/presets/{name}/model.glb",
+            "stlUrl": f"/api/presets/{name}/model.stl" if os.path.isfile(stl) else None,
+        })
+    return {"items": items}
+
+
+@app.get("/api/presets/{name}/{rest:path}")
+def serve_preset_file(name: str, rest: str):
+    base = os.path.realpath(_PRESET_ROOT)
+    p = os.path.realpath(os.path.join(base, name, rest))
+    if not p.startswith(base) or not os.path.isfile(p):
+        raise HTTPException(404)
+    ext = os.path.splitext(p)[1].lower()
+    mt = EXT_MIME.get(ext, "application/octet-stream")
+    return FileResponse(p, media_type=mt)
 @app.on_event("startup")
 def _startup():
     def warm():
