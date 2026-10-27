@@ -48,6 +48,15 @@ const resolvedSlices = computed<ChatSlices[]>(() => {
 })
 
 const showLoader = computed(() => props.showPlaceholder && resolvedSlices.value.length === 0)
+// A tool call is in flight (preview / 3D generation / laser svg...) — show an explicit
+// "making" hint so the user never thinks the chat froze.
+const toolPending = computed(() => {
+  if (props.showPlaceholder)
+    return false
+  const slices = props.message.slices ?? []
+  const last = slices[slices.length - 1]
+  return !!last && last.type === 'tool-call'
+})
 const containerClass = computed(() => props.variant === 'mobile' ? 'mr-0' : 'mr-12')
 const boxClasses = computed(() => [
   props.variant === 'mobile' ? 'px-2 py-2 text-sm bg-primary-50/90 dark:bg-primary-950/90' : 'px-3 py-3 bg-primary-50/80 dark:bg-primary-950/80',
@@ -94,7 +103,14 @@ const hideInternalFailure = computed(() => !creation.value
               </template>
             </template>
           </div>
-          <div v-else-if="showLoader" i-eos-icons:three-dots-loading />
+          <div v-else-if="showLoader" class="flex items-center gap-2 py-0.5">
+            <div i-eos-icons:three-dots-loading />
+            <span class="text-xs text-primary-600/70 dark:text-primary-200/70">宜小智 正在思考，请稍候…</span>
+          </div>
+          <div v-else-if="toolPending" class="flex items-center gap-2 py-0.5 text-xs text-primary-600/70 dark:text-primary-200/70">
+            <div i-eos-icons:three-dots-loading />
+            <span>宜小智 正在制作，请耐心等待…</span>
+          </div>
 
           <ChatResponsePart
             v-if="message.categorization"

@@ -41,10 +41,50 @@ const localSoftware = ref<Awaited<ReturnType<typeof detectYXZLocalSoftware>>>([]
 const softwareLoading = ref(false)
 const softwareMessage = ref('')
 const openingSoftwareId = ref<string>()
+const designPrompt = ref('')
+const designing = ref(false)
 const previewFontSize = computed(() => {
   const nameLen = Math.max(1, form.value.name.length)
-  return nameLen <= 3 ? 30 : 22
+  return nameLen <= 3 ? 32 : (nameLen <= 6 ? 24 : 20)
 })
+const previewNameLen = computed(() => form.value.name.length)
+const previewContactLines = computed(() => form.value.contact.split('\n').filter(Boolean).length)
+
+async function aiDesign() {
+  const description = designPrompt.value.trim()
+  if (!description || designing.value)
+    return
+  designing.value = true
+  errorMessage.value = ''
+  try {
+    const response = await fetch(`${getYXZPrintApiBase()}/api/laser/design`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description, theme: form.value.theme, accent: form.value.accent }),
+    })
+    const raw: unknown = await response.json().catch(() => undefined)
+    if (!response.ok) {
+      const detail = (raw as { detail?: string })?.detail
+      throw new Error(detail || `AI 设计失败（HTTP ${response.status}）`)
+    }
+    const data = raw as Partial<typeof form.value>
+    form.value.name = data.name ?? form.value.name
+    form.value.title = data.title ?? form.value.title
+    form.value.unit = data.unit ?? form.value.unit
+    form.value.contact = data.contact ?? form.value.contact
+    form.value.slogan = data.slogan ?? form.value.slogan
+    if (data.theme)
+      form.value.theme = data.theme
+    if (data.accent)
+      form.value.accent = data.accent
+  }
+  catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : 'AI 设计失败，请稍后再试'
+  }
+  finally {
+    designing.value = false
+  }
+}
 
 const frontStyle = computed(() => ({
   background: `linear-gradient(160deg, ${form.value.theme}, ${form.value.theme}cc)`,
@@ -231,9 +271,7 @@ onUnmounted(() => emit('status', 'idle'))
           <div class="yxz-laser-block">
             <span class="yxz-laser-block-label">正面 · 自由编辑</span>
             <div class="yxz-laser-preview" :style="frontStyle">
-              <div class="yxz-laser-preview-slogan">
-                {{ form.slogan }}
-              </div>
+              <div class="yxz-laser-preview-slogan">{{ form.slogan }}</div>
               <div class="yxz-laser-preview-name" :style="{ fontSize: `${previewFontSize}px` }">
                 {{ form.name || '姓名' }}
               </div>
@@ -244,6 +282,19 @@ onUnmounted(() => emit('status', 'idle'))
               <div class="yxz-laser-preview-contact">
                 {{ form.contact }}
               </div>
+              <div v-if="form.note" class="yxz-laser-preview-note">{{ form.note }}</div>
+            </div>
+            <div class="yxz-laser-ai">
+              <input
+                v-model="designPrompt"
+                maxlength="80"
+                placeholder="一句话描述名片：如「张老师的科技课名片，蓝色主题」"
+                aria-label="AI 快速设计名片"
+                @keydown.enter="aiDesign"
+              >
+              <button type="button" :disabled="designing || !designPrompt.trim()" @click="aiDesign">
+                {{ designing ? 'AI 设计中…' : '✨ AI 快速设计' }}
+              </button>
             </div>
             <div class="yxz-laser-fields">
               <label>姓名 <input v-model="form.name" maxlength="12" placeholder="张老师"></label>
@@ -391,12 +442,49 @@ onUnmounted(() => emit('status', 'idle'))
 .yxz-laser-preview-name { font-weight: 800; line-height: 1.15; margin-top: .8rem; }
 .yxz-laser-preview-role { font-size: .72rem; opacity: .9; margin-top: .55rem; }
 .yxz-laser-preview-accent { width: 3.2rem; height: .24rem; border-radius: 2px; margin-top: .7rem; opacity: .9; }
+.yxz-laser-preview-note {
+  margin-top: .55rem;
+  font-size: .58rem;
+  opacity: .85;
+  white-space: pre-line;
+  border-top: 1px dashed rgba(255, 255, 255, .35);
+  padding-top: .4rem;
+}
 .yxz-laser-preview-contact {
   margin-top: .8rem;
   font-size: .6rem;
   line-height: 1.5;
   opacity: .92;
   white-space: pre-line;
+}
+
+.yxz-laser-ai {
+  display: flex;
+  gap: .4rem;
+  margin: .5rem 0;
+}
+.yxz-laser-ai input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #c8e1ec;
+  border-radius: .45rem;
+  padding: .4rem .5rem;
+  font-size: .68rem;
+  color: #234b61;
+}
+.yxz-laser-ai button {
+  border: 1px solid #18a8e0;
+  border-radius: .45rem;
+  background: #18a8e0;
+  color: #fff;
+  padding: .4rem .6rem;
+  font-size: .68rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.yxz-laser-ai button:disabled {
+  cursor: not-allowed;
+  opacity: .5;
 }
 
 .yxz-laser-fields {

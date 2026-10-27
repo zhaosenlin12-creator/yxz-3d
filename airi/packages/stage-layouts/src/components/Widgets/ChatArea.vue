@@ -287,6 +287,12 @@ async function sendQuickStart(prompt: string) {
   await handleSend()
 }
 
+// + menu: open the preset YXZ 3D model showcase (same model as the main stage).
+function openPresetYXZ3D() {
+  const url = `${window.location.origin}/yxz-vrm-preview`
+  window.open(url, '_blank', 'noopener,noreferrer')
+}
+
 function sendFromKeyboard() {
   messageInput.value = messageInput.value.replace(TRAILING_NEWLINES_REGEX, '')
   void handleSend()
@@ -690,6 +696,14 @@ watch(sendMode, () => {
                 <div class="i-ph:cardholder-bold h-4 w-4 text-primary-600 dark:text-primary-300" />
                 <span>激光切割名片</span>
                 <small class="text-neutral-400">预制模板 · 正面编辑 · SVG 切割</small>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                class="w-full flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-xs outline-none transition-colors hover:bg-primary-100/60 dark:hover:bg-primary-900/40"
+                @select="openPresetYXZ3D"
+              >
+                <div class="i-ph:robot-bold h-4 w-4 text-primary-600 dark:text-primary-300" />
+                <span>宜小智 3D 模型</span>
+                <small class="text-neutral-400">预制精致模型 · 直接展示成品</small>
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenuPortal>

@@ -1534,6 +1534,104 @@ def laser_templates():
     return {"templates": laser_card.list_templates(os.path.join(DATA, "laser", "template"))}
 
 
+class LaserDesignReq(BaseModel):
+    """One-sentence description -> AI fills the card form fields."""
+    description: str
+    theme: str = "#0B5FA8"
+    accent: str = "#F5A623"
+
+
+@app.post("/api/laser/design")
+def laser_design(req: LaserDesignReq):
+    """Turn a one-line description into a pre-filled laser card form.
+
+    Uses the same LLM adapter as the thinking pipeline (MiniMax -> DeepSeek,
+    rule-based fallback), so it never blocks even when the LLM is down.
+    """
+    import json as _json
+    description = (req.description or "").strip()
+    if not description:
+        raise HTTPException(422, "请先描述你想要的名片，例如：张老师的科技课名片，蓝色主题")
+
+    prompt = (
+        "你是一名名片排版设计师。根据用户的描述，为一张激光切割名片（正面自由编辑、"
+        "背面固定活动背景）提取以下 JSON 字段（全部用中文或原文，字符串）："
+        '{"name": 姓名, "title": 职位/身份, "unit": 单位/学校, "contact": 联系方式'
+        '（如电话/微信，用换行分隔多条）, "slogan": 一句标语（8~14字，简洁有力）}。\n'
+        f"用户描述：{description}\n"
+        "只输出 JSON，不要多余文字。"
+    )
+    fallback = _laser_design_fallback(description, req.theme, req.accent)
+    try:
+        llm_result = llm_client.llm_call(prompt, timeout=25)
+    except Exception:
+        return fallback
+    if not llm_result or not llm_result[0]:
+        return fallback
+    raw = llm_result[0]
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-zA-Z]*\n?", "", cleaned)
+        cleaned = re.sub(r"\n?```$", "", cleaned)
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start < 0 or end <= start:
+        return fallback
+    try:
+        parsed = _json.loads(cleaned[start:end + 1])
+    except Exception:
+        return fallback
+    if not isinstance(parsed, dict):
+        return fallback
+
+    def _pick(keys, default=""):
+        for key in keys:
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return default
+
+    name = _pick(["name", "姓名"], fallback.get("name", ""))
+    return {
+        "name": name[:12],
+        "title": _pick(["title", "职位"], fallback.get("title", ""))[:20],
+        "unit": _pick(["unit", "单位", "school"], fallback.get("unit", ""))[:30],
+        "contact": _pick(["contact", "联系方式", "phone"], fallback.get("contact", ""))[:120],
+        "slogan": _pick(["slogan", "标语"], fallback.get("slogan", "数理创未来 智慧启新程"))[:30],
+        "theme": req.theme,
+        "accent": req.accent,
+        "note": "",
+    }
+
+
+def _laser_design_fallback(description: str, theme: str, accent: str) -> dict:
+    """Rule-based extraction when the LLM is unavailable."""
+    name = ""
+    if "老师" in description or "师" in description:
+        match = re.search(r"([\u4e00-\u9fa5]{1,3})老师", description)
+        if match:
+            name = match.group(1) + "老师"
+    if not name:
+        match = re.search(r"([\u4e00-\u9fa5]{2,4})老师|姓名[是为：:]([\u4e00-\u9fa5]{2,4})", description)
+        if match:
+            name = match.group(1) or match.group(2) or ""
+    title = "老师" if "老师" in description else ""
+    unit = "宜昌市数理文化活动组委会"
+    if "学校" in description or "教育" in description:
+        unit = "宜昌市中小学"
+    contact = ""
+    match = re.search(r"(1[3-9]\d{9})", description)
+    if match:
+        contact = match.group(1)
+    slogan = "数理创未来 智慧启新程"
+    if "科技" in description or "AI" in description.lower() or "智能" in description:
+        slogan = "数理创未来 智慧启新程"
+    return {
+        "name": name, "title": title, "unit": unit,
+        "contact": contact, "slogan": slogan,
+        "theme": theme, "accent": accent, "note": "",
+    }
+
+
 @app.post("/api/laser_card", status_code=201)
 def laser_card_generate(req: LaserCardReq):
     """Render a pre-made laser-cut business card (front editable / back fixed)
