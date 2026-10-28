@@ -8,6 +8,7 @@ import { getYXZPrintApiBase } from '@proj-airi/stage-ui/composables/use-yxz-prin
 import { useAudioContext } from '@proj-airi/stage-ui/stores/audio'
 import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
 import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
+import { useChatStreamStore } from '@proj-airi/stage-ui/stores/chat/stream-store'
 import { useConsciousnessStore } from '@proj-airi/stage-ui/stores/modules/consciousness'
 import { useHearingSpeechInputPipeline, useHearingStore } from '@proj-airi/stage-ui/stores/modules/hearing'
 import { useProvidersStore } from '@proj-airi/stage-ui/stores/providers'
@@ -55,6 +56,7 @@ const { askPermission, startStream } = useSettingsAudioDevice()
 const { enabled, selectedAudioInput, stream, audioInputs } = storeToRefs(useSettingsAudioDevice())
 const chatOrchestrator = useChatOrchestratorStore()
 const chatSession = useChatSessionStore()
+const chatStream = useChatStreamStore()
 const { cancelPendingSends, ingest, onAfterMessageComposed } = chatOrchestrator
 // A turn is in flight: a second tap must not queue another identical turn.
 const sendInFlight = ref(false)
@@ -216,6 +218,34 @@ function debouncedAutoSend(text: string) {
   scheduleAutoSend()
 }
 
+// A turn can legitimately take minutes: four preview images plus a 3D model.
+// The stall detector must therefore see that the assistant is still working,
+// otherwise a slow-but-healthy turn is aborted and the visitor is left
+// looking at a chat that never answers.
+//
+// The stamp carries everything that changes while a turn runs: the streamed
+// text, the tool calls, and the messages that land in the conversation.
+function chatProgressStamp() {
+  const stream = chatStream.streamingMessage
+  const sessionMessages = messages.value
+  const last = sessionMessages.at(-1)
+  const lastContent = last?.content
+  // The creation card reports its own progress (preview generated, 3D model
+  // at 17%, engine switching) by rewriting the message it lives in, so the
+  // card's progress text is part of the fingerprint too.
+  const lastCreation = (last as { yxzCreation?: { status?: string, progressMsg?: string } } | undefined)?.yxzCreation
+
+  return [
+    stream?.content?.length ?? 0,
+    stream?.slices?.length ?? 0,
+    stream?.tool_results?.length ?? 0,
+    sessionMessages.length,
+    typeof lastContent === 'string' ? lastContent : '',
+    lastCreation?.status ?? '',
+    lastCreation?.progressMsg ?? '',
+  ].join('|')
+}
+
 async function sendMessage(text: string, providerId?: string) {
   if (sendInFlight.value) {
     console.warn('[ChatArea] Send ignored: a turn is already running')
@@ -237,7 +267,7 @@ async function sendMessage(text: string, providerId?: string) {
 
     return await withChatSendTimeout(operation, () => {
       cancelPendingSends(chatSession.activeSessionId)
-    })
+    }, chatProgressStamp)
   }
   finally {
     sendInFlight.value = false

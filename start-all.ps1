@@ -120,6 +120,13 @@ if ($NoFrontend) {
 } else {
     $vite = Join-Path $frontendRoot 'node_modules\vite\bin\vite.js'
     if (-not (Test-Path -LiteralPath $vite)) { Fail "未找到 vite，请先运行 install-new-pc.ps1"; exit 1 }
+    # 前端的 LLM / TTS 凭据靠 .env.local 注入，而 .env.local 是由
+    # cartoon-print-studio\keys.txt 生成的（不入库）。每次启动都重新生成，
+    # 这样换机器、换 key 之后不需要再手动去设置页填一遍。
+    $genBootstrap = Join-Path $root 'gen-provider-bootstrap.ps1'
+    if (Test-Path -LiteralPath $genBootstrap) {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $genBootstrap | Out-Null
+    }
     $out = Join-Path $run "frontend-$FrontendPort.out.log"
     $err = Join-Path $run "frontend-$FrontendPort.err.log"
     $env:VITE_CARTOON_PRINT_API = "http://127.0.0.1:$BackendPort"

@@ -158,6 +158,7 @@ async function runYXZModelBuild(input: {
   options: string[]
   preview: { index: number, src: string, caption: string }
   imageIndex: number
+  signal?: AbortSignal
 }): Promise<YXZModelResponse> {
   const card = {
     sessionId: input.sessionId,
@@ -173,6 +174,7 @@ async function runYXZModelBuild(input: {
     const result = await createYXZCartoonModel({
       sessionId: input.sessionId,
       imageIndex: input.imageIndex,
+      signal: input.signal,
       onProgress: progress => appendCreationCard({
         ...card,
         status: 'model-building',
@@ -281,7 +283,11 @@ export async function createYXZCreationTools() {
         previewImageIndex: z.number().int().min(0).max(9).describe('作品预览图序号，默认 0'),
         background: z.string().max(120).optional().describe('卡片背面的背景描述（例如“深蓝科技感，星辰与电路板”）；用户没有特别要求就留空使用默认活动背景'),
       }).strict(),
-      execute: async ({ name, title, unit, contact, slogan, previewSessionId, previewImageIndex, background }) => {
+      execute: async ({ name, title, unit, contact, slogan, previewSessionId, previewImageIndex, background }, options) => {
+        // The chat turn can be cancelled while this tool is running.  The
+        // abort signal has to reach the request, otherwise the tool keeps the
+        // whole turn alive and every later message queues up behind it.
+        const abortSignal = options?.abortSignal
         const artworkSessionId = (previewSessionId ?? '').trim()
         const artworkImageIndex = previewImageIndex ?? 0
         let result: Awaited<ReturnType<typeof createYXZLaserCard>>
@@ -302,6 +308,7 @@ export async function createYXZCreationTools() {
             contact,
             slogan,
             ...(backTemplate ? { backTemplate } : {}),
+            signal: abortSignal,
           })
         }
         catch (error) {
@@ -339,12 +346,14 @@ export async function createYXZCreationTools() {
         description: z.string().min(3).max(500).describe('中文产品描述，包含对象、用途、关键造型'),
         constraints: z.array(z.string()).max(8).describe('用户已确认的风格、尺寸、颜色和打印约束'),
       }).strict(),
-      execute: async ({ description, constraints }) => {
+      execute: async ({ description, constraints }, options) => {
+        const abortSignal = options?.abortSignal
         const memory = useYXZRequirementMemory()
         memory.update({ description, constraints })
         const result = await createYXZPreview({
           prompt: buildYXZPreviewPrompt(description, constraints),
           n: 4,
+          signal: abortSignal,
         })
         const item = result.previews[0]
         if (!item)
@@ -373,7 +382,8 @@ export async function createYXZCreationTools() {
         sessionId: z.string().min(1).describe('yxz_generatePreview 返回的 sessionId'),
         imageIndex: z.number().int().min(0).describe('yxz_generatePreview 返回的 imageIndex'),
       }).strict(),
-      execute: async ({ sessionId, imageIndex }) => {
+      execute: async ({ sessionId, imageIndex }, options) => {
+        const abortSignal = options?.abortSignal
         const sessions = useChatSessionStore()
         const messages = sessions.getSessionMessages(sessions.activeSessionId)
         const card = [...messages].reverse().find((message): message is ChatAssistantMessage & { createdAt?: number } => message.role === 'assistant'
@@ -398,6 +408,7 @@ export async function createYXZCreationTools() {
           options: creation.options,
           preview: creation.preview,
           imageIndex,
+          signal: abortSignal,
         })
         return {
           status: 'model-ready',

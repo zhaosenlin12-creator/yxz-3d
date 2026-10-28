@@ -158,7 +158,14 @@ watch([stream, () => vadLoaded.value], async ([s, loaded]) => {
     :background="selectedOption"
     :top-color="sampledColor"
   >
-    <div relative flex="~ col" z-2 h-100dvh w-100vw of-hidden>
+    <!--
+      NOTE: the stage column must not be locked to the viewport height.
+      宜小智的 2D 精灵画布按 2:1 宽高比铺满整行，窄屏 / 笔记本上会比视口更高，
+      之前用 `h-100dvh of-hidden` 会把角色的脚直接裁掉，而且页面完全无法滚动。
+      改成 `min-h-100dvh` + 允许纵向滚动后，超出部分可以往下滚到，
+      背景层也会跟着容器一起长高，不会出现空白。
+    -->
+    <div relative flex="~ col" z-2 min-h-100dvh w-100vw of-x-hidden>
       <!-- header -->
       <div class="px-0 py-1 md:px-3 md:py-3" w-full gap-2>
         <Header class="hidden md:flex" />

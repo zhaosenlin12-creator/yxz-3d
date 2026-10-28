@@ -13,6 +13,14 @@ export interface ProviderSeedFile {
    * rotated one.
    */
   override?: boolean
+  /**
+   * The speech provider / voice is chosen by hand in the settings, and that
+   * choice has to survive a reload. `override` exists to replace stale
+   * *credentials* in localStorage with a rotated key, so it must not be
+   * allowed to drag the voice back to the seed default. A seed that really
+   * wants to move the voice has to ask for it explicitly.
+   */
+  speechOverride?: boolean
   speech?: {
     provider?: string
     model?: string
@@ -106,7 +114,7 @@ export function applyProviderSeed(seed: ProviderSeedFile): ProviderSeedResult {
     const currentProvider = speechStore.activeSpeechProvider
     const isUnconfigured = !currentProvider || currentProvider === 'speech-noop'
 
-    if (isUnconfigured || seed.override) {
+    if (isUnconfigured || seed.speechOverride) {
       speechStore.activeSpeechProvider = speechSeed.provider
       if (speechSeed.model)
         speechStore.activeSpeechModel = speechSeed.model

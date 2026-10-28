@@ -10,6 +10,8 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,15 @@ def _data_dir() -> Path:
 
 
 OVERRIDE_FILE = "software_paths.json"
+
+# Resolving the Start Menu / Desktop shortcuts goes through COM and takes
+# roughly ten seconds on Windows. The set of installed tools rarely changes
+# between two panel openings, so the discovery is cached for a short while.
+# Overrides and file existence are still evaluated on every call, so a tool
+# the user just installed or re-pointed shows up immediately.
+DISCOVERY_TTL_SECONDS = 300
+_discovery_cache: dict[str, Any] = {"expires_at": 0.0, "value": None}
+_discovery_lock = threading.Lock()
 
 
 def _override_path() -> Path:
@@ -191,13 +202,32 @@ def _shortcut_candidates() -> dict[str, list[str]]:
     return result
 
 
+def _cached_discovery() -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Registry + shortcut lookup, memoised for a few minutes.
+
+    Both lookups touch COM and the Windows registry, which costs about ten
+    seconds per call. Caching keeps the "open with software" panel responsive
+    when the user opens it more than once.
+    """
+    now = time.monotonic()
+    with _discovery_lock:
+        cached = _discovery_cache["value"]
+        if cached is not None and _discovery_cache["expires_at"] > now:
+            return cached
+    registry = _windows_registry_candidates()
+    shortcuts = _shortcut_candidates()
+    with _discovery_lock:
+        _discovery_cache["value"] = (registry, shortcuts)
+        _discovery_cache["expires_at"] = time.monotonic() + DISCOVERY_TTL_SECONDS
+    return registry, shortcuts
+
+
 def detect_software() -> list[dict[str, Any]]:
     """Return known local tools, with an executable path only when installed."""
     local = os.environ.get("LOCALAPPDATA", "")
     program_files = os.environ.get("ProgramFiles", r"C:\\Program Files")
     program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\\Program Files (x86)")
-    registry = _windows_registry_candidates()
-    shortcuts = _shortcut_candidates()
+    registry, shortcuts = _cached_discovery()
     overrides = load_overrides()
     # ``formats`` are the formats the tool accepts; ``verified`` are the ones
     # this machine has actually opened successfully. The UI only advertises

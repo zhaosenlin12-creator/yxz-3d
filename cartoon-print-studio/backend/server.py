@@ -56,6 +56,11 @@ EXT_MIME = {
     ".js": "application/javascript; charset=utf-8",
 }
 
+# The one-time Y-up -> Z-up migration in /api/demo only ever applied to the
+# old local Hunyuan demos. Fresh high-resolution exports are far bigger and
+# need no migration, so cap the size we are willing to re-export.
+DEMO_UPGRADE_MAX_BYTES = 16 * 1024 * 1024
+
 
 async def _save_uploaded_file(upload: UploadFile, target: str, max_bytes: int) -> int:
     """Stream an upload to disk with a hard size limit."""
@@ -557,6 +562,11 @@ def demo_model():
         })
     try:
         for sid in os.listdir(DATA):
+            # Scratch directories (leading "_") hold throw-away verification
+            # files, never user work. Offering one as "the demo model" is
+            # both wrong and, for the big test meshes, extremely slow.
+            if sid.startswith("_"):
+                continue
             model_path = os.path.join(DATA, sid, "model", "mesh.glb")
             if not os.path.isfile(model_path):
                 continue
@@ -597,7 +607,13 @@ def demo_model():
                     already_prepared = json.load(handle) == signature
             except Exception:
                 already_prepared = False
-        if not already_prepared:
+        # The Y-up migration exists for the old local Hunyuan demos (a few MB).
+        # A fresh high-resolution export is tens of megabytes and needs no
+        # migration: the web viewer already auto-detects the up axis. Running
+        # trimesh over such a mesh turned this endpoint into a 30s+ hang, so
+        # oversized models are served as-is.
+        upgrade_allowed = signature["size"] <= DEMO_UPGRADE_MAX_BYTES
+        if not already_prepared and upgrade_allowed:
             import trimesh
             legacy_mesh = trimesh.load(model_path, force="mesh")
             if mesh_postprocess.has_legacy_y_up_base(legacy_mesh):
@@ -606,9 +622,10 @@ def demo_model():
                 mesh_postprocess.export_view_glb(cleaned, model_path)
                 cleaned.export(os.path.join(model_dir, "mesh.obj"))
                 cleaned.export(os.path.join(model_dir, "mesh.stl"))
-            elif len(legacy_mesh.split(only_watertight=False)) > 1:
+            elif mesh_postprocess.component_count(legacy_mesh) > 1:
                 # Keep old bundled demos compatible with the explode-view UI.
                 mesh_postprocess.export_view_glb(legacy_mesh, model_path)
+        if not already_prepared:
             signature = {"size": os.path.getsize(model_path), "mtime": os.path.getmtime(model_path)}
             try:
                 with open(marker_path, "w", encoding="utf-8") as handle:
@@ -943,8 +960,10 @@ def to_3d_cartoon(req: ThreeDCartoonReq):
             _PILImage.open(BytesIO(blob)).convert("RGBA").save(edited_path, "PNG")
             src = edited_path
         except Exception as exc:
+            pg.fail("这次没能读取你的画布，请再试一次")
             raise HTTPException(400, f"无法读取画布编辑结果: {exc}") from exc
     if not os.path.isfile(src):
+        pg.fail("这次没能找到预览图，请再试一次")
         raise HTTPException(404, "preview not found")
     out = os.path.join(sd, "model")
     os.makedirs(out, exist_ok=True)
@@ -966,6 +985,7 @@ def to_3d_cartoon(req: ThreeDCartoonReq):
         )
     except Exception as e:
         traceback.print_exc()
+        pg.fail("这次没能生成出模型，请再试一次")
         raise HTTPException(500, f"cartoon relief error: {e}")
     pg.done("立体模型已经做好啦")
     return {
@@ -1032,7 +1052,7 @@ def _previews_v2_worker(req: PreviewsV2Req, sid: str):
             size='1024x1024', sid=sid,
         )
     except Exception as e:
-        pg.fail(f'预览图生成失败：{e}')
+        pg.fail('这次没能生成出预览图，请再试一次')
         return
     if not raw_items:
         pg.fail('这次没能生成出预览图，请再试一次')
@@ -1172,7 +1192,9 @@ def to_3d_v2(req: ThreeDV2Req):
     pdir = os.path.join(sd, "previews")
     previews_meta = os.path.join(sd, "specs.json")
     src = os.path.join(pdir, f"img_{req.image_index}.png")
+    pg = progress.Progress(req.session_id, "3d-v2", reset=True)
     if not os.path.isfile(src):
+        pg.fail(f"预览图不存在: {src}")
         raise HTTPException(404, "preview not found")
     # Load the user's original prompt + sub-prompt for this index to keep viewpoint consistent
     try:
@@ -1191,6 +1213,7 @@ def to_3d_v2(req: ThreeDV2Req):
     # going if we got at least one usable view.
     valid_items = [(b, t) for b, t in (raw_items or []) if b is not None]
     if not valid_items:
+        pg.fail("补充视角生图失败")
         raise HTTPException(500, "supplementary view generation failed")
     views_dir = os.path.join(sd, "models_v2_views")
     os.makedirs(views_dir, exist_ok=True)
@@ -1201,13 +1224,20 @@ def to_3d_v2(req: ThreeDV2Req):
             f.write(blob)
         view_paths.append(p)
     print(f"[3d_v2] {len(view_paths)} total views prepared in {time.time()-t_total:.1f}s")
+    pg.emit("build", 60, "正在组合多个视角，让模型更完整…", "geometry")
     out = os.path.join(sd, "model")
     os.makedirs(out, exist_ok=True)
     try:
         info = triposr_runner.generate_3d(view_paths, out, mc_res=128, threshold=15.0)
     except Exception as e:
         traceback.print_exc()
+        pg.fail("这次没能生成出模型，请再试一次")
         raise HTTPException(500, "这次没能生成出模型，请再试一次")
+    try:
+        _faces = int(info.get("faces", 0))
+    except Exception:
+        _faces = 0
+    pg.done("3D 模型已经做好啦")
     return {
         "session_id": req.session_id,
         "image_index": req.image_index,
@@ -1235,8 +1265,8 @@ class ThreeDHYReq(BaseModel):
     octree: int = 96
 @app.post("/api/3d_hy")
 def to_3d_hy(req: ThreeDHYReq):
-    pg = progress.Progress(req.session_id, "3d-hunyuan")
-    pg.emit("warmup", 5, "正在准备建模引擎…", "queued")
+    pg = progress.Progress(req.session_id, "3d-hunyuan", reset=True)
+    pg.emit("warmup", 5, "正在准备 3D 模型…", "queued")
     os.environ["PROGRESS_SID"] = req.session_id
     """High-quality 3D using Hunyuan3D-2 mini (Tencent 3.5B image-to-3D model).
     First call loads the model (~3 min). Subsequent calls reuse GPU weights.
@@ -2144,6 +2174,31 @@ def serve_data(sid: str, rest: str):
     ext = os.path.splitext(p)[1].lower()
     mt = EXT_MIME.get(ext, "application/octet-stream")
     return FileResponse(p, media_type=mt)
+
+
+@app.get("/api/sessions/{sid}/model")
+def get_session_model(sid: str):
+    """Report whether a session already has a finished 3D model.
+
+    The studio page used to forget everything after a reload, so an already
+    built model looked like it had never been generated.
+    """
+    sd = session_dir(sid)
+    model_dir = os.path.join(sd, "model")
+
+    def _has(name: str) -> bool:
+        candidate = os.path.join(model_dir, name)
+        return os.path.isfile(candidate) and os.path.getsize(candidate) > 0
+
+    if not _has("mesh.glb"):
+        return {"session_id": sid, "exists": False}
+    return {
+        "session_id": sid,
+        "exists": True,
+        "glb_url": f"/api/export/{sid}/glb",
+        "stl_url": f"/api/export/{sid}/stl" if _has("mesh.stl") else None,
+        "obj_url": f"/api/export/{sid}/obj" if _has("mesh.obj") else None,
+    }
 
 
 # ---------------------------------------------------------------------------

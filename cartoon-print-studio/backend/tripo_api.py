@@ -13,6 +13,8 @@ from __future__ import annotations
 import os, re, time, json, base64, urllib.request, urllib.error, urllib.parse
 from typing import Optional, Dict, Any, List
 
+import numpy as np
+
 BASE = "https://api.tripo3d.ai/v2/openapi"
 
 # ---------------------------------------------------------------------------
@@ -28,30 +30,66 @@ _KEYFILE = (
 API_KEY = os.environ.get("TRIPO3D_KEY", "").strip()
 
 
-def _load_key_from_file() -> str:
+def _load_keys_from_file() -> List[str]:
+    """Every Tripo token found in the key file, in file order.
+
+    The first entry is the primary key; the rest are fallbacks. Tripo keys
+    expire or run out of credit independently, so one key must never be the
+    only reason the whole 3D chain is unavailable.
+    """
     if not os.path.isfile(_KEYFILE):
-        return ""
+        return []
     try:
         with open(_KEYFILE, "r", encoding="utf-8") as f:
             txt = f.read()
     except Exception:
-        return ""
-    # look for explicit tripo marker
+        return []
+    keys: List[str] = []
+
+    def _add(token: str) -> None:
+        if token and token not in keys:
+            keys.append(token)
+
+    # An explicit tripo marker wins the first slot.
     for line in txt.splitlines():
         low = line.lower()
         if "tripo" in low and ("tsk_" in line):
-            m = re.search(r"tsk_[A-Za-z0-9_]+", line)
+            m = re.search(r"tsk_[A-Za-z0-9_-]+", line)
             if m:
-                return m.group(0)
-    # fallback: any tsk_ token in the file
-    m = re.search(r"tsk_[A-Za-z0-9_]{8,}", txt)
-    if m:
-        return m.group(0)
-    return ""
+                _add(m.group(0))
+                break
+    # Then any other tsk_ token in the file, in order.
+    for m in re.finditer(r"tsk_[A-Za-z0-9_-]{8,}", txt):
+        _add(m.group(0))
+    return keys
 
 
+API_KEYS: List[str] = []
+if API_KEY:
+    API_KEYS.append(API_KEY)
+for _k in _load_keys_from_file():
+    if _k not in API_KEYS:
+        API_KEYS.append(_k)
 if not API_KEY:
-    API_KEY = _load_key_from_file()
+    API_KEY = API_KEYS[0] if API_KEYS else ""
+
+_active_key_index = 0
+
+
+def _current_key() -> str:
+    if not API_KEYS:
+        return API_KEY
+    return API_KEYS[_active_key_index % len(API_KEYS)]
+
+
+def _rotate_key() -> str:
+    """Move to the next configured key and return it."""
+    global _active_key_index, API_KEY
+    if len(API_KEYS) > 1:
+        _active_key_index = (_active_key_index + 1) % len(API_KEYS)
+        API_KEY = API_KEYS[_active_key_index]
+        print(f"[tripo] switching to fallback key {API_KEY[:14]}...", flush=True)
+    return _current_key()
 
 
 # ---------------------------------------------------------------------------
@@ -108,11 +146,14 @@ def _request(method: str, path: str, *, body: Optional[bytes] = None,
             "Tripo 当前网络不可达（刚刚连接失败），请检查网络或改用其他引擎"
         )
     url = BASE + path
-    h = {"Authorization": "Bearer " + API_KEY}
+    h = {}
     if headers:
         h.update(headers)
     last_err = None
-    for attempt in range(retries + 1):
+    attempt = 0
+    rotations = 0
+    while attempt <= retries:
+        h["Authorization"] = "Bearer " + _current_key()
         req = urllib.request.Request(url, data=body, method=method, headers=h)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -127,6 +168,13 @@ def _request(method: str, path: str, *, body: Optional[bytes] = None,
                 err = e.read().decode("utf-8", "ignore")
             except Exception:
                 err = str(e.reason)
+            # An invalid or expired key is recoverable: fall back to the next
+            # configured Tripo key and try the same call again. Switching keys
+            # must not consume one of the caller's retry attempts.
+            if e.code == 401 and len(API_KEYS) > 1 and rotations < len(API_KEYS) - 1:
+                _rotate_key()
+                rotations += 1
+                continue
             if 400 <= e.code < 500:
                 raise RuntimeError(f"Tripo HTTP {e.code} on {method} {path}: {err[:400]}")
             last_err = RuntimeError(f"Tripo HTTP {e.code} on {method} {path}: {err[:200]}")
@@ -140,6 +188,7 @@ def _request(method: str, path: str, *, body: Optional[bytes] = None,
                 break
         if attempt < retries:
             time.sleep(backoff * (attempt + 1))
+        attempt += 1
     assert last_err is not None
     raise last_err
 
@@ -191,6 +240,7 @@ def health() -> Dict[str, Any]:
     return {
         "key_loaded": bool(API_KEY),
         "key_preview": (API_KEY[:14] + "...") if API_KEY else None,
+        "key_count": len(API_KEYS),
         "base": BASE,
     }
 
@@ -430,6 +480,14 @@ def _scale_to_print_size(mesh, target_height_mm: float = 70.0) -> Any:
 def _clean_for_print(mesh, target_height_mm: float = 70.0) -> Any:
     """Drop disconnected fragments, fill obvious holes, scale to print size."""
     import trimesh
+    # Detach the visual first: trimesh's split() copies the whole texture
+    # atlas for every component it produces, which exhausts memory on a PBR
+    # model with several parts. The printable STL/OBJ carry no texture, and
+    # the textured GLB is exported separately from the untouched mesh.
+    try:
+        mesh.visual = trimesh.visual.TextureVisuals()
+    except Exception as _e:
+        print(f"[tripo] visual detach skipped: {_e}", flush=True)
     # drop debris
     components = mesh.split(only_watertight=False)
     if len(components) > 1:
@@ -462,8 +520,14 @@ def process_for_print(pbr_glb_path: str, out_dir: str, *,
     import trimesh
     os.makedirs(out_dir, exist_ok=True)
     mesh = trimesh.load(pbr_glb_path, force="mesh", process=False)
-    # Detach visual so we can build a clean printable copy
-    printable = mesh.copy()
+    # Build the printable copy from geometry only. Copying the mesh first
+    # would duplicate the PBR texture atlas in memory for no reason: the
+    # textured GLB below is exported from the untouched mesh.
+    printable = trimesh.Trimesh(
+        vertices=np.asarray(mesh.vertices, dtype=np.float64),
+        faces=np.asarray(mesh.faces, dtype=np.int64),
+        process=False,
+    )
     printable = _clean_for_print(printable, target_height_mm=target_height_mm)
 
     paths: Dict[str, str] = {}

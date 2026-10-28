@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { ChatAssistantMessage, ChatHistoryItem, ContextMessage } from '../../../../types/chat'
 
-import { computed, provide, ref } from 'vue'
+import { computed, provide, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import ChatAssistantItem from './assistant-item.vue'
@@ -74,11 +74,25 @@ const renderMessages = computed<ChatHistoryItem[]>(() => {
   return [...props.messages, streaming.value]
 })
 
-useChatHistoryScroll({
+const { followLiveEdge } = useChatHistoryScroll({
   containerRef: chatHistoryRef,
   messages: renderMessages,
   getKey: getChatHistoryItemKey,
+  // Aligning a new message to the top of the list is right for an incoming
+  // reply, but wrong for the visitor's own message: it would push the live
+  // edge off-screen and permanently disengage the follow, so the answer to
+  // the question would arrive out of sight.
+  shouldScroll: ({ role }) => role !== 'user',
 })
+
+// Keep the conversation pinned to the newest message once the visitor has
+// sent one. The pointer normally rests on the chat panel, which makes the
+// scroll heuristics believe the visitor is reading older history.
+watch(() => props.messages, (messages) => {
+  const lastMessage = messages.at(-1)
+  if (lastMessage?.role === 'user')
+    followLiveEdge()
+}, { deep: false })
 
 function emitCopyMessage(message: ChatHistoryItem, index: number) {
   emit('copyMessage', {

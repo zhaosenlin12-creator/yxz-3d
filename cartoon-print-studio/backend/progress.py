@@ -25,6 +25,7 @@ PHASE_LABELS = {
     "3d-hunyuan": "正在准备 3D 模型…",
     "3d-tripo": "正在准备 3D 模型…",
     "3d-hunyuan-cloud": "正在准备 3D 模型…",
+    "3d-v2": "正在准备 3D 模型…",
 }
 
 DEFAULT_PHASE_LABEL = "正在处理…"

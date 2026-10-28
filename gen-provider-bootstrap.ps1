@@ -1,0 +1,138 @@
+﻿# =====================================================================
+#  宜小智工作台 —— 从 keys.txt 生成前端服务商配置 (.env.local)
+#
+#  为什么需要这个脚本：
+#    前端的 LLM / TTS 凭据通过环境变量 VITE_LOCAL_PROVIDER_BOOTSTRAP_B64
+#    注入，浏览器启动时再写进 localStorage。这个文件是 .gitignore 的
+#    （不能把 key 提交进仓库），而且以前**没有任何脚本会生成它**，
+#    结果就是：新机器装完前端完全没有配任何服务商 —— 对话、TTS 讲解
+#    全部不可用，只能手动点进设置页一个一个填。
+#
+#  这个脚本把 cartoon-print-studio\keys.txt 里的 key 转成 .env.local，
+#  安装脚本和启动脚本都会自动调用它。
+#
+#  用法：
+#    powershell -NoProfile -ExecutionPolicy Bypass -File gen-provider-bootstrap.ps1
+#    powershell -NoProfile -ExecutionPolicy Bypass -File gen-provider-bootstrap.ps1 -Force
+# =====================================================================
+param(
+    [string]$KeysPath,
+    [string]$OutputPath,
+    [switch]$Force
+)
+
+$ErrorActionPreference = 'Continue'
+$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+if (-not $KeysPath) { $KeysPath = Join-Path $root 'cartoon-print-studio\keys.txt' }
+if (-not $OutputPath) { $OutputPath = Join-Path $root 'airi\apps\stage-web\.env.local' }
+
+function Ok($m) { Write-Host "  [OK] $m" -ForegroundColor Green }
+function Warn($m) { Write-Host "  [!]  $m" -ForegroundColor Yellow }
+
+Write-Host ""
+Write-Host "生成前端服务商配置 (.env.local)" -ForegroundColor Cyan
+
+if (-not (Test-Path -LiteralPath $KeysPath)) {
+    Warn "找不到 keys.txt（$KeysPath）—— 跳过生成，前端将没有 LLM / TTS 服务商"
+    exit 0
+}
+
+# ---- 解析 keys.txt ---------------------------------------------------
+$keyMap = @{}
+foreach ($line in (Get-Content -LiteralPath $KeysPath -Encoding UTF8)) {
+    $trimmed = $line.Trim()
+    if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
+    $idx = $trimmed.IndexOf(':')
+    if ($idx -lt 1) { continue }
+    $name = $trimmed.Substring(0, $idx).Trim()
+    $value = $trimmed.Substring($idx + 1).Trim()
+    if (-not $name -or -not $value) { continue }
+    $keyMap[$name] = $value
+}
+
+$minimaxKeys = @()
+if ($keyMap.ContainsKey('minimax-key')) { $minimaxKeys += $keyMap['minimax-key'] }
+if ($keyMap.ContainsKey('minimax-key-2')) { $minimaxKeys += $keyMap['minimax-key-2'] }
+
+if ($minimaxKeys.Count -eq 0) {
+    Warn "keys.txt 里没有 minimax-key —— 跳过生成（对话 / TTS 会不可用）"
+    exit 0
+}
+
+$minimaxBase = 'https://api.minimaxi.com/v1/'
+
+$providers = @{}
+if ($keyMap.ContainsKey('deepseek-key')) {
+    $providers['deepseek'] = @{
+        apiKey  = $keyMap['deepseek-key']
+        baseUrl = 'https://api.deepseek.com/'
+    }
+}
+
+# TTS 与聊天都走 MiniMax；apiKeys 让前端在一个 key 额度用尽时自动换下一个。
+foreach ($providerId in @('minimax-audio-speech', 'minimax', 'openai-compatible')) {
+    $providers[$providerId] = @{
+        apiKey  = $minimaxKeys[0]
+        apiKeys = $minimaxKeys
+        baseUrl = $minimaxBase
+    }
+}
+
+$modules = @{
+    speech = @{
+        activeProvider = 'minimax-audio-speech'
+        activeModel    = 'speech-2.5-hd-preview'
+        voice          = 'female-shaonv'
+        language       = 'zh-CN'
+    }
+}
+if ($providers.ContainsKey('deepseek')) {
+    $modules['consciousness'] = @{
+        activeProvider = 'deepseek'
+        activeModel    = 'deepseek-chat'
+    }
+}
+
+$addedProviders = @($providers.Keys)
+
+# ---- revision 用内容哈希，key 一变就自动失效浏览器里的旧配置 --------
+$core = [ordered]@{
+    providers      = $providers
+    addedProviders = $addedProviders
+    modules        = $modules
+}
+$coreJson = $core | ConvertTo-Json -Depth 8 -Compress
+$sha = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $hashBytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($coreJson))
+}
+finally {
+    $sha.Dispose()
+}
+$hash = -join ($hashBytes | ForEach-Object { $_.ToString('x2') })
+
+$bootstrap = [ordered]@{
+    revision       = "yxz-bootstrap-$($hash.Substring(0, 12))"
+    providers      = $providers
+    addedProviders = $addedProviders
+    modules        = $modules
+}
+
+$json = $bootstrap | ConvertTo-Json -Depth 8 -Compress
+$b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+
+# ---- 写文件 ---------------------------------------------------------
+$existing = $null
+if (Test-Path -LiteralPath $OutputPath) {
+    $existing = (Get-Content -LiteralPath $OutputPath -Raw -Encoding UTF8)
+}
+if ($existing -and $existing.Contains($b64) -and -not $Force) {
+    Ok ".env.local 已经是最新（revision $($bootstrap.revision)），无需改动"
+    exit 0
+}
+
+$content = "# 由 gen-provider-bootstrap.ps1 自动生成，请勿手工编辑。`r`n# 改 key 请改 cartoon-print-studio\keys.txt，然后重跑本脚本。`r`nVITE_LOCAL_PROVIDER_BOOTSTRAP_B64=$b64`r`n"
+[System.IO.File]::WriteAllText($OutputPath, $content, (New-Object System.Text.UTF8Encoding($false)))
+Ok "已生成 $OutputPath（revision $($bootstrap.revision)，服务商：$($addedProviders -join ', ')）"
+exit 0

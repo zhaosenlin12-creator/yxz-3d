@@ -127,6 +127,8 @@ export interface YXZLaserCardRequest {
   /** AI-painted artwork used as the printed front face of the card. */
   frontTemplate?: string
   backCaption?: string
+  /** Aborts the request when the surrounding chat turn is cancelled. */
+  signal?: AbortSignal
 }
 
 export interface YXZLaserCardResponse {
@@ -145,6 +147,7 @@ export interface YXZLaserCardResponse {
 
 export const YXZ_PREVIEW_TIMEOUT_MS = 180_000
 export const YXZ_MODEL_TIMEOUT_MS = 10 * 60_000
+export const YXZ_LASER_CARD_TIMEOUT_MS = 120_000
 
 export function getYXZPrintApiBase() {
   return (import.meta.env.VITE_CARTOON_PRINT_API || 'http://127.0.0.1:8000').replace(TRAILING_SLASH_RE, '')
@@ -377,11 +380,27 @@ export async function createYXZLaserCard(request: YXZLaserCardRequest, fetcher: 
       : {}),
   }
 
-  const response = await fetcher(`${getYXZPrintApiBase()}/api/laser_card`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
+  // NOTICE: this call runs inside a chat tool.  Without a deadline a backend
+  // that never answers wedges the whole turn: the assistant keeps showing
+  // "正在思考" and every later message queues up behind the stuck turn.
+  const linked = createRequestSignal(request.signal, YXZ_LASER_CARD_TIMEOUT_MS)
+  let response: Response
+  try {
+    response = await fetcher(`${getYXZPrintApiBase()}/api/laser_card`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: linked.signal,
+    })
+  }
+  catch (error) {
+    if (linked.timedOut())
+      throw new Error('激光切割卡片生成超过 2 分钟仍未完成，请稍后重试')
+    throw error
+  }
+  finally {
+    linked.dispose()
+  }
 
   const raw: unknown = await response.json().catch(() => undefined)
   if (!response.ok) {
@@ -574,6 +593,12 @@ export async function createYXZCartoonModel(request: YXZModelRequest, fetcher: t
         if (linked.timedOut()) {
           request.onProgress?.({ percent: 0, message: '3D 生成超过 10 分钟仍未完成，请稍后重试', step: 'failed', stage: 'failed' })
           throw new Error('3D 生成超过 10 分钟仍未完成，请稍后重试')
+        }
+        // The caller cancelled the turn (the chat send recovery aborts a
+        // stalled turn). Stop the engine chain here: trying the next engine
+        // would keep the request alive and keep the chat queued behind it.
+        if (linked.signal.aborted) {
+          throw new Error('3D 生成已取消')
         }
         lastError = error instanceof Error ? error : new Error(String(error))
         request.onProgress?.({ percent: 5, message: '这一条生成通道没能完成，正在换一条继续…', step: 'building', stage: 'geometry' })

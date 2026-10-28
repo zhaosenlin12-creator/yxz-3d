@@ -32,6 +32,7 @@ const model = ref<{ glbUrl: string, stlUrl: string } | null>(null)
 const errorMessage = ref('')
 const presets = ref<YXZPresetModel[]>([])
 const presetsLoading = ref(true)
+const presetsError = ref('')
 // '2d' = canvas editing, '3d' = model preview (scene switching like Tripo)
 const activeView = ref<'2d' | '3d'>('2d')
 
@@ -148,14 +149,22 @@ async function openLaserCardInSoftware() {
 
 async function loadPresets() {
   presetsLoading.value = true
+  presetsError.value = ''
   try {
     const resp = await fetch(`${getYXZPrintApiBase()}/api/presets/models`)
     if (resp.ok) {
       const data = await resp.json()
       presets.value = Array.isArray(data.items) ? data.items : []
     }
+    else {
+      presetsError.value = `预制模型加载失败（HTTP ${resp.status}）`
+    }
   }
-  catch { /* offline – presets section stays hidden */ }
+  catch (error) {
+    // NOTICE: the backend being down used to hide this section silently, so
+    // the four 宜小智 pose cards simply vanished with no explanation.
+    presetsError.value = `预制模型加载失败：${error instanceof Error ? error.message : String(error)}`
+  }
   finally {
     presetsLoading.value = false
   }
@@ -197,9 +206,29 @@ async function generateLaserBackground(side: 'back' | 'front' = 'back') {
   }
 }
 
+async function loadExistingModel() {
+  if (!sessionId)
+    return
+  try {
+    const resp = await fetch(`${getYXZPrintApiBase()}/api/sessions/${encodeURIComponent(sessionId)}/model`)
+    if (!resp.ok)
+      return
+    const data = await resp.json()
+    if (!data?.exists || !data?.glb_url)
+      return
+    model.value = {
+      glbUrl: `${getYXZPrintApiBase()}${data.glb_url}`,
+      stlUrl: data.stl_url ? `${getYXZPrintApiBase()}${data.stl_url}` : '',
+    }
+    progress.value = { percent: 100, message: '已载入本方案此前生成的 3D 模型', step: 'done' }
+  }
+  catch { /* the model simply does not exist yet */ }
+}
+
 onMounted(() => {
   void loadPresets()
   void loadLaserTemplates()
+  void loadExistingModel()
 })
 
 function presetPreviewUrl(p: YXZPresetModel) {
@@ -303,11 +332,13 @@ function goBack() {
     </nav>
 
     <!-- Preset printable models (3 poses, built with Tripo / Hunyuan3D) -->
-    <section v-if="presets.length" class="yxz-studio-presets" aria-label="宜小智预制模型示例">
+    <section v-if="presets.length || presetsError" class="yxz-studio-presets" aria-label="宜小智预制模型示例">
       <header class="yxz-studio-presets-head">
         <strong>宜小智预制 3D 模型示例</strong>
         <small>可 3D 打印的成品 · 点击预览，可直接下载 STL 交给打印机</small>
+        <button v-if="presetsError" type="button" class="yxz-studio-presets-retry" @click="loadPresets">重试</button>
       </header>
+      <p v-if="presetsError" class="yxz-studio-presets-error">{{ presetsError }} —— 请确认后端已启动（默认 8000 端口）。</p>
       <div class="yxz-studio-presets-grid">
         <article v-for="p in presets" :key="p.id" class="yxz-studio-preset">
           <a
@@ -732,6 +763,22 @@ function goBack() {
 
 .yxz-studio-presets-head small {
   color: #8fb8dd;
+  font-size: 12px;
+}
+
+.yxz-studio-presets-retry {
+  padding: 3px 10px;
+  border: 1px solid rgba(96, 165, 250, .45);
+  border-radius: 6px;
+  background: rgba(96, 165, 250, .14);
+  color: #cfe6ff;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.yxz-studio-presets-error {
+  margin: 0 0 12px;
+  color: #ffb4b4;
   font-size: 12px;
 }
 

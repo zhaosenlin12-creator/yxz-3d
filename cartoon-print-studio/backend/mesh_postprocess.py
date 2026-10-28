@@ -114,7 +114,7 @@ def _is_legacy_y_up_base(part: trimesh.Trimesh) -> bool:
 
 def has_legacy_y_up_base(mesh: trimesh.Trimesh) -> bool:
     """Whether an older generated file needs a one-time orientation upgrade."""
-    parts = list(mesh.split(only_watertight=False))
+    parts = _geometry_parts(mesh)
     base_found = any(_is_legacy_y_up_base(part) for part in parts)
     if not base_found:
         return False
@@ -129,11 +129,64 @@ def has_legacy_y_up_base(mesh: trimesh.Trimesh) -> bool:
 
 def upgrade_legacy_y_up_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     """Remove an obsolete XY plate, orient Y-up geometry for print, add a new base."""
-    parts = [part for part in mesh.split(only_watertight=False) if not _is_legacy_y_up_base(part)]
+    parts = [part for part in _geometry_parts(mesh) if not _is_legacy_y_up_base(part)]
     if not parts:
         return mesh
     body = parts[0] if len(parts) == 1 else trimesh.util.concatenate(parts)
     return clean_for_print(body, source_up="y", add_base=True)
+
+
+def _face_groups(mesh: trimesh.Trimesh):
+    """Connected-component groups expressed as original face indices.
+
+    trimesh's own ``split()`` rebuilds the visual material for every part it
+    produces, and for a textured mesh that copies the whole texture atlas
+    once per part. On a 500k-face cloud model with PBR maps that exhausts
+    memory and takes the backend process down with it. Face-index groups let
+    us select components while paying for at most one texture copy.
+    """
+    if mesh is None or len(mesh.faces) == 0:
+        return []
+    try:
+        from trimesh.graph import connected_components
+        groups = connected_components(mesh.face_adjacency, nodes=np.arange(len(mesh.faces)))
+    except Exception as _e:
+        print(f"[mesh] component split failed, keeping single body: {_e}", flush=True)
+        return [np.arange(len(mesh.faces), dtype=np.int64)]
+    return [np.asarray(group, dtype=np.int64) for group in groups]
+
+
+def _select_faces(mesh: trimesh.Trimesh, face_indices):
+    """Rebuild the mesh from a face subset, keeping the texture (one copy)."""
+    indices = np.asarray(face_indices, dtype=np.int64)
+    if len(indices) == 0 or len(indices) == len(mesh.faces):
+        return mesh
+    try:
+        return mesh.submesh([indices], append=True, repair=False)
+    except Exception as _e:
+        print(f"[mesh] face subset failed: {_e}", flush=True)
+        return mesh
+
+
+def _part_from_group(mesh: trimesh.Trimesh, group):
+    """One connected component as a geometry-only mesh (no texture copy)."""
+    faces = mesh.faces[np.asarray(group, dtype=np.int64)]
+    used, inverse = np.unique(faces.ravel(), return_inverse=True)
+    return trimesh.Trimesh(
+        vertices=np.asarray(mesh.vertices[used], dtype=np.float64),
+        faces=inverse.reshape(faces.shape).astype(np.int64),
+        process=False,
+    )
+
+
+def _geometry_parts(mesh: trimesh.Trimesh):
+    """Connected components as geometry-only meshes (no texture copies)."""
+    return [_part_from_group(mesh, group) for group in _face_groups(mesh)]
+
+
+def component_count(mesh: trimesh.Trimesh) -> int:
+    """How many disconnected bodies the mesh has."""
+    return len(_face_groups(mesh))
 
 
 def export_view_glb(mesh: trimesh.Trimesh, path: str) -> None:
@@ -143,12 +196,13 @@ def export_view_glb(mesh: trimesh.Trimesh, path: str) -> None:
     GLB parts separate lets the web workbench animate an honest explode view
     instead of pretending a single triangle soup has internal components.
     """
-    parts = mesh.split(only_watertight=False)
-    if len(parts) <= 1:
+    groups = _face_groups(mesh)
+    if len(groups) <= 1:
         mesh.export(path)
         return
     scene = trimesh.Scene()
-    for index, part in enumerate(parts):
+    for index, group in enumerate(groups):
+        part = _select_faces(mesh, group)
         scene.add_geometry(part, node_name=f"part_{index + 1}", geom_name=f"part_{index + 1}")
     scene.export(path)
 
@@ -205,28 +259,28 @@ def _keep_faces(mesh: trimesh.Trimesh, face_index: np.ndarray) -> trimesh.Trimes
 
 
 def _largest_component(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
-    groups = _connected_face_groups(mesh)
+    groups = _face_groups(mesh)
     if len(groups) == 1:
         return mesh
-    groups.sort(key=lambda idx: len(idx), reverse=True)
-    return _keep_faces(mesh, groups[0])
+    groups.sort(key=len, reverse=True)
+    return _select_faces(mesh, groups[0])
 
 
 def _drop_tiny_debris(mesh: trimesh.Trimesh, max_diam_mm: float = MAX_DEBRIS_DIAMETER_MM) -> trimesh.Trimesh:
-    groups = _connected_face_groups(mesh)
+    groups = _face_groups(mesh)
     if len(groups) <= 1:
         return mesh
     keep = []
     for group in groups:
-        vertices = np.asarray(mesh.vertices)[np.unique(mesh.faces[group])]
-        extent = float(np.linalg.norm(vertices.max(axis=0) - vertices.min(axis=0)))
-        if extent >= max_diam_mm:
+        verts = mesh.vertices[np.unique(mesh.faces[group])]
+        d = float(np.linalg.norm(verts.max(axis=0) - verts.min(axis=0)))
+        if d >= max_diam_mm:
             keep.append(group)
     if not keep:
         return mesh
     if len(keep) == 1:
-        return _keep_faces(mesh, keep[0])
-    return _keep_faces(mesh, np.concatenate(keep))
+        return _select_faces(mesh, keep[0])
+    return _select_faces(mesh, np.concatenate(keep))
 
 
 def _add_base_plate(mesh: trimesh.Trimesh, base_z: float = 0.6) -> trimesh.Trimesh:
@@ -249,6 +303,34 @@ def _add_base_plate(mesh: trimesh.Trimesh, base_z: float = 0.6) -> trimesh.Trime
     return trimesh.util.concatenate([mesh, plate])
 
 
+def _seal_for_print(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Close small perforations and make sure the surface faces outwards.
+
+    Cloud generators hand back a shell with a lot of tiny holes. An open
+    shell computes a meaningless volume (often negative, because the normals
+    point inwards) and slicers then cut the model as if it were hollow.
+    Filling the boundary loops and fixing the winding turns it back into a
+    solid body.
+    """
+    try:
+        from trimesh import repair
+        if not mesh.is_watertight:
+            repair.fill_holes(mesh, use_fan=True)
+    except Exception as _e:
+        print(f"[mesh] hole fill skipped: {_e}", flush=True)
+    try:
+        from trimesh import repair
+        repair.fix_normals(mesh, multibody=True)
+    except Exception as _e:
+        print(f"[mesh] normal fix skipped: {_e}", flush=True)
+    try:
+        if mesh.volume < 0:
+            mesh.invert()
+    except Exception as _e:
+        print(f"[mesh] inversion skipped: {_e}", flush=True)
+    return mesh
+
+
 def clean_for_print(mesh: trimesh.Trimesh, *,
                     add_base: bool = True,
                     max_side_mm: float = PRINT_LENGTH_MM,
@@ -257,11 +339,13 @@ def clean_for_print(mesh: trimesh.Trimesh, *,
     """Generic post-processing for AI-generated meshes.
 
     1. Align the source coordinate system to Z-up when needed.
-    2. Drop tiny floating debris.
-    3. Keep only the largest connected component.
-    4. Translate so the lowest point sits exactly on z=0.
-    5. Re-scale so the largest side is max_side_mm (default 100mm).
-    6. Optionally add a flat base plate matching the XY footprint.
+    2. Re-scale so the largest side is max_side_mm (default 100mm).
+    3. Drop tiny floating debris (the threshold is in millimetres, so this
+       has to happen after the scaling).
+    4. Keep only the largest connected component.
+    5. Close small perforations and orient the surface outwards.
+    6. Translate so the lowest point sits exactly on z=0.
+    7. Optionally add a flat base plate matching the XY footprint.
     """
     if mesh is None or len(mesh.vertices) < 8:
         return mesh
@@ -270,16 +354,21 @@ def clean_for_print(mesh: trimesh.Trimesh, *,
         mesh = _rotate_y_up_to_z_up(mesh)
     elif source_up.lower() != "z":
         raise ValueError("source_up must be 'y' or 'z'")
+    # Scale before the debris filter: the threshold is expressed in
+    # millimetres, and cloud models arrive in their own units (the Hunyuan
+    # badge is ~0.65 units wide), so filtering first compared millimetres
+    # against model units and kept or dropped the wrong geometry.
+    ext = float(max(mesh.extents))
+    if ext > 0:
+        scale = max_side_mm / ext
+        if 1e-4 < scale < 1e4:
+            mesh.apply_scale(scale)
     mesh = _drop_tiny_debris(mesh, drop_min_diam_mm)
     mesh = _largest_component(mesh)
     if len(mesh.vertices) < 8:
         return mesh
+    mesh = _seal_for_print(mesh)
     mesh.apply_translation([0, 0, -float(mesh.bounds[0, 2])])
-    ext = float(max(mesh.extents))
-    if ext > 0:
-        scale = max_side_mm / ext
-        if 0.05 < scale < 50.0:
-            mesh.apply_scale(scale)
     if add_base:
         mesh = _add_base_plate(mesh)
     return mesh

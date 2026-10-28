@@ -49,7 +49,16 @@ export function useThemeColor(colorFrom: () => string | Promise<string>) {
     if (!('window' in globalThis) || globalThis.window == null)
       return
 
-    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', new Color(await colorFrom()).to('srgb').toString({ format: 'hex' }))
+    try {
+      const meta = document.querySelector('meta[name="theme-color"]')
+      if (!meta)
+        return
+      meta.setAttribute('content', new Color(await colorFrom()).to('srgb').toString({ format: 'hex' }))
+    }
+    catch (error) {
+      // The theme colour is cosmetic — never let it break the page.
+      console.warn('[Theme] Failed to update the theme colour.', error)
+    }
   }
 
   return {

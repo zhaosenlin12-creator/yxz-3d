@@ -223,6 +223,16 @@ if (Test-Path -LiteralPath $key) {
     }
 }
 
+# ---- 6) 生成前端服务商配置 -------------------------------------------
+# 前端的对话 / TTS 凭据走 .env.local（不入库），必须由 keys.txt 生成，
+# 否则新机器上前端一个服务商都没有 —— 对话和语音讲解都不可用。
+$genBootstrap = Join-Path $root 'gen-provider-bootstrap.ps1'
+if (Test-Path -LiteralPath $genBootstrap) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $genBootstrap
+} else {
+    Warn "缺少 gen-provider-bootstrap.ps1，前端可能没有 LLM / TTS 服务商"
+}
+
 Write-Host ""
 Write-Host "安装完成。下一步：" -ForegroundColor Green
 Write-Host "  .\start-all.ps1        （或双击 启动.bat）"

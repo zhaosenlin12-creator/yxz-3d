@@ -215,6 +215,10 @@ export interface ProviderRuntimeState {
   modelLoadError: string | null
 }
 
+// Providers that need no credentials and are expected to work offline, so
+// they are probed even when the visitor never touched their settings.
+const CREDENTIAL_FREE_PROVIDER_IDS = ['speech-noop', 'browser-web-speech-api']
+
 export const useProvidersStore = defineStore('providers', () => {
   const providerCredentials = useLocalStorage<Record<string, Record<string, unknown>>>('settings/credentials/providers', {})
   const addedProviders = useLocalStorage<Record<string, boolean>>('settings/providers/added', {})
@@ -1394,7 +1398,19 @@ export const useProvidersStore = defineStore('providers', () => {
       }),
       createProvider: async (config) => {
         const baseUrl = typeof config.baseUrl === 'string' && config.baseUrl.trim() ? config.baseUrl.trim() : 'https://api.minimaxi.com/v1/'
-        const apiKeys = splitApiKeys(config.apiKey)
+        // NOTICE: a single MiniMax key can silently run out of Token Plan
+        // quota while the app still looks correctly configured. The provider
+        // field may therefore carry a comma separated list of keys, and the
+        // legacy `apiKeys` array is still honoured. The request is retried
+        // with the next key as soon as one of them is rejected.
+        const apiKeys = [
+          ...splitApiKeys(config.apiKey),
+          ...(Array.isArray((config as Record<string, unknown>).apiKeys)
+            ? ((config as Record<string, unknown>).apiKeys as unknown[])
+                .filter((key): key is string => typeof key === 'string' && key.trim().length > 0)
+                .map(key => key.trim())
+            : []),
+        ].filter((key, index, all) => key.length > 0 && all.indexOf(key) === index)
         const apiKey = apiKeys[0] ?? ''
         const speechBaseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
         // A MiniMax key that ran out of Token Plan is answered with HTTP 200
@@ -2263,15 +2279,40 @@ export const useProvidersStore = defineStore('providers', () => {
     }
   }
 
+  /**
+   * Whether a provider is worth probing.
+   *
+   * The catalog holds dozens of entries whose default configuration points at
+   * a remote service or at a local server that is not running here. Validating
+   * all of them on every page load fires a storm of doomed requests, slows the
+   * first paint, and fills the console with failures that mean nothing in
+   * this deployment.
+   *
+   * A provider is probed when the visitor actually set it up: it was added
+   * explicitly, its stored configuration differs from the shipped default, or
+   * it carries credentials. The credential-free providers that are expected to
+   * work offline are always probed so they can be offered to the visitor.
+   */
+  function shouldValidateProvider(providerId: string) {
+    if (addedProviders.value[providerId])
+      return true
+
+    if (isProviderConfigDirty(providerId))
+      return true
+
+    const config = providerCredentials.value[providerId] ?? {}
+    if (typeof config.apiKey === 'string' && config.apiKey.trim())
+      return true
+    if (typeof config.accountId === 'string' && config.accountId.trim())
+      return true
+
+    return CREDENTIAL_FREE_PROVIDER_IDS.includes(providerId)
+  }
+
   // Update configuration status for all configured providers
   async function updateConfigurationStatus() {
     await Promise.all(Object.entries(providerMetadata)
-      // Only providers the visitor (or the local seed) actually added are
-      // worth validating.  Upstream validated every registered provider, so a
-      // stock install kept polling LM Studio / Ollama / Voicebox on every
-      // start; those failures are pure console noise on an exhibition
-      // machine and they slow the first paint down.
-      .filter(([providerId]) => shouldListProvider(providerId))
+      .filter(([providerId]) => shouldValidateProvider(providerId))
       .map(async ([providerId]) => {
         try {
           if (providerRuntimeState.value[providerId]) {

@@ -173,15 +173,19 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       },
     })
 
+    const abortController = new AbortController()
+    activeSendControllers.set(sessionId, abortController)
+
     const isStaleGeneration = () => chatSession.getSessionGeneration(sessionId) !== generation
-    const shouldAbort = () => isStaleGeneration()
+    // A cancelled turn has to stop at its next checkpoint. `isStaleGeneration`
+    // only covers a session switch, so the abort flag has to be part of the
+    // check as well — otherwise a timed-out turn keeps running in the
+    // background and the chat stays stuck on "thinking" forever.
+    const shouldAbort = () => isStaleGeneration() || abortController.signal.aborted
     if (shouldAbort())
       return
 
     sending.value = true
-
-    const abortController = new AbortController()
-    activeSendControllers.set(sessionId, abortController)
 
     const isForegroundSession = () => sessionId === activeSessionId.value
 
@@ -482,13 +486,24 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       }
     }
     catch (error) {
-      console.error('Error sending message:', error)
+      // A cancelled turn is an expected outcome, not a fault: the send
+      // recovery aborts the stream on purpose and the UI already tells the
+      // visitor what happened.
+      if (!abortController.signal.aborted)
+        console.error('Error sending message:', error)
       throw error
     }
     finally {
       if (activeSendControllers.get(sessionId) === abortController)
         activeSendControllers.delete(sessionId)
       sending.value = false
+
+      // An aborted turn leaves an empty streaming message behind, and the
+      // history renders that as a permanent "宜小智 正在思考" placeholder.
+      // Clear it so the conversation reads as finished instead of stuck.
+      if (isForegroundSession() && abortController.signal.aborted) {
+        streamingMessage.value = { role: 'assistant', content: '', slices: [], tool_results: [] }
+      }
     }
   }
 

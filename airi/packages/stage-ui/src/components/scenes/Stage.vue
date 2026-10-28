@@ -308,6 +308,14 @@ async function speakWithBrowserTts(text: string): Promise<boolean> {
   })
 }
 
+// Tracks whether the configured speech provider actually produced audio for
+// the reply that is currently being spoken. When the provider is broken
+// (expired key, exhausted quota, unreachable endpoint) 宜小智 used to fall
+// completely silent; with these counters we can fall back to the browser
+// speech synthesis so the narration never disappears.
+let providerTtsOkCount = 0
+let providerTtsFailCount = 0
+
 const speechPipeline = createSpeechPipeline<AudioBuffer>({
   tts: async (request, signal) => {
     if (signal.aborted)
@@ -396,14 +404,18 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
         return null
 
       const audioBuffer = await audioContext.decodeAudioData(res)
+      providerTtsOkCount += 1
       return audioBuffer
     }
     catch (error) {
-      console.error('[Stage] Provider TTS failed', {
+      providerTtsFailCount += 1
+      // Put the reason into the message itself: the extra object is not
+      // visible when the console only prints the first argument, which used
+      // to hide the actual MiniMax error code from the operator.
+      console.error(`[Stage] Provider TTS failed: ${errorMessageFrom(error) ?? 'Unknown error'}`, {
         provider: activeSpeechProvider.value,
         model,
         voice: voice.id,
-        error: errorMessageFrom(error) ?? 'Unknown error',
       })
       return null
     }
@@ -573,6 +585,8 @@ async function speakYXZWelcome() {
   try {
     if (activeSpeechProvider.value && activeSpeechProvider.value !== 'speech-noop') {
       welcomeSpeechNeedsGesture.value = false
+      const okBefore = providerTtsOkCount
+      const failBefore = providerTtsFailCount
       const intent = speechRuntimeStore.openIntent({
         ownerId: activeCardId.value,
         priority: 'normal',
@@ -581,6 +595,15 @@ async function speakYXZWelcome() {
       intent.writeLiteral(YXZ_PROACTIVE_INTRO_TEXT)
       intent.writeFlush()
       intent.end()
+      // Watchdog: a broken speech provider (expired key / exhausted quota)
+      // would make the greeting completely silent, so repeat it with the
+      // browser engine once we know the provider failed without producing
+      // any audio.
+      window.setTimeout(() => {
+        if (providerTtsOkCount !== okBefore || providerTtsFailCount <= failBefore)
+          return
+        void speakWithBrowserTts(YXZ_PROACTIVE_INTRO_TEXT)
+      }, 3000)
       return
     }
 
@@ -597,6 +620,8 @@ chatHookCleanups.push(onBeforeMessageComposed(async () => {
   setYXZInteractionStatus('listening')
   playbackManager.stopAll('new-message')
   browserSpeechSynthesis?.cancel()
+  providerTtsOkCount = 0
+  providerTtsFailCount = 0
 
   setupAnalyser()
   await setupLipSync()
@@ -664,8 +689,22 @@ chatHookCleanups.push(onAssistantResponseEnd(async (_message) => {
   // the whole reply with window.speechSynthesis here caused double playback
   // (provider voice + browser voice at the same time). Keep browser TTS as a
   // fallback only when no provider is configured.
-  if (activeSpeechProvider.value !== 'speech-noop' && activeSpeechProvider.value)
+  if (activeSpeechProvider.value !== 'speech-noop' && activeSpeechProvider.value) {
+    // The provider is configured but produced nothing at all (broken key,
+    // exhausted quota, ...). Speak the reply with the browser engine so the
+    // narration is still delivered.
+    if (providerTtsOkCount === 0 && providerTtsFailCount > 0 && assistantResponseText.value.trim()) {
+      console.warn('[Stage] Provider TTS produced no audio, falling back to browser speech', {
+        provider: activeSpeechProvider.value,
+        model: activeSpeechModel.value,
+        failures: providerTtsFailCount,
+      })
+      setYXZInteractionStatus('speaking')
+      const didSpeak = await speakWithBrowserTts(assistantResponseText.value)
+      setYXZInteractionStatus(didSpeak ? 'success' : 'idle')
+    }
     return
+  }
 
   setYXZInteractionStatus('speaking')
   const didSpeak = await speakWithBrowserTts(assistantResponseText.value)
