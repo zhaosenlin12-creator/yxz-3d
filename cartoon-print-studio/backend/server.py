@@ -1764,9 +1764,11 @@ class LaserCardReq(BaseModel):
     accent: str = "#F5A623"
     bg_style: str = "gradient"
     note: str = ""
-    back_template: str = "activity_stage"
+    back_template: str = "activity_yichang"
     front_template: str = ""
     back_caption: str = "宜昌市第四届中小学生数理文化活动"
+    back_title: str = ""
+    back_subtitle: str = ""
     session_id: Optional[str] = None
     artwork_session_id: Optional[str] = None
     artwork_image_index: int = 0
@@ -1777,6 +1779,29 @@ def laser_templates():
     """List available fixed back-side templates."""
     root = laser_card.ensure_templates(DATA)
     return {"templates": laser_card.list_templates(root)}
+
+
+@app.get("/api/laser/template-preview/{slug}")
+def laser_template_preview(slug: str):
+    """The back face of one template, rendered with the activity theme.
+
+    The studio shows this in the picker so the visitor sees the real card
+    back -- theme title included -- instead of a bare background.
+    """
+    root = laser_card.ensure_templates(DATA)
+    payload = laser_card.render_template_preview(
+        root,
+        slug,
+        title=laser_card.DEFAULT_BACK_TITLE,
+        subtitle=laser_card.DEFAULT_BACK_SUBTITLE,
+    )
+    if not payload:
+        raise HTTPException(404, f"找不到卡片背景模板：{slug}")
+    return Response(
+        content=payload,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
 
 
 class LaserBackgroundReq(BaseModel):
@@ -1812,10 +1837,10 @@ def laser_background(req: LaserBackgroundReq):
     root = laser_card.ensure_templates(DATA)
     if side == "front":
         prompt = (
-            "激光切割卡片的正面主视觉，横向 16:9 横幅构图。"
+            "激光切割卡片的正面主视觉，横向 16:9 横幅构图，主体集中在画面中部的横向带状区域。"
             f"风格要求：{description}。"
             "画面要求：现代科技感与卡通插画风结合，明亮通透、色彩干净、层次分明，"
-            "左下角和右下角保持干净以便叠加姓名与联系方式；"
+            "画面上下边缘留白，主体不要贴边；"
             "不要出现任何文字、字母、数字、水印或人物脸部特写，适合印刷。"
         )
     else:
@@ -1823,7 +1848,7 @@ def laser_background(req: LaserBackgroundReq):
             "活动主视觉背景，横向 16:9 横幅构图，用作激光切割卡片的背面。"
             f"风格要求：{description}。"
             "画面要求：现代科技感与卡通插画风结合，明亮通透、色彩干净、层次分明，"
-            "中下部保持干净以便叠加文字；"
+            "画面上半部分的中部保持干净以便叠加活动主题大字；"
             "不要出现任何文字、字母、数字、水印或人物脸部特写，适合印刷。"
         )
     try:

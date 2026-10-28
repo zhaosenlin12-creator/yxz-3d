@@ -26,12 +26,10 @@ const props = withDefaults(defineProps<{
   hasArtwork: false,
 })
 
-const activeSide = ref<'front' | 'back'>('front')
 const laserTool = ref<YXZLocalSoftware | null>(null)
 const toolMessage = ref('')
 const toolBusy = ref(false)
 
-const currentImage = computed(() => activeSide.value === 'front' ? props.frontUrl : props.backUrl)
 const sizeLabel = computed(() => `${props.sizeMm.width} × ${props.sizeMm.height} mm`)
 const aspectRatio = computed(() => {
   const width = props.sizeMm.width || 100
@@ -98,24 +96,26 @@ function openStudio() {
       <span class="yxz-laser-card-size">{{ sizeLabel }}</span>
     </div>
 
-    <div class="yxz-laser-card-preview" :style="{ aspectRatio }">
-      <img :src="currentImage" :alt="activeSide === 'front' ? '卡片正面' : '卡片背面'" loading="lazy">
-    </div>
+    <!-- Front on top, back underneath: one glance shows the whole card. -->
+    <figure class="yxz-laser-card-face">
+      <figcaption>正面 · 你的作品</figcaption>
+      <div class="yxz-laser-card-preview" :style="{ aspectRatio }">
+        <img :src="frontUrl" alt="卡片正面" loading="lazy">
+      </div>
+    </figure>
 
-    <div class="yxz-laser-card-tabs">
-      <button type="button" :class="{ active: activeSide === 'front' }" @click="activeSide = 'front'">
-        正面 · 你的作品
-      </button>
-      <button type="button" :class="{ active: activeSide === 'back' }" @click="activeSide = 'back'">
-        背面 · 活动背景
-      </button>
-    </div>
+    <figure class="yxz-laser-card-face">
+      <figcaption>背面 · 活动主题</figcaption>
+      <div class="yxz-laser-card-preview" :style="{ aspectRatio }">
+        <img :src="backUrl" alt="卡片背面" loading="lazy">
+      </div>
+    </figure>
 
     <p v-if="description" class="yxz-laser-card-description">
       {{ description }}
     </p>
     <p class="yxz-laser-card-note">
-      尺寸 {{ sizeLabel }}，背面固定为活动主视觉，正面即你的作品图；SVG 已内嵌作品图，可直接交给 xTool 切割。
+      尺寸 {{ sizeLabel }}，正面是你的作品图与个人信息，背面是活动主题主视觉；SVG 已内嵌正反两面，可直接交给 xTool 切割。
     </p>
 
     <div class="yxz-laser-card-actions">
@@ -176,6 +176,17 @@ function openStudio() {
   font-size: .68rem;
 }
 
+.yxz-laser-card-face {
+  margin: 0;
+}
+
+.yxz-laser-card-face figcaption {
+  margin-bottom: .25rem;
+  color: #15547c;
+  font-size: .74rem;
+  font-weight: 600;
+}
+
 .yxz-laser-card-preview {
   overflow: hidden;
   border: 1px solid #b5dce9;
@@ -187,30 +198,7 @@ function openStudio() {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
-}
-
-.yxz-laser-card-tabs {
-  display: flex;
-  gap: .35rem;
-}
-
-.yxz-laser-card-tabs button {
-  flex: 1;
-  border: 1px solid #c8e1ec;
-  border-radius: .45rem;
-  background: #fff;
-  color: #52758a;
-  padding: .3rem .4rem;
-  cursor: pointer;
-  font-size: .7rem;
-}
-
-.yxz-laser-card-tabs button.active {
-  border-color: #18a8e0;
-  background: rgba(24, 168, 224, .1);
-  color: #087eae;
-  font-weight: 600;
+  object-fit: contain;
 }
 
 .yxz-laser-card-description,

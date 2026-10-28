@@ -272,7 +272,7 @@ export async function createYXZCreationTools() {
   return Promise.all([
     tool({
       name: 'yxz_laserCard',
-      description: '宜小智专用：用户要做激光切割卡片（活动名片 / 作品卡 / 桌牌等平面切割物料）时调用。卡片尺寸固定、背面是活动主视觉背景图，正面是用户自己的作品预览图（先用 yxz_generatePreview 生成）。请在用户已确认作品与个人信息（姓名 / 身份 / 单位 / 联系方式）之后再调用；若还没有作品预览图，先调用 yxz_generatePreview。',
+      description: '宜小智专用：用户要做激光切割卡片（活动名片 / 作品卡 / 桌牌等平面切割物料）时调用。卡片尺寸固定为 100 × 56.25 mm 长方形，背面是带活动主题大字的宜昌主视觉，正面是用户自己的 2D 作品预览图加姓名与个人信息（先用 yxz_generatePreview 生成）。请在用户已确认切割方向、作品与个人信息（姓名 / 身份 / 单位 / 联系方式）之后再调用；若还没有作品预览图，先调用 yxz_generatePreview。',
       parameters: z.object({
         name: z.string().min(1).max(12).describe('卡片正面的姓名'),
         title: z.string().max(20).describe('身份/职位，可空'),

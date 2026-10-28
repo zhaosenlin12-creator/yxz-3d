@@ -129,6 +129,10 @@ export interface YXZLaserCardRequest {
   /** AI-painted artwork used as the printed front face of the card. */
   frontTemplate?: string
   backCaption?: string
+  /** The activity theme, typeset big in the middle of the back face. */
+  backTitle?: string
+  /** The quiet line under the theme. */
+  backSubtitle?: string
   /** Aborts the request when the surrounding chat turn is cancelled. */
   signal?: AbortSignal
 }
@@ -360,6 +364,8 @@ export interface YXZLaserTemplate {
   id: string
   name: string
   url: string
+  /** The back face rendered with the activity theme, for the picker. */
+  previewUrl?: string
   sizeMm: { width: number, height: number }
   generated?: boolean
   /** Which face the artwork belongs on. */
@@ -380,6 +386,7 @@ export async function listYXZLaserTemplates(fetcher: typeof fetch = fetch): Prom
       id: typeof item.id === 'string' ? item.id : '',
       name: typeof item.name === 'string' ? item.name : '',
       url: typeof item.url === 'string' ? item.url : '',
+      previewUrl: typeof item.preview_url === 'string' ? item.preview_url : undefined,
       sizeMm: {
         width: typeof size.width === 'number' ? size.width : 100,
         height: typeof size.height === 'number' ? size.height : 56.25,
@@ -444,9 +451,11 @@ export async function createYXZLaserCard(request: YXZLaserCardRequest, fetcher: 
     theme: request.theme || '#0B5FA8',
     accent: request.accent || '#F5A623',
     bg_style: 'gradient',
-    back_template: request.backTemplate || 'activity_stage',
+    back_template: request.backTemplate || 'activity_yichang',
     front_template: request.frontTemplate || '',
     back_caption: request.backCaption || '宜昌市第四届中小学生数理文化活动',
+    back_title: request.backTitle || '宜昌市第四届中小学生数理文化活动',
+    back_subtitle: request.backSubtitle || '宜昌 · 数理 · 文化 · 科技',
     note: request.note ?? '',
     ...(request.sessionId ? { session_id: request.sessionId } : {}),
     ...(artworkSessionId

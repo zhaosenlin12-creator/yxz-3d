@@ -37,8 +37,13 @@ const errorMessage = ref('')
 const presets = ref<YXZPresetModel[]>([])
 const presetsLoading = ref(true)
 const presetsError = ref('')
-// '2d' = canvas editing, '3d' = model preview (scene switching like Tripo)
-const activeView = ref<'2d' | '3d'>('2d')
+// '2d' = canvas editing, '3d' = model preview (scene switching like Tripo),
+// 'card' = the laser-cut card preview.  The card gets its own view so the
+// two products never fight for the same space.
+const activeView = ref<'2d' | '3d' | 'card'>('2d')
+// Which workflow the right-hand panel is showing.  3D printing and laser
+// cutting are separate products, so they are never mixed in one column.
+const sidePanel = ref<'print' | 'laser'>('print')
 
 let elapsedTimer: ReturnType<typeof setInterval> | undefined
 
@@ -82,12 +87,11 @@ const laserForm = ref({ name: '', title: '', unit: '', contact: '' })
 const laserCard = ref<YXZLaserCardResponse | null>(null)
 const laserBusy = ref(false)
 const laserError = ref('')
-const laserSide = ref<'front' | 'back'>('front')
 const laserSoftwareMessage = ref('')
 // The card back is generated on request: the visitor describes the look they
 // want and the image service paints it.
 const laserTemplates = ref<YXZLaserTemplate[]>([])
-const laserBackTemplate = ref('activity_stage')
+const laserBackTemplate = ref('activity_yichang')
 const laserFrontTemplate = ref('')
 const laserBackgroundPrompt = ref('')
 const laserFrontPrompt = ref('')
@@ -95,10 +99,10 @@ const backgroundBusy = ref<'back' | 'front' | ''>('')
 const backgroundMessage = ref('')
 const backTemplates = computed(() => laserTemplates.value.filter(item => item.side !== 'front'))
 const frontTemplates = computed(() => laserTemplates.value.filter(item => item.side === 'front'))
-const laserCardImage = computed(() => {
-  if (!laserCard.value)
-    return ''
-  return laserSide.value === 'front' ? laserCard.value.frontUrl : laserCard.value.backUrl
+const laserCardRatio = computed(() => {
+  const width = laserCard.value?.sizeMm.width || 100
+  const height = laserCard.value?.sizeMm.height || 56.25
+  return `${width} / ${height}`
 })
 
 async function generateLaserCard() {
@@ -122,7 +126,9 @@ async function generateLaserCard() {
       backTemplate: laserBackTemplate.value,
       frontTemplate: laserFrontTemplate.value,
     })
-    laserSide.value = 'front'
+    // The card is its own product: show it full size as soon as it exists.
+    sidePanel.value = 'laser'
+    activeView.value = 'card'
   }
   catch (error) {
     laserError.value = error instanceof Error ? error.message : '卡片生成失败，请稍后重试'
@@ -298,9 +304,11 @@ function onSave(dataUrl: string) {
   editedDataUrl.value = dataUrl
 }
 
-function switchView(view: '2d' | '3d') {
+function switchView(view: '2d' | '3d' | 'card') {
   if (view === '3d' && !model.value)
     return
+  if (view === 'card')
+    sidePanel.value = 'laser'
   activeView.value = view
 }
 
@@ -382,6 +390,15 @@ function goBack() {
         <span>3D 模型预览</span>
         <small v-if="model" class="yxz-view-badge">已生成</small>
       </button>
+      <button
+        type="button"
+        :class="{ active: activeView === 'card' }"
+        @click="switchView('card')"
+      >
+        <span class="yxz-view-icon">🪵</span>
+        <span>切割卡片预览</span>
+        <small v-if="laserCard" class="yxz-view-badge">已生成</small>
+      </button>
     </nav>
 
     <!-- Preset printable models (3 poses, built with Tripo / Hunyuan3D) -->
@@ -436,7 +453,7 @@ function goBack() {
       </section>
 
       <!-- 3D scene view -->
-      <section v-else class="yxz-studio-3d">
+      <section v-else-if="activeView === '3d'" class="yxz-studio-3d">
         <template v-if="model">
           <iframe
             class="yxz-studio-3d-frame"
@@ -511,8 +528,69 @@ function goBack() {
         </div>
       </section>
 
+      <!-- Laser-cut card view: the front on top, the back underneath -->
+      <section v-else class="yxz-studio-cardview">
+        <template v-if="laserCard">
+          <header class="yxz-studio-cardview-head">
+            <strong>激光切割卡片</strong>
+            <small>
+              {{ laserCard.sizeMm.width }} × {{ laserCard.sizeMm.height }} mm ·
+              正面是你的作品，反面是活动主题
+            </small>
+          </header>
+          <figure class="yxz-studio-cardface">
+            <figcaption>正面 · 你的作品</figcaption>
+            <div class="yxz-studio-cardface-img" :style="{ aspectRatio: laserCardRatio }">
+              <img :src="laserCard.frontUrl" alt="卡片正面">
+            </div>
+          </figure>
+          <figure class="yxz-studio-cardface">
+            <figcaption>背面 · 活动主题</figcaption>
+            <div class="yxz-studio-cardface-img" :style="{ aspectRatio: laserCardRatio }">
+              <img :src="laserCard.backUrl" alt="卡片背面">
+            </div>
+          </figure>
+          <div class="yxz-studio-cardview-actions">
+            <a :href="laserCard.svgUrl" download rel="noreferrer">下载切割 SVG</a>
+            <a :href="laserCard.pngUrl" target="_blank" rel="noopener noreferrer">打开整卡预览 ↗</a>
+            <button type="button" @click="openLaserCardInSoftware">
+              用 xTool 打开切割
+            </button>
+          </div>
+          <p v-if="laserSoftwareMessage" class="yxz-studio-note">
+            {{ laserSoftwareMessage }}
+          </p>
+        </template>
+        <div v-else class="yxz-studio-3d-empty">
+          <div class="yxz-studio-3d-empty-icon">
+            🪵
+          </div>
+          <p>在右侧「激光切割」里填好姓名与信息，生成后这里会显示正反两面的完整预览。</p>
+          <button type="button" class="yxz-studio-build" @click="sidePanel = 'laser'">
+            去填写卡片信息
+          </button>
+        </div>
+      </section>
+
       <!-- Right control panel -->
       <aside class="yxz-studio-side">
+        <nav class="yxz-studio-side-tabs" aria-label="制作方式">
+          <button
+            type="button"
+            :class="{ active: sidePanel === 'print' }"
+            @click="sidePanel = 'print'"
+          >
+            3D 打印
+          </button>
+          <button
+            type="button"
+            :class="{ active: sidePanel === 'laser' }"
+            @click="sidePanel = 'laser'"
+          >
+            激光切割
+          </button>
+        </nav>
+
         <div class="yxz-studio-card">
           <h3>当前方案</h3>
           <p class="yxz-studio-caption">
@@ -523,7 +601,7 @@ function goBack() {
           </p>
         </div>
 
-        <div class="yxz-studio-card">
+        <div v-if="sidePanel === 'print'" class="yxz-studio-card">
           <h3>生成 3D 模型</h3>
           <p class="yxz-studio-note">
             按你的设计稿生成可以 3D 打印的立体模型，全程自动完成。
@@ -572,10 +650,11 @@ function goBack() {
           </div>
         </div>
 
-        <div class="yxz-studio-card">
+        <div v-if="sidePanel === 'laser'" class="yxz-studio-card">
           <h3>导出激光切割卡片</h3>
           <p class="yxz-studio-note">
-            正面放你的作品预览图，背面是活动主视觉背景，尺寸固定 {{ laserCard?.sizeMm.width ?? 100 }} × {{ laserCard?.sizeMm.height ?? 56.25 }} mm。
+            正面是你的 2D 作品预览图加姓名信息，背面是带活动主题大字的宜昌主视觉，
+            尺寸 {{ laserCard?.sizeMm.width ?? 100 }} × {{ laserCard?.sizeMm.height ?? 56.25 }} mm。
           </p>
           <div class="yxz-studio-laser-bg">
             <label class="yxz-studio-laser-bg-label">
@@ -639,7 +718,7 @@ function goBack() {
               </button>
               <span v-if="backgroundMessage" class="yxz-studio-note">{{ backgroundMessage }}</span>
             </div>
-            <div v-if="backTemplates.length" class="yxz-studio-laser-templates">
+            <div v-if="backTemplates.length" class="yxz-studio-laser-templates is-back">
               <button
                 v-for="tpl in backTemplates"
                 :key="tpl.id"
@@ -647,7 +726,13 @@ function goBack() {
                 :class="['yxz-studio-laser-template', { active: laserBackTemplate === tpl.id }]"
                 @click="laserBackTemplate = tpl.id"
               >
-                <img :src="`${getYXZPrintApiBase()}${tpl.url}`" :alt="tpl.name" loading="lazy">
+                <span class="yxz-studio-laser-template-thumb">
+                  <img
+                    :src="`${getYXZPrintApiBase()}${tpl.previewUrl ?? tpl.url}`"
+                    :alt="tpl.name"
+                    loading="lazy"
+                  >
+                </span>
                 <span>{{ tpl.name }}</span>
               </button>
             </div>
@@ -671,18 +756,22 @@ function goBack() {
           </p>
 
           <div v-if="laserCard" class="yxz-studio-laser">
-            <div class="yxz-studio-laser-tabs">
-              <button type="button" :class="{ active: laserSide === 'front' }" @click="laserSide = 'front'">
-                正面 · 作品
-              </button>
-              <button type="button" :class="{ active: laserSide === 'back' }" @click="laserSide = 'back'">
-                背面 · 活动背景
-              </button>
+            <div class="yxz-studio-laser-faces">
+              <figure>
+                <figcaption>正面</figcaption>
+                <img :src="laserCard.frontUrl" alt="卡片正面">
+              </figure>
+              <figure>
+                <figcaption>反面</figcaption>
+                <img :src="laserCard.backUrl" alt="卡片反面">
+              </figure>
             </div>
-            <img :src="laserCardImage" :alt="laserSide === 'front' ? '卡片正面' : '卡片背面'">
             <div class="yxz-studio-laser-links">
               <a :href="laserCard.svgUrl" download rel="noreferrer">下载切割 SVG</a>
               <a :href="laserCard.pngUrl" target="_blank" rel="noopener noreferrer">打开整卡预览</a>
+              <button type="button" class="yxz-studio-linkish" @click="switchView('card')">
+                大图预览
+              </button>
               <button type="button" class="yxz-studio-linkish" @click="openLaserCardInSoftware">
                 用 xTool 打开切割
               </button>
@@ -1234,6 +1323,31 @@ function goBack() {
   display: block;
 }
 
+/* The back template is a poster: the picker shows the activity theme on
+   top of it, exactly the way the finished card will look. */
+.yxz-studio-laser-templates.is-back {
+  flex-direction: column;
+  gap: 10px;
+  overflow: visible;
+}
+
+.yxz-studio-laser-templates.is-back .yxz-studio-laser-template {
+  width: 100%;
+}
+
+.yxz-studio-laser-template-thumb {
+  position: relative;
+  display: block;
+  width: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.yxz-studio-laser-template-thumb img {
+  height: 84px;
+  object-fit: cover;
+}
+
 .yxz-studio-card h3 {
   margin: 0;
   font-size: 14px;
@@ -1443,28 +1557,23 @@ function goBack() {
   margin-top: 10px;
 }
 
-.yxz-studio-laser-tabs {
+.yxz-studio-laser-faces {
   display: flex;
-  gap: 6px;
+  flex-direction: column;
+  gap: 10px;
 }
 
-.yxz-studio-laser-tabs button {
-  flex: 1;
-  border: 1px solid rgba(143, 212, 255, .28);
-  border-radius: 8px;
-  background: rgba(10, 26, 44, .7);
+.yxz-studio-laser-faces figure {
+  margin: 0;
+}
+
+.yxz-studio-laser-faces figcaption {
+  margin-bottom: 4px;
   color: #9fc4dd;
-  padding: 5px 6px;
   font-size: 11px;
-  cursor: pointer;
 }
 
-.yxz-studio-laser-tabs button.active {
-  border-color: #4db8f0;
-  color: #dff0ff;
-}
-
-.yxz-studio-laser img {
+.yxz-studio-laser-faces img {
   display: block;
   width: 100%;
   border: 1px solid rgba(143, 212, 255, .25);
@@ -1483,5 +1592,118 @@ function goBack() {
   color: #8fd4ff;
   font-size: 12px;
   text-decoration: underline;
+}
+
+/* --- the laser-cut card gets its own large, immersive view ------------- */
+.yxz-studio-cardview {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  padding: 26px 28px 34px;
+  min-width: 0;
+  min-height: 620px;
+  align-self: start;
+  overflow-y: auto;
+  background: rgba(255, 255, 255, .03);
+  border: 1px solid rgba(160, 205, 255, .2);
+  border-radius: 14px;
+}
+
+.yxz-studio-cardview-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.yxz-studio-cardview-head strong {
+  font-size: 17px;
+  color: #eaf6ff;
+}
+
+.yxz-studio-cardview-head small {
+  color: #8fb6d4;
+  font-size: 12px;
+}
+
+.yxz-studio-cardface {
+  margin: 0;
+  width: 100%;
+  max-width: 940px;
+}
+
+.yxz-studio-cardface figcaption {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #8fd4ff;
+  letter-spacing: .04em;
+}
+
+.yxz-studio-cardface-img {
+  overflow: hidden;
+  border: 1px solid rgba(143, 212, 255, .28);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .38);
+}
+
+.yxz-studio-cardface-img img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.yxz-studio-cardview-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.yxz-studio-cardview-actions a,
+.yxz-studio-cardview-actions button {
+  border: 1px solid rgba(143, 212, 255, .3);
+  border-radius: 9px;
+  background: rgba(10, 26, 44, .7);
+  color: #8fd4ff;
+  padding: 8px 14px;
+  font-size: 12px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.yxz-studio-cardview-actions a:hover,
+.yxz-studio-cardview-actions button:hover {
+  border-color: #4db8f0;
+  color: #eaf6ff;
+}
+
+/* --- the right panel switches between the two products ------------------ */
+.yxz-studio-side-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 11px;
+  border: 1px solid rgba(160, 205, 255, .2);
+  background: rgba(6, 21, 39, .7);
+}
+
+.yxz-studio-side-tabs button {
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #8fb6d4;
+  padding: 8px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.yxz-studio-side-tabs button.active {
+  background: linear-gradient(135deg, rgba(56, 182, 255, .28), rgba(56, 182, 255, .12));
+  color: #eaf6ff;
+  box-shadow: inset 0 0 0 1px rgba(77, 184, 240, .45);
 }
 </style>
