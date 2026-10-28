@@ -441,6 +441,11 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
             categorizer = createStreamingCategorizer(effectiveProviderId)
           },
           onStreamEvent: async (event: StreamEvent) => {
+            // Every raw event proves the turn is alive.  The chat watchdog
+            // watches this stamp instead of the visible text, so a model
+            // that thinks for a while -- or a tool that renders images for
+            // a minute -- is never mistaken for a frozen chat.
+            chatStream.touchActivity()
             switch (event.type) {
               case 'tool-call':
                 toolCallQueue.enqueue({

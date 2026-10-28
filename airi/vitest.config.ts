@@ -12,6 +12,7 @@ export default defineConfig({
       'packages/plugin-sdk',
       'packages/server-runtime',
       'packages/server-sdk',
+      'packages/stage-layouts',
       'packages/stage-shared',
       'packages/stage-ui',
       'packages/vishot-runtime',

@@ -95,7 +95,7 @@ function appendCreationCard(input: {
   preview: { index: number, src: string, caption: string }
   previews?: Array<{ index: number, src: string, caption: string }>
   model?: { modelUrl: string, stlUrl: string, glbUrl: string }
-  status: 'preview' | 'model-building' | 'model-ready' | 'failed'
+  status: 'preview' | 'preview-building' | 'model-building' | 'model-ready' | 'failed'
   progressMsg?: string
   errorMsg?: string
 }) {
@@ -105,15 +105,22 @@ function appendCreationCard(input: {
     return
 
   const messages = sessions.getSessionMessages(sessionId)
+  // The card is identified by its backend session: the "正在出图" placeholder
+  // has no picture yet, so matching on the image URL would leave the
+  // placeholder behind and stack a second card under it.
   const existingIndex = messages.findIndex(message => message.role === 'assistant'
     && message.yxzCreation?.kind === 'yxz-creation'
-    && message.yxzCreation.preview.src === input.preview.src)
+    && (input.sessionId
+      ? message.yxzCreation.sessionId === input.sessionId
+      : message.yxzCreation.preview.src === input.preview.src))
   const content = input.status === 'model-ready'
     ? '3D 模型已完成，请查看方案卡片。'
     : input.status === 'failed'
       ? (input.errorMsg || '3D 模型这次没能做好，可以再试一次。')
       : input.status === 'model-building'
         ? (input.progressMsg || '正在制作 3D 模型，请耐心等待…')
+        : input.status === 'preview-building'
+          ? (input.progressMsg || '正在生成预览图，请稍候…')
         : '预览已生成，请查看方案卡片。'
   const message = {
     role: 'assistant' as const,
@@ -357,11 +364,26 @@ export async function createYXZCreationTools() {
         const abortSignal = options?.abortSignal
         const memory = useYXZRequirementMemory()
         memory.update({ description, constraints })
+        // The backend session id is generated here so the chat can follow the
+        // image service step by step ("正在生成第 2/4 张…") instead of
+        // showing a frozen bubble for a whole minute.
+        const sessionId = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+        const buildingCard = {
+          sessionId,
+          description,
+          options: constraints,
+          preview: { index: 0, src: '', caption: '产品预览' },
+        }
+        appendCreationCard({ ...buildingCard, status: 'preview-building' })
         try {
           const result = await createYXZPreview({
             prompt: buildYXZPreviewPrompt(description, constraints),
             n: 4,
+            sessionId,
             signal: abortSignal,
+            onProgress: (message) => {
+              appendCreationCard({ ...buildingCard, status: 'preview-building', progressMsg: message })
+            },
           })
           const item = result.previews[0]
           if (!item)
@@ -386,6 +408,12 @@ export async function createYXZCreationTools() {
           // Never let a failed preview kill the conversation.  The visitor
           // gets a reply and a way forward instead of a dead chat turn.
           const reason = error instanceof Error ? error.message : '未知错误'
+          // The placeholder card must not stay on "正在出图" forever.
+          appendCreationCard({
+            ...buildingCard,
+            status: 'failed',
+            errorMsg: `预览图这次没能生成出来：${reason}`,
+          })
           return {
             status: 'preview-failed',
             message: `预览图这次没能生成出来（${reason}）。请把情况告诉用户，并说明可以说「再试一次」重新出图，或者补充一下产品细节（用途、造型、尺寸、颜色）后再试。`,

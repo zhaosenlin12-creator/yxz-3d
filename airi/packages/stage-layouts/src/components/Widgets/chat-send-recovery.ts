@@ -1,4 +1,23 @@
-export const CHAT_SEND_TIMEOUT_MS = 45_000
+/**
+ * How long a turn may stay completely silent before it counts as stuck.
+ *
+ * The number has to cover the slowest thing a turn legitimately does:
+ * a reasoning model that thinks before it writes its first word, and a
+ * tool call that renders four preview images (about a minute on the cloud
+ * image services).  The old 45s window cut both of those off, which is why
+ * the visitor saw "连接等待时间较长 / 请切换一个可用模型" in the middle of
+ * a perfectly healthy run.
+ */
+export const CHAT_SEND_TIMEOUT_MS = 90_000
+
+/**
+ * Absolute ceiling for one chat turn.
+ *
+ * The stall detector is a silence detector, so a turn that keeps making
+ * noise would never time out on its own.  This cap is the safety net that
+ * stops a runaway turn from blocking the chat forever.
+ */
+export const CHAT_SEND_MAX_TURN_MS = 20 * 60_000
 
 export class ChatSendTimeoutError extends Error {
   constructor() {
@@ -26,16 +45,45 @@ export async function withChatSendTimeout<T>(
   operation: Promise<T>,
   onTimeout: () => void,
   getProgressStamp?: () => unknown,
+  options?: {
+    /**
+     * True while the turn is legitimately working on something that does
+     * not show up as visible text -- a running tool call, a rendering
+     * pipeline, a model that is still thinking.  A busy turn is never
+     * treated as stalled.
+     */
+    isTurnActive?: () => boolean
+    /** Hard ceiling for the whole turn, in milliseconds. */
+    maxTurnMs?: number
+  },
 ): Promise<T> {
   let lastStamp = getProgressStamp?.()
   let lastProgressAt = Date.now()
+  const startedAt = lastProgressAt
+  const maxTurnMs = options?.maxTurnMs ?? CHAT_SEND_MAX_TURN_MS
   let timeoutId: ReturnType<typeof setInterval> | undefined
 
   const timeout = new Promise<never>((_, reject) => {
     timeoutId = setInterval(() => {
+      // The absolute ceiling comes first: it is the safety net that stops a
+      // runaway turn, no matter how busy it claims to be.
+      if (Date.now() - startedAt >= maxTurnMs) {
+        onTimeout()
+        reject(new ChatSendTimeoutError())
+        return
+      }
+
       const stamp = getProgressStamp?.()
       if (stamp !== undefined && !Object.is(stamp, lastStamp)) {
         lastStamp = stamp
+        lastProgressAt = Date.now()
+        return
+      }
+
+      // A turn that is busy is not a stuck turn.  Long tool calls (four
+      // preview images, a 3D build) produce no chat text for minutes at a
+      // time, and aborting them is what used to break the guided flow.
+      if (options?.isTurnActive?.()) {
         lastProgressAt = Date.now()
         return
       }

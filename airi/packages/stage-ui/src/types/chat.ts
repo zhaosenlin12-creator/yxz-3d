@@ -35,7 +35,7 @@ export interface YXZCreationPayload {
     glbUrl: string
     engine?: string
   }
-  status: 'preview' | 'model-building' | 'model-ready' | 'failed' | 'adopted' | 'redescribe'
+  status: 'preview' | 'preview-building' | 'model-building' | 'model-ready' | 'failed' | 'adopted' | 'redescribe'
   progressMsg?: string
   /** Set when a 3D build failed, so the card can offer a retry. */
   errorMsg?: string

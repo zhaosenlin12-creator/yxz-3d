@@ -7,9 +7,11 @@ const LOOPBACK_HOST_RE = /^(127\.0\.0\.1|localhost|::1|\[::1\])$/i
 export interface YXZPreviewRequest {
   prompt: string
   n?: number
-  prefer?: 'aixj' | 'minimax' | 'jojo' | 'local'
+  prefer?: 'auto' | 'aixj' | 'minimax' | 'jojo' | 'local'
   sessionId?: string
   signal?: AbortSignal
+  /** Reports what the image service is doing right now ("正在生成第 2/4 张…"). */
+  onProgress?: (message: string) => void
 }
 
 export interface YXZPreviewItem {
@@ -584,6 +586,65 @@ async function pollYXZModelProgress(sessionId: string, signal: AbortSignal, onPr
 }
 
 /**
+ * Follow the image service while it renders the preview images.
+ *
+ * The backend writes one progress event per generated image ("正在生成第
+ * 2/4 张…"), so the visitor can see the work instead of staring at a frozen
+ * chat, and the chat watchdog can tell a busy turn from a broken one.
+ */
+async function pollYXZPreviewProgress(
+  sessionId: string,
+  signal: AbortSignal,
+  onProgress?: (message: string) => void,
+  fetcher: typeof fetch = fetch,
+) {
+  let since = 0
+  let lastMessage = ''
+  let lastMessageAt = Date.now()
+  let lastHeartbeatAt = 0
+  while (!signal.aborted) {
+    try {
+      const response = await fetcher(`${getYXZPrintApiBase()}/api/progress/${encodeURIComponent(sessionId)}?since=${since}`, { signal })
+      if (response.ok) {
+        const raw: unknown = await response.json()
+        if (isRecord(raw)) {
+          const events = Array.isArray(raw.events) ? raw.events : []
+          for (const event of events) {
+            if (!isRecord(event))
+              continue
+            const timestamp = typeof event.ts === 'number' ? event.ts : since
+            since = Math.max(since, timestamp)
+            const message = typeof event.message === 'string' ? event.message : ''
+            if (message) {
+              lastMessage = message
+              lastMessageAt = Date.now()
+              onProgress?.(message)
+            }
+          }
+        }
+      }
+    }
+    catch (error) {
+      if ((error as Error)?.name === 'AbortError')
+        return
+    }
+    if (signal.aborted)
+      return
+
+    // A slow image service can sit on one picture for a minute.  Say so,
+    // otherwise the visitor has no idea whether the app is working.
+    const now = Date.now()
+    if (lastMessage && now - lastMessageAt > 10_000 && now - lastHeartbeatAt > 10_000) {
+      lastHeartbeatAt = now
+      const seconds = Math.round((now - lastMessageAt) / 1000)
+      onProgress?.(`${lastMessage}（已经 ${seconds} 秒）`)
+    }
+
+    await sleep(1200, signal)
+  }
+}
+
+/**
  * Highest timestamp the server already knows about for this session.
  *
  * A build must not replay the events of the previous run (nor the image
@@ -760,7 +821,7 @@ export async function createYXZCartoonModel(request: YXZModelRequest, fetcher: t
  * visitor an error screen -- a single flaky provider should not end the
  * guided flow.
  */
-const YXZ_PREVIEW_PROVIDERS: Array<NonNullable<YXZPreviewRequest['prefer']>> = ['aixj', 'minimax', 'jojo']
+const YXZ_PREVIEW_PROVIDERS: Array<NonNullable<YXZPreviewRequest['prefer']>> = ['auto', 'minimax', 'aixj', 'jojo']
 
 /** A failure that is worth retrying with another provider. */
 class PreviewTransportError extends Error {
@@ -882,9 +943,23 @@ export async function createYXZPreview(request: YXZPreviewRequest, fetcher: type
     throw new Error('请输入想要制作的产品描述')
 
   const n = Math.min(Math.max(request.n ?? 4, 1), 4)
-  const prefer = request.prefer ?? 'aixj'
+  // "auto" lets the backend walk its own chain: the service that is
+  // configured and healthy wins, the others are the automatic backup.
+  const prefer = request.prefer ?? 'auto'
   const sessionId = request.sessionId ?? crypto.randomUUID().replace(DASH_RE, '').slice(0, 12)
   const deadline = Date.now() + YXZ_PREVIEW_TIMEOUT_MS
+
+  // Watch the image service while it works.  Without this the visitor only
+  // sees a frozen chat for a whole minute, and the chat watchdog has no
+  // way to tell "busy" from "broken".
+  const progressController = new AbortController()
+  const onAbort = () => progressController.abort()
+  request.signal?.addEventListener('abort', onAbort, { once: true })
+  // Only watch when somebody listens: the poll is an extra request per
+  // second that nobody asked for.
+  const progressTask = request.onProgress
+    ? pollYXZPreviewProgress(sessionId, progressController.signal, request.onProgress, fetcher)
+    : Promise.resolve()
 
   // Try the preferred provider first, then the next one in line.  Each
   // attempt only gets whatever is left of the budget, so the total wait
@@ -892,70 +967,77 @@ export async function createYXZPreview(request: YXZPreviewRequest, fetcher: type
   const candidates = [prefer, ...YXZ_PREVIEW_PROVIDERS.filter(provider => provider !== prefer)]
   let lastError: unknown
 
-  for (const [index, candidate] of candidates.entries()) {
-    const remaining = deadline - Date.now()
-    if (remaining <= 5_000)
-      break
-
-    // Only the first two candidates get a real shot -- beyond that the
-    // budget is already spent and we would just be adding latency.
-    if (index >= 2)
-      break
-
-    try {
-      return await requestPreviewOnce(
-        prompt,
-        candidate,
-        n,
-        sessionId,
-        remaining,
-        request.signal,
-        fetcher,
-      )
-    }
-    catch (error) {
-      if (request.signal?.aborted)
-        throw error
-      lastError = error
-      // The backend already walked its own provider chain; if it came back
-      // with a clean "everything failed" answer, another attempt through a
-      // different provider would repeat the same dead ends.
-      if (!(error instanceof PreviewTransportError))
+  try {
+    for (const [index, candidate] of candidates.entries()) {
+      const remaining = deadline - Date.now()
+      if (remaining <= 5_000)
         break
 
-      // The transport broke, not the provider: the backend was restarting
-      // after a crash or the connection was cut mid-flight.  Waiting for it
-      // to come back and repeating the very same request is what turns
-      // "the visitor sees an error screen" into "the visitor never
-      // noticed".  Only worth it while there is budget left.
-      if (error.restartLikely) {
-        const waitBudget = Math.min(yxzBackendRecovery.waitMs, deadline - Date.now())
-        if (waitBudget > 3_000) {
-          const back = await waitForYXZBackend(waitBudget, fetcher, request.signal)
-          const retryBudget = deadline - Date.now()
-          if (back && retryBudget > 5_000) {
-            try {
-              return await requestPreviewOnce(
-                prompt,
-                candidate,
-                n,
-                sessionId,
-                retryBudget,
-                request.signal,
-                fetcher,
-              )
-            }
-            catch (retryError) {
-              if (request.signal?.aborted)
-                throw retryError
-              lastError = retryError
-              if (!(retryError instanceof PreviewTransportError))
-                break
+      // Only the first two candidates get a real shot -- beyond that the
+      // budget is already spent and we would just be adding latency.
+      if (index >= 2)
+        break
+
+      try {
+        return await requestPreviewOnce(
+          prompt,
+          candidate,
+          n,
+          sessionId,
+          remaining,
+          request.signal,
+          fetcher,
+        )
+      }
+      catch (error) {
+        if (request.signal?.aborted)
+          throw error
+        lastError = error
+        // The backend already walked its own provider chain; if it came back
+        // with a clean "everything failed" answer, another attempt through a
+        // different provider would repeat the same dead ends.
+        if (!(error instanceof PreviewTransportError))
+          break
+
+        // The transport broke, not the provider: the backend was restarting
+        // after a crash or the connection was cut mid-flight.  Waiting for it
+        // to come back and repeating the very same request is what turns
+        // "the visitor sees an error screen" into "the visitor never
+        // noticed".  Only worth it while there is budget left.
+        if (error.restartLikely) {
+          const waitBudget = Math.min(yxzBackendRecovery.waitMs, deadline - Date.now())
+          if (waitBudget > 3_000) {
+            const back = await waitForYXZBackend(waitBudget, fetcher, request.signal)
+            const retryBudget = deadline - Date.now()
+            if (back && retryBudget > 5_000) {
+              try {
+                return await requestPreviewOnce(
+                  prompt,
+                  candidate,
+                  n,
+                  sessionId,
+                  retryBudget,
+                  request.signal,
+                  fetcher,
+                )
+              }
+              catch (retryError) {
+                if (request.signal?.aborted)
+                  throw retryError
+                lastError = retryError
+                if (!(retryError instanceof PreviewTransportError))
+                  break
+              }
             }
           }
         }
       }
     }
+  }
+  finally {
+    progressController.abort()
+    request.signal?.removeEventListener('abort', onAbort)
+    await progressTask.catch(() => undefined)
   }
 
   const reason = lastError instanceof Error ? lastError.message : '出图服务暂时没有响应'

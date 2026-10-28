@@ -101,6 +101,12 @@ $providers['edge-tts-free'] = @{
 }
 
 $modules = @{
+    consciousness = @{
+        # 对话主通道：MiniMax（中国区）。provider-seed.json 也指向它，
+        # 两边必须一致 —— 不一致时前端算出来的备用通道是错的。
+        activeProvider = 'minimax'
+        activeModel    = 'MiniMax-M2.7'
+    }
     speech = @{
         # 语音链路：MiniMax 主（音色最全）→ 本地 Voicebox 语音包备 →
         # 免费 Edge 神经语音兜底。三级都能出声音，永远不会哑掉。
@@ -123,18 +129,40 @@ $modules = @{
 }
 if ($providers.ContainsKey('deepseek')) {
     $modules['consciousness'] = @{
-        activeProvider = 'deepseek'
-        activeModel    = 'deepseek-chat'
+        activeProvider = 'minimax'
+        activeModel    = 'MiniMax-M2.7'
     }
 }
 
 $addedProviders = @($providers.Keys)
+
+# ---- 备用对话通道 ---------------------------------------------------
+#   主通道（MiniMax）抖动时，前端自己换到下一条通道继续，用户不用去
+#   设置里挑模型。这里必须写清楚"服务商 + 它自己的模型名"：把主通道
+#   的模型名发给备用通道，对方只会回一句"请换个模型"。
+#
+#   注意：早先这里用的是 openai-compatible + qwen3-max，可 openai-compatible
+#   指向的其实是 MiniMax 地址，qwen3-max 在那儿根本不存在 —— 备用通道等于
+#   没有，切换必然失败。
+$fallbacks = @{}
+if ($providers.ContainsKey('deepseek')) {
+    $fallbacks['consciousness'] = @{
+        cooldownMs = 300000
+        candidates = @(
+            @{
+                providerId = 'deepseek'
+                model      = 'deepseek-chat'
+            }
+        )
+    }
+}
 
 # ---- revision 用内容哈希，key 一变就自动失效浏览器里的旧配置 --------
 $core = [ordered]@{
     providers      = $providers
     addedProviders = $addedProviders
     modules        = $modules
+    fallbacks      = $fallbacks
 }
 $coreJson = $core | ConvertTo-Json -Depth 8 -Compress
 $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -151,6 +179,7 @@ $bootstrap = [ordered]@{
     providers      = $providers
     addedProviders = $addedProviders
     modules        = $modules
+    fallbacks      = $fallbacks
 }
 
 $json = $bootstrap | ConvertTo-Json -Depth 8 -Compress

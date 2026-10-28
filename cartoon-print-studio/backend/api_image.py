@@ -505,6 +505,32 @@ def _try_aixj_image(prompts, size, sid=None, deadline=None):
     return results
 
 
+def _try_jojo_image(prompts, size, sid=None):
+    """Generate N preview images via jojo, one after the other.
+
+    jojo is the last cloud backup: its key usually runs out of quota, and
+    a dead key must not waste the visitor's time.
+    """
+    if not JOJO_KEYS:
+        return None
+    n_total = len(prompts)
+    t0 = time.time()
+    print(f"[api_image] jojo-image ({n_total} prompts, {len(JOJO_KEYS)} keys)")
+    results = []
+    for i, p in enumerate(prompts):
+        if sid:
+            _pg.Progress(sid, "previews").emit(
+                f"jojo-{i+1}/{n_total}", int(i / n_total * 90),
+                f"正在生成第 {i+1}/{n_total} 张预览…")
+        res = _jojo_call(p, n=1, size=size, timeout=60, sid=sid)
+        results.append((res[0], f"jojo#{i+1}") if res else (None, f"jojo#fail{i+1}"))
+        print(f"[api_image] jojo {i+1}/{n_total} done (+{time.time()-t0:.1f}s)")
+    if all(b is None for b, _ in results):
+        print(f"[api_image] jojo ALL FAILED (+{time.time()-t0:.1f}s)")
+        return None
+    return results
+
+
 def _merge_slots(items, new_items, prefix):
     """Fill None slots in ``items`` (same prompt order) from ``new_items``.
 
@@ -523,108 +549,87 @@ def _merge_slots(items, new_items, prefix):
     return items
 
 
-def generate_previews(prompts, *, prefer="aixj", size="1024x1024", sid=None,
+def _provider_chain(prefer: str) -> list:
+    """The order in which the image services are tried.
+
+    ``prefer`` may name one service explicitly; "auto" (the default the
+    chat uses) follows the order the operator configured.  The first
+    service that is configured and healthy wins, the rest are the automatic
+    backup -- the visitor never has to pick a model.
+
+    The default primary is MiniMax: two keys, a clean product render and
+    roughly 18 seconds for four images.  AIXJ (gpt-image-2) makes prettier
+    lifestyle shots but needs a minute or more, and AIXJ's own gateway only
+    tolerates a couple of parallel calls, which used to be the reason a
+    preview "failed" in front of the audience.
+    """
+    primary = (os.environ.get("YXZ_IMAGE_PRIMARY", "") or "").strip().lower()
+    if primary not in ("aixj", "minimax", "jojo"):
+        primary = "minimax"
+
+    if prefer in ("auto", "api", "image", "online", ""):
+        order = [primary]
+    elif prefer in ("aixj", "minimax", "jojo"):
+        order = [prefer]
+    else:
+        order = [primary]
+
+    for name in ("minimax", "aixj", "jojo"):
+        if name not in order:
+            order.append(name)
+    order.append("local")
+    return order
+
+
+def generate_previews(prompts, *, prefer="auto", size="1024x1024", sid=None,
                       budget_s: float = 240.0):
-    """Generate previews. Strategy depends on prefer:
+    """Generate previews by walking the provider chain.
 
-    - "aixj":    try AIXJ image first; on failure fall back to minimax, jojo, then local SD
-    - "minimax": try MiniMax image first; on failure fall back to jojo, then local SD
-    - "jojo":    jojo first; on failure fall back to local SD
-    - "local":   local SD only
-    - "auto":    alias for "aixj"
-
-    Returns:
-      (source_label, [(png_bytes or None, tag), ...])
-    The caller (server._post_filter) walks the list and tops up None slots
-    from the next provider in the chain, so a partial outage still produces
-    a usable preview set.
+    Every service in the chain gets its turn; a service that fails (or only
+    answers for some of the pictures) hands the missing slots to the next
+    one.  Returns ``(source_label, [(png_bytes or None, tag), ...])``.
     """
     items = []
     deadline = time.time() + max(30.0, float(budget_s or 240.0))
-    if prefer in ("auto", "api", "image", "online", ""):
-        prefer = "aixj"
+    chain = _provider_chain(prefer)
+    labels = {"aixj": "aixj-image", "minimax": "minimax-image",
+              "jojo": "jojo-image", "local": "sd-local"}
 
-    if prefer == "aixj":
-        m = _try_aixj_image(prompts, size, sid=sid, deadline=deadline)
-        if m is not None and any(b for b, _ in m):
-            if all(b is not None for b, _ in m):
-                return "aixj-image", m
-            # partial success -> keep slots, top up the rest from minimax
-            items.extend(m)
-            if sid:
-                _pg.Progress(sid, "previews").emit(
-                    "aixj-partial", 70, "部分预览还没生成好，正在补齐…")
-            prefer = "minimax"
-        else:
-            if m is not None:
-                items.extend(m)
-                if sid:
-                    _pg.Progress(sid, "previews").emit(
-                        "aixj-partial", 70, "部分预览还没生成好，正在补齐…")
-            else:
-                print("[api_image] aixj unavailable, falling back to minimax")
-            prefer = "minimax"
-
-    if prefer == "minimax":
-        # Every provider downstream of AIXJ is cheaper, but the chain still
-        # has to fit inside the request budget.  If AIXJ already produced
-        # something, stop here rather than pushing the frontend past its
-        # own timeout.
-        if items and time.time() >= deadline:
-            print("[api_image] budget spent, keeping the aixj result")
-            return "aixj-image", items
-        m = _try_minimax_image(prompts, size, sid=sid)
-        if m is not None and any(b for b, _ in m):
-            if items:
-                _merge_slots(items, m, "minimax")
-                return "minimax-image", items
-            return "minimax-image", m
-        if m is not None:
-            _merge_slots(items, m, "minimax")
-            if sid:
-                _pg.Progress(sid, "previews").emit(
-                    "minimax-partial", 70, "部分预览还没生成好，正在补齐…")
-        else:
-            print("[api_image] minimax unavailable, falling back to jojo")
-        prefer = "jojo"
-
-    if prefer == "jojo" and JOJO_KEYS:
+    for name in chain:
+        if name == "local":
+            break
         if items and time.time() >= deadline:
             print("[api_image] budget spent, keeping the earlier result")
-            return "aixj-image", items
-        t0 = time.time()
-        n_total = len(prompts)
-        n_keys = len(JOJO_KEYS)
-        print(f"[api_image] jojo-image ({n_total} prompts, {n_keys} keys)")
-        # item index i corresponds to prompt i (providers fill in order)
-        for i, p in enumerate(prompts):
-            if i < len(items) and items[i][0] is not None:
-                continue
-            if sid:
-                _pg.Progress(sid, "previews").emit(
-                    f"jojo-{i+1}/{n_total}", int(i / n_total * 90),
-                    f"正在生成第 {i+1}/{n_total} 张预览…")
-            res = _jojo_call(p, n=1, size=size, timeout=60, sid=sid)
-            entry = (res[0], f"jojo#{i+1}") if res else (None, f"jojo#fail{i+1}")
-            if i < len(items):
-                items[i] = entry
-            else:
-                items.append(entry)
-            print(f"[api_image] jojo {i+1}/{n_total} done (+{time.time()-t0:.1f}s)")
-        if all(b is None for b, _ in items):
-            # All jojo keys marked dead this session. If we still have
-            # minimax available, route there instead of going to local SD
-            # (which is much slower on the dev box).
-            if MINIMAX_IMAGE_KEYS:
-                print("[api_image] jojo keys all dead, falling back to minimax-image")
-                if sid:
-                    _pg.Progress(sid, "previews").emit("jojo-all-dead", 60, "出图服务暂时不可用，正在换一种方式…")
-                return generate_previews(prompts, prefer="minimax", size=size, sid=sid)
-            print("[api_image] jojo empty, falling back to local SD")
-            return generate_previews(prompts, prefer="local", size=size, sid=sid)
-        return "jojo-image", items
+            return labels.get(chain[0], "image"), items
 
-    if prefer == "local":
+        if name == "aixj":
+            m = _try_aixj_image(prompts, size, sid=sid, deadline=deadline)
+        elif name == "minimax":
+            m = _try_minimax_image(prompts, size, sid=sid)
+        else:
+            m = _try_jojo_image(prompts, size, sid=sid)
+
+        if m is None:
+            print(f"[api_image] {name} unavailable, trying the next service")
+            continue
+
+        if items:
+            _merge_slots(items, m, name)
+        else:
+            items.extend(m)
+
+        if all(b is not None for b, _ in items):
+            return labels.get(name, "image"), items
+
+        if sid:
+            _pg.Progress(sid, "previews").emit(
+                f"{name}-partial", 70, "部分预览还没生成好，正在补齐…")
+        print(f"[api_image] {name} partial, topping up the missing pictures")
+
+    # Local SD is the last resort and it is not even bundled in the release
+    # build.  It may only run when the cloud services produced nothing at
+    # all -- a partial result is far better than a crash.
+    if "local" in chain and not items:
         print(f"[api_image] generating {len(prompts)} via local SD 1.5")
         sd = _make_local_fallback()
         seed_base = 42
@@ -661,6 +666,10 @@ def generate_previews(prompts, *, prefer="aixj", size="1024x1024", sid=None,
                 _pg.Progress(sid, "previews").emit(f"sd-{i+1}/{n_total}", pct, f"正在生成第 {i+1}/{n_total} 张预览…")
         return "sd-local", items
 
+    if items:
+        print("[api_image] keeping the partial result from the cloud services")
+        return labels.get(chain[0], "image"), items
+
     print(f"[api_image] no provider matched prefer={prefer}; returning empty")
     return "none", items
 
@@ -675,9 +684,9 @@ def health():
         "jojo_key_loaded": bool(JOJO_KEY),
         "jojo_key_preview": (JOJO_KEY[:14] + "...") if JOJO_KEY else None,
         "minimax_image_keys": len(MINIMAX_IMAGE_KEYS),
-        "chain": ("aixj-image > minimax-image > jojo-image > local-sd"
-                  if AIXJ_IMAGE_KEY else
-                  "minimax-image > jojo-image > local-sd"),
+        "chain": " > ".join(
+            f"{name}-image" for name in _provider_chain("auto") if name != "local"
+        ) + " > local-sd",
     }
 
 

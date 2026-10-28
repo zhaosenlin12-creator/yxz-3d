@@ -13,7 +13,7 @@ import { drizzle } from '@proj-airi/drizzle-duckdb-wasm'
 import { getImportUrlBundles } from '@proj-airi/drizzle-duckdb-wasm/bundles/import-url-browser'
 import { createLive2DLipSync } from '@proj-airi/model-driver-lipsync'
 import { wlipsyncProfile } from '@proj-airi/model-driver-lipsync/shared/wlipsync'
-import { createPlaybackManager, createSpeechPipeline } from '@proj-airi/pipelines-audio'
+import { createPlaybackManager, createSpeechPipeline, createTtsSegmentStream } from '@proj-airi/pipelines-audio'
 import { Live2DScene, useLive2d } from '@proj-airi/stage-ui-live2d'
 import { ThreeScene, YXZProceduralScene, YXZRealModelScene } from '@proj-airi/stage-ui-three'
 import { animations } from '@proj-airi/stage-ui-three/assets/vrm'
@@ -268,6 +268,60 @@ let providerTtsFailCount = 0
 const PROVIDER_FAILURE_COOLDOWN_MS = 60_000
 const providerFailureUntil = new Map<string, number>()
 
+// Cloud speech services bill per request and enforce a requests-per-minute
+// limit.  宜小智 speaks the welcome line on every page load and every reply
+// is cut into sentence-sized pieces, so a single page visit used to fire
+// twenty-odd parallel synthesis calls -- which burned quota and tripped the
+// rate limiter ("rate limit exceeded (RPM)").
+//
+// Two things keep that in check: identical lines are rendered once and then
+// reused, and only a couple of requests are in flight at a time.
+const TTS_AUDIO_CACHE_LIMIT = 64
+const ttsAudioCache = new Map<string, AudioBuffer>()
+const TTS_MAX_INFLIGHT = 2
+let ttsInFlight = 0
+const ttsQueue: Array<() => void> = []
+
+function acquireTtsSlot() {
+  if (ttsInFlight < TTS_MAX_INFLIGHT) {
+    ttsInFlight++
+    return Promise.resolve()
+  }
+  return new Promise<void>((resolve) => {
+    ttsQueue.push(() => {
+      ttsInFlight++
+      resolve()
+    })
+  })
+}
+
+function releaseTtsSlot() {
+  ttsInFlight = Math.max(0, ttsInFlight - 1)
+  const next = ttsQueue.shift()
+  if (next)
+    next()
+}
+
+function readCachedTts(key: string) {
+  const cached = ttsAudioCache.get(key)
+  if (!cached)
+    return undefined
+  // Refresh the recency so the hot lines stay in the cache.
+  ttsAudioCache.delete(key)
+  ttsAudioCache.set(key, cached)
+  return cached
+}
+
+function writeCachedTts(key: string, buffer: AudioBuffer) {
+  ttsAudioCache.set(key, buffer)
+  while (ttsAudioCache.size > TTS_AUDIO_CACHE_LIMIT) {
+    const oldest = ttsAudioCache.keys().next().value
+    if (oldest === undefined)
+      break
+    ttsAudioCache.delete(oldest)
+  }
+}
+
 function isProviderCoolingDown(providerId: string) {
   const until = providerFailureUntil.get(providerId)
   if (!until)
@@ -290,6 +344,19 @@ function hasSpeakableText(text: string) {
 }
 
 const speechPipeline = createSpeechPipeline<AudioBuffer>({
+  /**
+   * Longer chunks than the default.
+   *
+   * The default splitter cuts a Chinese sentence every dozen words, so one
+   * reply became twenty-odd synthesis calls -- twenty-odd requests against
+   * the cloud speech quota, and the service answered with "rate limit
+   * exceeded (RPM)".  A longer chunk is also closer to how a person
+   * speaks, so the voice sounds less chopped up.
+   */
+  segmenter: (tokens, meta) => createTtsSegmentStream(tokens, meta, {
+    minimumWords: 8,
+    maximumWords: 30,
+  }),
   tts: async (request, signal) => {
     if (signal.aborted)
       return null
@@ -368,6 +435,16 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
         ? speechStore.generateSSML(request.text, voice, { ...providerConfig, pitch: pitch.value })
         : request.text
 
+      // The same line is spoken over and over (the welcome greeting on every
+      // page load, a repeated answer).  Rendering it once and replaying the
+      // buffer keeps the cloud speech quota for the parts that are new.
+      const cacheKey = `${providerId}|${model}|${voice.id}|${input}`
+      const cached = readCachedTts(cacheKey)
+      if (cached) {
+        providerTtsOkCount += 1
+        return cached
+      }
+
       try {
         console.info('[Stage] Generating speech', {
           provider: providerId,
@@ -375,11 +452,18 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
           voice: voice.id,
           textLength: request.text.length,
         })
-        const res = await generateSpeech({
-          ...provider.speech(model, providerConfig),
-          input,
-          voice: voice.id,
-        })
+        await acquireTtsSlot()
+        let res: ArrayBuffer
+        try {
+          res = await generateSpeech({
+            ...provider.speech(model, providerConfig),
+            input,
+            voice: voice.id,
+          })
+        }
+        finally {
+          releaseTtsSlot()
+        }
 
         if (signal.aborted)
           return null
@@ -388,6 +472,7 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
           continue
 
         const audioBuffer = await audioContext.decodeAudioData(res)
+        writeCachedTts(cacheKey, audioBuffer)
         providerTtsOkCount += 1
         return audioBuffer
       }

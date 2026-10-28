@@ -420,7 +420,7 @@ class PreviewsReq(BaseModel):
     prompt: str
     n: int = 4
     seed: int = 42
-    prefer: str = "aixj"   # aixj (gpt-image) -> minimax -> jojo -> local
+    prefer: str = "auto"   # auto -> the configured chain (minimax -> aixj -> jojo -> local)
     session_id: str = ""
     # Inlining four 1024x1024 PNGs as base64 makes the response ~10 MB.
     # The chat flow only ever uses the `path`, so the bytes are opt-in.
@@ -539,7 +539,7 @@ class PreviewsV2Req(BaseModel):
     prompt: str
     n: int = 4
     seed: int = 42
-    prefer: str = "aixj"   # aixj (gpt-image) -> minimax -> jojo -> local
+    prefer: str = "auto"   # auto -> the configured chain (minimax -> aixj -> jojo -> local)
     session_id: str = ""
     include_b64: bool = False
 class ThreeDMultiReq(BaseModel):
@@ -1014,8 +1014,8 @@ def get_progress(sid: str, since: float = 0.0):
     return {"sid": sid, "events": events, "latest": latest}
 @app.post("/api/previews")
 def previews(req: PreviewsReq):
-    """Generate previews via the prefer chain: minimax → jojo → local-sd.
-    The local-sd fallback only triggers when both cloud providers fail;
+    """Generate previews by walking the configured image chain.
+    The local-sd fallback only triggers when every cloud provider fails;
     in the packaged build torch is not bundled so local-sd will raise.
     """
     if not req.prompt.strip():
@@ -1029,7 +1029,7 @@ def previews(req: PreviewsReq):
         # Run n copies of the same prompt through the chain
         prompts = [req.prompt] * req.n
         src, results = api_image.generate_previews(
-            prompts, prefer=req.prefer or "aixj",
+            prompts, prefer=req.prefer or "auto",
             size="1024x1024", sid=sid,
         )
     except Exception as e:
@@ -1287,7 +1287,7 @@ def _previews_v2_worker(req: PreviewsV2Req, sid: str):
     pg.emit('thinking', 5, f'规则增强完成，准备生成 {req.n} 张预览')
     try:
         img_source, raw_items = api_image.generate_previews(
-            sub_prompts, prefer=req.prefer if req.prefer else 'aixj',
+            sub_prompts, prefer=req.prefer if req.prefer else 'auto',
             size='1024x1024', sid=sid,
         )
     except Exception as e:
@@ -2004,7 +2004,7 @@ def laser_background(req: LaserBackgroundReq):
             "不要出现任何文字、字母、数字、水印或人物脸部特写，适合印刷。"
         )
     try:
-        source, items = api_image.generate_previews([prompt], prefer="aixj", size="1024x1024")
+        source, items = api_image.generate_previews([prompt], prefer="auto", size="1024x1024")
         blob = next((b for b, _ in items if b), None)
     except Exception as exc:
         traceback.print_exc()

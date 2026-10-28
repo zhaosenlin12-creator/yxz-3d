@@ -17,7 +17,7 @@ const props = withDefaults(defineProps<{
   stlUrl?: string
   sessionId?: string
   interactive?: boolean
-  status?: 'preview' | 'model-building' | 'model-ready' | 'failed' | 'adopted' | 'redescribe'
+  status?: 'preview' | 'preview-building' | 'model-building' | 'model-ready' | 'failed' | 'adopted' | 'redescribe'
   progressMsg?: string
   errorMsg?: string
   previews?: YXZCardPreviewItem[]
@@ -84,6 +84,8 @@ function openLightboxInNewTab() {
 const badgeText = computed(() => {
   if (props.status === 'model-ready')
     return '模型已完成'
+  if (props.status === 'preview-building')
+    return '出图中…'
   if (props.status === 'model-building')
     return '制作中…'
   if (props.status === 'failed')
@@ -134,9 +136,9 @@ async function copyPreviewAddress() {
       </div>
       <span class="yxz-creation-card-badge" :class="`is-${status}`">{{ badgeText }}</span>
     </div>
-    <div v-if="status === 'model-building'" class="yxz-creation-card-building">
+    <div v-if="status === 'model-building' || status === 'preview-building'" class="yxz-creation-card-building">
       <span class="yxz-creation-card-building-dot" />
-      <span>{{ progressMsg || '正在制作 3D 模型，请耐心等待…' }}</span>
+      <span>{{ progressMsg || (status === 'preview-building' ? '正在生成预览图，请稍候…' : '正在制作 3D 模型，请耐心等待…') }}</span>
       <div class="yxz-creation-card-building-track">
         <div class="yxz-creation-card-building-bar" />
       </div>
@@ -144,12 +146,13 @@ async function copyPreviewAddress() {
     <div v-else-if="status === 'failed'" class="yxz-creation-card-building is-failed">
       <span class="yxz-creation-card-building-dot" />
       <span>{{ errorMsg || '这次没能做好，可以再试一次。' }}</span>
-      <button type="button" class="yxz-creation-card-secondary" :disabled="retrying" @click="retryBuild">
+      <button v-if="previewSrc" type="button" class="yxz-creation-card-secondary" :disabled="retrying" @click="retryBuild">
         {{ retrying ? '正在重试…' : '再试一次' }}
       </button>
       <small v-if="retryError" class="yxz-creation-card-retry-error">{{ retryError }}</small>
     </div>
     <img
+      v-if="previewSrc"
       :src="previewSrc"
       :alt="caption"
       class="yxz-creation-card-image"
@@ -159,12 +162,12 @@ async function copyPreviewAddress() {
       @click="openLightbox(0)"
       @keydown.enter="openLightbox(0)"
     >
-    <div class="yxz-creation-card-zoom-hint">
+    <div v-if="previewSrc" class="yxz-creation-card-zoom-hint">
       <button type="button" @click="openLightbox(0)">
         点击放大预览
       </button>
       <a :href="previewSrc" target="_blank" rel="noopener noreferrer">在新页面打开</a>
-      <button v-if="sessionId && status !== 'model-building'" type="button" class="yxz-creation-card-studio" @click="openStudio">
+      <button v-if="sessionId && status !== 'model-building' && status !== 'preview-building'" type="button" class="yxz-creation-card-studio" @click="openStudio">
         打开创作面板
       </button>
       <span v-if="gallery.length > 1">共 {{ gallery.length }} 张</span>
@@ -172,7 +175,7 @@ async function copyPreviewAddress() {
     <p v-if="description" class="yxz-creation-card-description">
       {{ description }}
     </p>
-    <div v-if="interactive && status !== 'model-building' && status !== 'failed'" class="yxz-creation-card-actions">
+    <div v-if="interactive && status !== 'model-building' && status !== 'preview-building' && status !== 'failed'" class="yxz-creation-card-actions">
       <button type="button" class="yxz-creation-card-primary" @click="emit('adopt')">
         采用这个方案
       </button>

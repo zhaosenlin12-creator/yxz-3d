@@ -7,6 +7,7 @@ import { useYXZVoiceInput } from '@proj-airi/stage-ui/composables/use-yxz-voice-
 import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
 import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
 import { useChatStreamStore } from '@proj-airi/stage-ui/stores/chat/stream-store'
+import { resolveFallbackCandidates } from '@proj-airi/stage-ui/stores/llm'
 import { useConsciousnessStore } from '@proj-airi/stage-ui/stores/modules/consciousness'
 import { useHearingStore } from '@proj-airi/stage-ui/stores/modules/hearing'
 import { useProvidersStore } from '@proj-airi/stage-ui/stores/providers'
@@ -159,7 +160,7 @@ function chatProgressStamp() {
   // The creation card reports its own progress (preview generated, 3D model
   // at 17%, engine switching) by rewriting the message it lives in, so the
   // card's progress text is part of the fingerprint too.
-  const lastCreation = (last as { yxzCreation?: { status?: string, progressMsg?: string } } | undefined)?.yxzCreation
+  const lastCreation = findLastCreationCard()
 
   return [
     stream?.content?.length ?? 0,
@@ -169,10 +170,53 @@ function chatProgressStamp() {
     typeof lastContent === 'string' ? lastContent : '',
     lastCreation?.status ?? '',
     lastCreation?.progressMsg ?? '',
+    // The raw provider activity: a reasoning model writes nothing while it
+    // thinks, and the watchdog has to know that the turn is not dead.
+    chatStream.lastActivityAt,
   ].join('|')
 }
 
-async function sendMessage(text: string, providerId?: string) {
+/**
+ * The newest 宜小智 creation card in the conversation.
+ *
+ * The card is rewritten in place while a build runs, and that card does not
+ * have to be the last message: the visitor's confirmation ("就这个，开始生成
+ * 3D 模型吧") is appended after it.  Looking at the last message only would
+ * therefore miss the progress of a running build -- and the watchdog would
+ * mistake a healthy 3D build for a frozen chat.
+ */
+function findLastCreationCard() {
+  const list = messages.value
+  for (let index = list.length - 1; index >= 0; index--) {
+    const creation = (list[index] as { yxzCreation?: { status?: string, progressMsg?: string } } | undefined)?.yxzCreation
+    if (creation)
+      return creation
+  }
+  return undefined
+}
+
+/**
+ * True while the turn is busy with something that produces no chat text.
+ *
+ * A tool call (four preview images, a 3D build, a laser card) runs for
+ * minutes without a single new character in the conversation.  Treating
+ * that silence as a stall is what aborted healthy runs and produced the
+ * "请切换一个可用模型" message the visitor saw.
+ */
+function chatTurnIsBusy() {
+  const stream = chatStream.streamingMessage
+  const toolCalls = stream?.slices?.filter(slice => slice.type === 'tool-call').length ?? 0
+  const toolResults = stream?.tool_results?.length ?? 0
+  if (toolCalls > toolResults)
+    return true
+
+  // A preview or a build that is running rewrites its card with progress
+ // messages.
+  const status = findLastCreationCard()?.status
+  return status === 'model-building' || status === 'preview-building'
+}
+
+async function sendMessage(text: string, providerId?: string, model?: string) {
   if (sendInFlight.value) {
     console.warn('[ChatArea] Send ignored: a turn is already running')
     return
@@ -185,24 +229,32 @@ async function sendMessage(text: string, providerId?: string) {
       const providerConfig = providersStore.getProviderConfig(pid)
       await ingest(text, {
         chatProvider: await providersStore.getProviderInstance(pid) as ChatProvider,
-        model: activeModel.value,
+        // A backup channel speaks its own model: sending "MiniMax-M2.7" to
+        // DeepSeek (or the other way round) is exactly the "please pick
+        // another model" dead end this app is supposed to handle itself.
+        model: model || activeModel.value,
         providerConfig,
         providerId: pid,
       })
     })()
 
-    return await withChatSendTimeout(operation, () => {
-      cancelPendingSends(chatSession.activeSessionId)
-    }, chatProgressStamp)
+    return await withChatSendTimeout(
+      operation,
+      () => {
+        cancelPendingSends(chatSession.activeSessionId)
+      },
+      chatProgressStamp,
+      { isTurnActive: chatTurnIsBusy },
+    )
   }
   finally {
     sendInFlight.value = false
   }
 }
 
-// One automatic retry per preserved message: a non-timeout failure is retried
-// once through a backup chat provider before the recovery toast surfaces.
-// Students should not have to understand provider failures at all.
+// One automatic retry per preserved message: a failed turn is retried
+// through the next configured chat channel before the recovery toast
+// surfaces.  Students should not have to understand provider failures at all.
 let lastAutoRetriedText = ''
 
 // The failed turn already appended the visitor's question to the session.
@@ -228,18 +280,29 @@ async function recoverFromSendError(error: unknown) {
   const timedOut = error instanceof ChatSendTimeoutError
   const retryText = pendingAutoSendText.value.trim() || messageInput.value.trim()
 
-  if (!timedOut && retryText && retryText !== lastAutoRetriedText) {
-    // Only a provider the visitor (or the local seed) actually added may take
-    // over: the connectivity validator accepts any HTTP status below 500, so
-    // untouched providers would otherwise answer with 401 and fail the retry.
+  if (retryText && retryText !== lastAutoRetriedText) {
+    // The visitor never picks a model: the app walks the configured backup
+    // channels itself.  The explicit fallback list (provider + model) comes
+    // first; the remaining chat providers are the last resort.
+    const { candidates } = resolveFallbackCandidates({
+      providerId: activeProvider.value,
+      model: activeModel.value,
+      scope: 'consciousness',
+    })
     const configuredChat = providersStore.persistedChatProvidersMetadata ?? []
-    const backup = configuredChat.find(meta => meta.id !== activeProvider.value)
-    if (backup) {
+    const backups = [
+      ...candidates.map(candidate => ({ providerId: candidate.providerId, model: candidate.model })),
+      ...configuredChat
+        .filter(meta => meta.id !== activeProvider.value && !candidates.some(candidate => candidate.providerId === meta.id))
+        .map(meta => ({ providerId: meta.id, model: '' })),
+    ]
+
+    for (const backup of backups) {
       lastAutoRetriedText = retryText
-      toast.info(`自动切换到备用模型重试…`)
+      toast.info('正在换一条可用通道继续…')
       try {
         removeTrailingUserMessage(retryText)
-        await sendMessage(retryText, backup.id)
+        await sendMessage(retryText, backup.providerId, backup.model || undefined)
         pendingAutoSendText.value = ''
         messageInput.value = ''
         return
@@ -254,7 +317,7 @@ async function recoverFromSendError(error: unknown) {
   notifyYXZChatRecovery()
   toast.error(timedOut ? '连接等待时间较长' : '刚才没有连接成功', {
     description: timedOut
-      ? '我已经保留你的内容，请稍后重试或切换一个可用模型。'
+      ? '我已经保留你的内容，稍等一下再点发送就能继续。'
       : '我已经保留你的内容，请再试一次。',
   })
 
