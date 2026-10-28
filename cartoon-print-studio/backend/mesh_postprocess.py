@@ -477,6 +477,17 @@ def _seal_for_print(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     return mesh
 
 
+def seal_for_print(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Public wrapper around the hole-filling / normal-fixing pass.
+
+    Call it on a mesh that has already been merged and cleaned up, so the
+    boundary loops it closes are the real ones.
+    """
+    if mesh is None or len(mesh.vertices) < 8:
+        return mesh
+    return _seal_for_print(mesh)
+
+
 def clean_for_print(mesh: trimesh.Trimesh, *,
                     add_base: bool = True,
                     max_side_mm: float = PRINT_LENGTH_MM,

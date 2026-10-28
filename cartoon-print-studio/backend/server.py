@@ -1526,7 +1526,8 @@ def to_3d_tripo(req: ThreeDTripoReq):
     vertices = int(printable.get("vertices", 0))
     ext = printable.get("extents_mm", "0,0,0").split(",")
     extents_mm = [float(x) for x in ext] + [0.0] * (3 - len(ext))
-    pg.done(f"3D 模型已经做好啦（高 {extents_mm[1]:.0f}mm）")
+    # The model stands on the print bed, so its height is the Z extent.
+    pg.done(f"3D 模型已经做好啦（高 {extents_mm[2]:.0f}mm）")
     return {
         "session_id": req.session_id,
         "engine": "tripo3d",

@@ -1,9 +1,20 @@
 """Tripo3D OpenAPI client.
 
-Calls https://api.tripo3d.ai/v2/openapi:
-  - POST /upload            multipart PNG/JPG upload -> {"image_token": "..."}
-  - POST /task              create generation task
-  - GET  /task/{task_id}    poll status
+Tripo runs two regional platforms with different hosts and API versions:
+
+  v3  https://openapi.tripo3d.com/v3      (China / CN console)
+      POST /files                      multipart PNG/JPG upload -> file_token
+      POST /generation/image-to-model  create generation task
+      GET  /tasks/{task_id}            poll status
+      GET  /account/balance            credits
+
+  v2  https://api.tripo3d.ai/v2/openapi   (global console)
+      POST /upload, POST /task, GET /task/{task_id}, GET /user/balance
+
+An API key belongs to exactly one of the two platforms: a CN key answers
+401 on the global host and a global key answers 401 on the CN host. The
+client therefore tries the CN platform first and falls back to the global
+one, for every configured key.
 
 Task type for image_to_model. Output URLs expire in 5 minutes — we
 download GLB + PBR GLB immediately and convert to STL with trimesh.
@@ -13,9 +24,44 @@ from __future__ import annotations
 import os, re, time, json, base64, urllib.request, urllib.error, urllib.parse
 from typing import Optional, Dict, Any, List
 
-import numpy as np
+BASE_V3 = "https://openapi.tripo3d.com/v3"
+BASE_V2 = "https://api.tripo3d.ai/v2/openapi"
 
-BASE = "https://api.tripo3d.ai/v2/openapi"
+#: Which platform the current key belongs to. Flipped automatically when a
+#: key is rejected by the active host, and remembered for the next call.
+_api_version = "v3"
+BASE = BASE_V3
+
+
+def _base_for(version: str) -> str:
+    return BASE_V3 if version == "v3" else BASE_V2
+
+
+def _set_version(version: str) -> None:
+    """Remember which platform the configured keys live on."""
+    global _api_version, BASE
+    if version != _api_version:
+        print(f"[tripo] switching to {version} platform ({_base_for(version)})", flush=True)
+    _api_version = version
+    BASE = _base_for(version)
+
+
+def _path(version: str, name: str) -> str:
+    """Endpoint path for a logical call, per platform version."""
+    if version == "v3":
+        return {
+            "upload": "/files",
+            "create": "/generation/image-to-model",
+            "task": "/tasks/{task_id}",
+            "balance": "/account/balance",
+        }[name]
+    return {
+        "upload": "/upload",
+        "create": "/task",
+        "task": "/task/{task_id}",
+        "balance": "/user/balance",
+    }[name]
+
 
 # ---------------------------------------------------------------------------
 # Key loading (mirror api_image.py pattern: env override + key.txt fallback)
@@ -99,24 +145,24 @@ def _rotate_key() -> str:
 # A blocked or offline provider must not cost the user a minute of waiting
 # for every attempt. The first connection error puts the provider on a short
 # cooldown: later calls fail immediately with a readable message until a
-# probe succeeds again.
-_UNREACHABLE_UNTIL = 0.0
+# probe succeeds again. The cooldown is tracked per host: the CN platform
+# and the global one live in different networks, so one of them being
+# blocked must not silence the other.
+_UNREACHABLE_UNTIL: Dict[str, float] = {}
 _UNREACHABLE_COOLDOWN = 120.0
 
 
-def provider_unreachable() -> bool:
+def provider_unreachable(base: Optional[str] = None) -> bool:
     """True while the provider is known to be unreachable."""
-    return time.time() < _UNREACHABLE_UNTIL
+    return time.time() < _UNREACHABLE_UNTIL.get(base or BASE, 0.0)
 
 
-def _mark_unreachable() -> None:
-    global _UNREACHABLE_UNTIL
-    _UNREACHABLE_UNTIL = time.time() + _UNREACHABLE_COOLDOWN
+def _mark_unreachable(base: str) -> None:
+    _UNREACHABLE_UNTIL[base] = time.time() + _UNREACHABLE_COOLDOWN
 
 
-def _mark_reachable() -> None:
-    global _UNREACHABLE_UNTIL
-    _UNREACHABLE_UNTIL = 0.0
+def _mark_reachable(base: str) -> None:
+    _UNREACHABLE_UNTIL.pop(base, None)
 
 
 def _is_connection_failure(error: Exception) -> bool:
@@ -132,41 +178,60 @@ def _is_connection_failure(error: Exception) -> bool:
     return "timed out" in text or "timeout" in text or "connection" in text or "unreachable" in text
 
 
-def _request(method: str, path: str, *, body: Optional[bytes] = None,
+def _request(method: str, path_key: str, *, path_args: Optional[Dict[str, Any]] = None,
+             body: Optional[bytes] = None,
              headers: Optional[Dict[str, str]] = None,
-             timeout: float = 60.0, retries: int = 2, backoff: float = 1.5) -> Dict[str, Any]:
+             timeout: float = 60.0, retries: int = 2, backoff: float = 1.5,
+             body_for=None) -> Dict[str, Any]:
     """HTTP wrapper with retry+backoff for transient failures.
 
     Retries up to `retries` times on connection errors and HTTP 5xx.
     HTTP 4xx is not retried (caller asked for something invalid).
     Each attempt has `timeout` seconds; backoff doubles from `backoff`s.
+
+    `path_key` names a logical endpoint ("upload", "create", "task",
+    "balance"); every platform version maps it to its own path. A rejected
+    key (401) or a missing endpoint (404) moves on to the next
+    platform/key candidate without burning one of the caller's retries.
     """
-    if provider_unreachable():
-        raise RuntimeError(
-            "Tripo 当前网络不可达（刚刚连接失败），请检查网络或改用其他引擎"
-        )
-    url = BASE + path
     h = {}
     if headers:
         h.update(headers)
     last_err = None
     attempt = 0
-    # Every configured key gets one turn.  The order is worked out here and
-    # not taken from the shared "active key" index: the background balance
-    # probe rotates that index too, and a request that rotated into the key
-    # another thread had just parked would keep using the dead one.
-    candidates = [_current_key()]
+    # Candidate list = every (platform version, key) pair.  The order is
+    # worked out here and not taken from the shared "active key" index: the
+    # background balance probe rotates that index too, and a request that
+    # rotated into the key another thread had just parked would keep using
+    # the dead one.
+    keys = [_current_key()]
     for key in API_KEYS:
-        if key not in candidates:
-            candidates.append(key)
+        if key not in keys:
+            keys.append(key)
+    versions = ["v3", "v2"] if _api_version == "v3" else ["v2", "v3"]
+    candidates = [(v, k) for v in versions for k in keys]
     tried = 0
     while attempt <= retries:
-        h["Authorization"] = "Bearer " + candidates[min(tried, len(candidates) - 1)]
-        req = urllib.request.Request(url, data=body, method=method, headers=h)
+        version, key = candidates[min(tried, len(candidates) - 1)]
+        base = _base_for(version)
+        if provider_unreachable(base):
+            # This host is on cooldown — move on instead of waiting for it.
+            if tried + 1 < len(candidates):
+                tried += 1
+                continue
+            raise RuntimeError(
+                "Tripo 当前网络不可达（刚刚连接失败），请检查网络或改用其他引擎"
+            )
+        url = base + _path(version, path_key).format(**(path_args or {}))
+        payload = body_for(version) if body_for is not None else body
+        h["Authorization"] = "Bearer " + key
+        req = urllib.request.Request(url, data=payload, method=method, headers=h)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 raw = r.read().decode("utf-8", "ignore")
-            _mark_reachable()
+            _mark_reachable(base)
+            # This platform accepted the key: remember it for the next call.
+            _set_version(version)
             try:
                 return json.loads(raw)
             except Exception:
@@ -176,23 +241,29 @@ def _request(method: str, path: str, *, body: Optional[bytes] = None,
                 err = e.read().decode("utf-8", "ignore")
             except Exception:
                 err = str(e.reason)
-            # An invalid or expired key is recoverable: fall back to the next
-            # configured Tripo key and try the same call again. Switching keys
-            # must not consume one of the caller's retry attempts.
-            if e.code == 401 and tried + 1 < len(candidates):
+            # A key the host does not accept (401), or an endpoint the host
+            # does not have (404 — the two platforms use different paths),
+            # is recoverable: move to the next platform/key candidate.
+            # Switching must not consume one of the caller's retries.
+            if e.code in (401, 404) and tried + 1 < len(candidates):
                 tried += 1
-                print(f"[tripo] key rejected, trying {candidates[tried][:14]}...", flush=True)
+                nxt_v, nxt_k = candidates[tried]
+                print(
+                    f"[tripo] {version} rejected the key (HTTP {e.code}), "
+                    f"trying {nxt_v}/{nxt_k[:14]}...",
+                    flush=True,
+                )
                 continue
             if 400 <= e.code < 500:
-                raise RuntimeError(f"Tripo HTTP {e.code} on {method} {path}: {err[:400]}")
-            last_err = RuntimeError(f"Tripo HTTP {e.code} on {method} {path}: {err[:200]}")
+                raise RuntimeError(f"Tripo HTTP {e.code} on {method} {path_key}: {err[:400]}")
+            last_err = RuntimeError(f"Tripo HTTP {e.code} on {method} {path_key}: {err[:200]}")
             print(f"[tripo] attempt {attempt+1}/{retries+1} got {e.code}, retrying in {backoff:.1f}s", flush=True)
         except Exception as e:
-            last_err = RuntimeError(f"Tripo {method} {path} failed: {e}")
+            last_err = RuntimeError(f"Tripo {method} {path_key} failed: {e}")
             if _is_connection_failure(e):
-                _mark_unreachable()
+                _mark_unreachable(base)
             print(f"[tripo] attempt {attempt+1}/{retries+1} {type(e).__name__}: {str(e)[:160]}", flush=True)
-            if provider_unreachable():
+            if provider_unreachable(base):
                 break
         if attempt < retries:
             time.sleep(backoff * (attempt + 1))
@@ -230,15 +301,18 @@ def get_balance(timeout: float = 15.0, retries: int = 2) -> Dict[str, Any]:
     if not API_KEY:
         return {"ok": False, "error": "tripo3d key not configured"}
     try:
-        j = _request("GET", "/user/balance", timeout=timeout, retries=retries)
+        j = _request("GET", "balance", timeout=timeout, retries=retries)
         if j.get("code", 0) != 0:
-            return {"ok": False, "error": j.get("msg") or str(j)}
+            return {"ok": False, "error": j.get("message") or j.get("msg") or str(j)}
         data = j.get("data") or {}
+        balance = data.get("balance", 0)
+        frozen = data.get("frozen", 0)
         return {
             "ok": True,
-            "balance": int(data.get("balance", 0)),
-            "frozen": int(data.get("frozen", 0)),
-            "total": int(data.get("balance", 0)) + int(data.get("frozen", 0)),
+            "balance": int(float(balance or 0)),
+            "frozen": int(float(frozen or 0)),
+            "total": int(float(balance or 0)) + int(float(frozen or 0)),
+            "platform": _api_version,
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -250,6 +324,7 @@ def health() -> Dict[str, Any]:
         "key_preview": (API_KEY[:14] + "...") if API_KEY else None,
         "key_count": len(API_KEYS),
         "base": BASE,
+        "platform": _api_version,
     }
 
 
@@ -265,19 +340,22 @@ def upload_image(local_path: str) -> str:
     body, ctype = _multipart(os.path.basename(local_path), blob, mime=mime)
     # A blocked provider should fail in seconds, not minutes: the caller
     # falls back to a local engine as soon as this returns.
-    j = _request("POST", "/upload", body=body, headers={"Content-Type": ctype}, timeout=25.0, retries=1)
+    j = _request("POST", "upload", body=body, headers={"Content-Type": ctype}, timeout=25.0, retries=1)
     code = (j.get("code") if isinstance(j, dict) else None)
     data = j.get("data") if isinstance(j, dict) else None
-    if code not in (None, 0) and j.get("code", 0) != 0:
-        raise RuntimeError(f"Tripo upload non-zero code={code}: {j}")
+    if code not in (None, 0):
+        raise RuntimeError(
+            f"Tripo upload non-zero code={code}: "
+            f"{j.get('message') or j.get('msg') or j}"
+        )
     token = None
     if isinstance(data, dict):
-        token = data.get("image_token") or data.get("file_token")
+        token = data.get("file_token") or data.get("image_token")
     if not token:
         # older shape
         token = j.get("image_token")
     if not token:
-        raise RuntimeError(f"Tripo upload returned no image_token: {j}")
+        raise RuntimeError(f"Tripo upload returned no file token: {j}")
     return token
 
 
@@ -290,24 +368,42 @@ def create_image_to_model(image_token: str, *,
                           quad: bool = False,
                           auto_size: bool = False) -> str:
     """Create image_to_model task, return task_id."""
-    body: Dict[str, Any] = {
-        "type": "image_to_model",
-        "file": {"type": "png", "file_token": image_token},
-        "model_version": model_version,
-        "texture": texture,
-        "pbr": pbr,
-        "texture_quality": texture_quality,
-        "quad": quad,
-        "auto_size": auto_size,
-    }
-    if face_limit:
-        body["face_limit"] = face_limit
-    data = json.dumps(body).encode("utf-8")
-    j = _request("POST", "/task", body=data,
+    def _body_for(version: str) -> bytes:
+        if version == "v3":
+            body3: Dict[str, Any] = {
+                "input": image_token,
+                "model": model_version,
+                "texture": texture,
+                "pbr": pbr,
+                "texture_quality": texture_quality,
+                "quad": quad,
+                "auto_size": auto_size,
+            }
+            if face_limit:
+                body3["face_limit"] = face_limit
+            return json.dumps(body3).encode("utf-8")
+        body2: Dict[str, Any] = {
+            "type": "image_to_model",
+            "file": {"type": "png", "file_token": image_token},
+            "model_version": model_version,
+            "texture": texture,
+            "pbr": pbr,
+            "texture_quality": texture_quality,
+            "quad": quad,
+            "auto_size": auto_size,
+        }
+        if face_limit:
+            body2["face_limit"] = face_limit
+        return json.dumps(body2).encode("utf-8")
+
+    j = _request("POST", "create", body_for=_body_for,
                  headers={"Content-Type": "application/json"}, timeout=60.0)
     code = j.get("code", 0)
     if code != 0:
-        raise RuntimeError(f"Tripo create task failed code={code}: {j}")
+        raise RuntimeError(
+            f"Tripo create task failed code={code}: "
+            f"{j.get('message') or j.get('msg') or j}"
+        )
     payload = j.get("data") or {}
     tid = payload.get("task_id")
     if not tid:
@@ -316,9 +412,11 @@ def create_image_to_model(image_token: str, *,
 
 
 def get_task(task_id: str) -> Dict[str, Any]:
-    j = _request("GET", f"/task/{task_id}", timeout=30.0)
+    j = _request("GET", "task", path_args={"task_id": task_id}, timeout=30.0)
     if j.get("code", 0) != 0:
-        raise RuntimeError(f"Tripo get_task failed: {j}")
+        raise RuntimeError(
+            f"Tripo get_task failed: {j.get('message') or j.get('msg') or j}"
+        )
     return j.get("data") or {}
 
 
@@ -409,6 +507,8 @@ def download_outputs(task_result: Dict[str, Any], out_dir: str) -> Dict[str, str
     paths: Dict[str, str] = {}
     # primary outputs
     candidates = [
+        # v3 returns a single PBR model url
+        ("model_url", "model_pbr.glb"),
         ("pbr_model", "model_pbr.glb"),
         ("base_model", "model.glb"),
         ("model", "model.glb"),
@@ -470,65 +570,85 @@ def image_to_model(local_path: str, out_dir: str, *,
 # ---------------------------------------------------------------------------
 # Mesh post-processing for 3D printing
 # ---------------------------------------------------------------------------
-def _scale_to_print_size(mesh, target_height_mm: float = 70.0) -> Any:
-    """Scale mesh so the longest vertical extent equals target_height_mm."""
-    import trimesh
+def _height_scale(mesh, target_height_mm: float = 70.0) -> float:
+    """Factor that turns the model's standing height into the target height."""
     ext = mesh.extents
-    # The body is Z-up by the time it reaches the print bed, so the height
-    # is the Z extent. The old code measured Y, which was the height of the
-    # raw cloud model and no longer the height of the rotated one.
-    if ext[2] <= 0:
-        return mesh
-    scale = target_height_mm / ext[2]
-    mesh.apply_scale(scale)
-    # Re-center on print bed: bottom touches z=0
+    if len(ext) < 3:
+        return 0.0
+    height = float(ext[2])
+    target = float(target_height_mm or 0)
+    if target > 0 and height > 0:
+        return target / height
+    largest = float(max(ext))
+    if largest <= 0:
+        return 0.0
+    return 100.0 / largest
+
+
+def _place_on_bed(mesh) -> Any:
+    """Move the model so its lowest point sits exactly on z=0."""
     bounds = mesh.bounds
-    mesh.apply_translation([0, 0, -bounds[0][2]])
+    if float(bounds[0][2]) < 0:
+        mesh.apply_translation([0, 0, -float(bounds[0][2])])
     return mesh
 
 
-def _prepare_body(mesh, target_height_mm: float = 70.0) -> Any:
-    """Turn the cloud model into one body that stands on the print bed.
+def _build_body(mesh) -> Any:
+    """Turn the cloud model into one solid body for the slicer.
 
     Tripo hands the model back standing along Y and, like the other cloud
     engines, as a set of separate shells.  The old cleanup kept the shell
     with the most triangles and dropped everything else, so a figure that
     came back as head, body, arms and a base ended up as one of them.
+
+    The shells overlap each other and none of them is watertight on its
+    own, so the printable body is rebuilt from their volume: one closed
+    surface the slicer can cut.
     """
-    import trimesh
     import mesh_postprocess
+    solid = mesh_postprocess.solidify_mesh(mesh, pitch_mm=0.5)
+    if not len(solid.faces):
+        # The voxel pass failed - fall back to the shells themselves, closed
+        # up as well as the geometry allows.
+        solid = mesh_postprocess.seal_for_print(mesh)
+    return solid
+
+
+def _build_viewer(mesh) -> Any:
+    """The browser model: the painted shells, decimated for a fast preview.
+
+    It is the same figurine the slicer receives, only lighter: the shells
+    keep the paint and the detail the cloud engine gave us, while the
+    printable copy is the merged solid body.
+    """
+    import mesh_postprocess
+    return mesh_postprocess.optimize_for_web(mesh, target_faces=120000, texture_size=2048)
+
+
+def _prepare_source(mesh) -> Any:
+    """Bring a raw cloud model into the print scale and clean it up.
+
+    Works on a copy: the caller needs the same source twice, once for the
+    painted preview and once for the printable body.
+    """
+    import mesh_postprocess
+    mesh = mesh.copy()
     # Tripo's model stands along Y; the print bed wants Z.
     mesh = mesh_postprocess.align_up_axis(mesh, source_up="y")
+    # The cloud model arrives in its own units (about a metre tall).  The
+    # voxel pass that rebuilds a solid body works in millimetres, so the
+    # model is brought to the print scale first - otherwise the grid is
+    # smaller than the model and the result degenerates into a box.
+    largest = float(max(mesh.extents))
+    if largest > 0:
+        mesh.apply_scale(mesh_postprocess.PRINT_LENGTH_MM / largest)
     # Drop the loose fragments, keep every real body of the figurine.
     mesh = mesh_postprocess.keep_significant_shells(mesh)
-    if mesh_postprocess.component_count(mesh) > 1:
-        # Separate shells overlap each other and none of them is watertight,
-        # so they are rebuilt into one solid body.
-        mesh = mesh_postprocess.solidify_mesh(mesh, pitch_mm=0.5)
-    # try to fill holes for nicer slicing
-    try:
-        mesh.fill_holes()
-    except Exception:
-        pass
-    # remove degenerate faces
-    mesh.merge_vertices()
+    # merge_tex keeps the UV coordinates, so the paint survives the cleanup
+    mesh.merge_vertices(merge_tex=True)
     mesh.update_faces(mesh.unique_faces())
     mesh.remove_unreferenced_vertices()
-    # scale to print size and place on plate
-    mesh = _scale_to_print_size(mesh, target_height_mm)
     return mesh
-
-
-def _prepare_viewer(mesh, target_height_mm: float = 70.0) -> Any:
-    """The same body as _prepare_body, but still painted for the browser."""
-    import mesh_postprocess
-    mesh = mesh_postprocess.align_up_axis(mesh, source_up="y")
-    mesh = mesh_postprocess.keep_significant_shells(mesh)
-    if mesh_postprocess.component_count(mesh) > 1:
-        solid = mesh_postprocess.solidify_mesh(mesh, pitch_mm=0.5)
-        if len(solid.faces):
-            mesh = mesh_postprocess.transfer_texture(mesh, solid)
-    return _scale_to_print_size(mesh, target_height_mm)
 
 
 def process_for_print(pbr_glb_path: str, out_dir: str, *,
@@ -544,19 +664,22 @@ def process_for_print(pbr_glb_path: str, out_dir: str, *,
     import trimesh
     os.makedirs(out_dir, exist_ok=True)
     mesh = trimesh.load(pbr_glb_path, force="mesh", process=False)
-    # The browser model and the print model are the same body, so the
-    # preview can never show something different from what gets printed.
-    viewer = _prepare_viewer(mesh, target_height_mm=target_height_mm)
+    # The browser model and the print model are the same figurine at the
+    # same size, so the preview can never show something different from
+    # what gets printed.
+    prepared = _prepare_source(mesh)
+    viewer = _build_viewer(prepared.copy())
+    printable = _build_body(prepared)
+    # One scale for both, taken from the printable body: the preview must
+    # show the model at exactly the size that goes to the printer.
+    scale = _height_scale(printable, target_height_mm)
+    if scale > 0:
+        printable.apply_scale(scale)
+        viewer.apply_scale(scale)
+    printable = _place_on_bed(printable)
+    viewer = _place_on_bed(viewer)
     # The printable copy carries geometry only: the STL/OBJ formats have no
     # room for a texture anyway.
-    printable = trimesh.Trimesh(
-        vertices=np.asarray(viewer.vertices, dtype=np.float64),
-        faces=np.asarray(viewer.faces, dtype=np.int64),
-        process=False,
-    )
-    printable.merge_vertices()
-    printable.update_faces(printable.unique_faces())
-    printable.remove_unreferenced_vertices()
 
     paths: Dict[str, str] = {}
     stl_path = os.path.join(out_dir, "mesh.stl")
