@@ -78,6 +78,10 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File start-all.ps1
 
 - 前后端**并行**启动、并**并行**等待就绪；已在运行时直接复用，不重复拉起。
 - 端口被占用自动顺延，不会误杀其它进程。
+- 本地语音包 **Voicebox**（TTS 第二级）会一起拉起来：找到就启动、找不到就跳过
+  （跳过时宜小智退回 Edge 免费语音，说话不受影响，只是不是挑好的那一把音色）。
+  它的位置按 `YXZ_VOICEBOX_ROOT` → 仓库同级 `voicebox/` → `C:\kaifa_boot\voicebox`
+  → `%USERPROFILE%\kaifa_boot\voicebox` 的顺序找。
 - 自动打开浏览器。停止用 `stop-all.ps1`（或双击后 Ctrl+C）。
 
 常用参数：
@@ -85,6 +89,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File start-all.ps1
 ```powershell
 pwsh -File start-all.ps1 -NoBrowser      # 不自动开浏览器
 pwsh -File start-all.ps1 -NoBackend      # 只起前端
+pwsh -File start-all.ps1 -NoVoicebox     # 不起本地语音包
 pwsh -File start-all.ps1 -BackendPort 8100
 ```
 
@@ -98,7 +103,7 @@ pwsh -File start-all.ps1 -BackendPort 8100
 | `INSTALL-FIRST-TIME.bat` | 新机器：安装 + 启动（双击） |
 | `install-new-pc.ps1` | 装依赖（uv / 镜像 / 断点续装 / 模型权重） |
 | `fetch-models.ps1` | 只下 AI 模型权重（SD 1.5 / Hunyuan3D / TripoSR） |
-| `start-all.ps1` | 起前后端 + 就绪探测 + 自动开浏览器 |
+| `start-all.ps1` | 起前后端 + WS 通道 + 本地语音包，就绪探测 + 自动开浏览器 |
 | `stop-all.ps1` | 停掉前后端 |
 | `lib-common.ps1` | 共用函数（端口探测 / 镜像 / 断点续传下载 / uv 封装） |
 

@@ -18,10 +18,12 @@ param(
     [int]$BackendPort = 8000,
     [int]$FrontendPort = 5199,
     [int]$RuntimePort = 6121,
+    [int]$VoiceboxPort = 17493,
     [switch]$NoBrowser,
     [switch]$NoFrontend,
     [switch]$NoBackend,
     [switch]$NoServerRuntime,
+    [switch]$NoVoicebox,
     [switch]$SkipInstall
 )
 
@@ -175,6 +177,52 @@ if ($NoServerRuntime) {
     Ok "server-runtime 进程 PID=$($runtimeProc.Id)"
 }
 
+# ---- 3.6) 启动本地语音包 Voicebox -----------------------------------
+# TTS 的第二级是本机的 Voicebox（Qwen CustomVoice）。它是独立仓库，
+# 现场如果没起来，宜小智会退回 Edge 免费语音 —— 能说话，但音色不是
+# 挑好的那一把。所以这里顺手拉起来：找到了就启动，没找到就跳过。
+$voiceboxProc = $null
+$vbReady = $NoVoicebox
+if ($NoVoicebox) {
+    Step "已按参数跳过本地语音包 Voicebox"
+} elseif (Test-Port $VoiceboxPort) {
+    $vbReady = $true
+    Ok "本地语音包已在运行（: $VoiceboxPort），直接复用"
+} else {
+    $vbCandidates = @(
+        $env:YXZ_VOICEBOX_ROOT,
+        (Join-Path (Split-Path -Parent $root) 'voicebox'),
+        'C:\kaifa_boot\voicebox',
+        (Join-Path $env:USERPROFILE 'kaifa_boot\voicebox')
+    ) | Where-Object { $_ }
+    $vbRoot = $vbCandidates | Where-Object { Test-Path -LiteralPath (Join-Path $_ '.venv\Scripts\python.exe') } | Select-Object -First 1
+    if (-not $vbRoot) {
+        Warn "没找到本地语音包 Voicebox，跳过（宜小智会退回 Edge 免费语音）"
+    } else {
+        $vbPy = Join-Path $vbRoot '.venv\Scripts\python.exe'
+        $out = Join-Path $run "voicebox-$VoiceboxPort.out.log"
+        $err = Join-Path $run "voicebox-$VoiceboxPort.err.log"
+        $prevCors = $env:VOICEBOX_CORS_ORIGINS
+        # The frontend proxies /voicebox-api to this port, so the browser
+        # never talks to it cross-origin; the allowed origins are only for
+        # somebody opening Voicebox's own playground page.
+        $env:VOICEBOX_CORS_ORIGINS = "http://127.0.0.1:$FrontendPort,http://localhost:$FrontendPort"
+        Step "启动本地语音包 Voicebox (: $VoiceboxPort) ..."
+        try {
+            $voiceboxProc = Start-Process -FilePath $vbPy `
+                -ArgumentList @('-m','backend.main','--host','127.0.0.1','--port',"$VoiceboxPort") `
+                -WorkingDirectory $vbRoot -RedirectStandardOutput $out -RedirectStandardError $err `
+                -WindowStyle Hidden -PassThru
+            Ok "Voicebox 进程 PID=$($voiceboxProc.Id)"
+        } catch {
+            Warn "Voicebox 启动失败：$($_.Exception.Message)"
+        } finally {
+            if ($null -eq $prevCors) { Remove-Item Env:VOICEBOX_CORS_ORIGINS -ErrorAction SilentlyContinue }
+            else { $env:VOICEBOX_CORS_ORIGINS = $prevCors }
+        }
+    }
+}
+
 # ---- 4) 并行等待就绪（一个循环同时盯两个）---------------------------
 $beDeadline = (Get-Date).AddSeconds(120)
 $feDeadline = (Get-Date).AddSeconds(180)
@@ -229,6 +277,22 @@ if (-not $NoServerRuntime -and -not $rtReady) {
         if (Test-Path -LiteralPath $e) { Get-Content -LiteralPath $e -Tail 15 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }
     }
 }
+if (-not $NoVoicebox -and -not $vbReady) {
+    Step "等待本地语音包就绪 ..."
+    $vbDeadline = (Get-Date).AddSeconds(180)
+    while ((Get-Date) -lt $vbDeadline) {
+        if ($voiceboxProc -and $voiceboxProc.HasExited) { break }
+        if (Test-HttpOk "http://127.0.0.1:$VoiceboxPort/health") { $vbReady = $true; break }
+        Start-Sleep -Milliseconds 800
+    }
+    if ($vbReady) { Ok "本地语音包就绪 http://127.0.0.1:$VoiceboxPort" }
+    else {
+        # 不阻断：TTS 还有 MiniMax 和 Edge 两级可以接着用。
+        Warn "本地语音包未就绪（宜小智会退回 Edge 免费语音）"
+        $e = Join-Path $run "voicebox-$VoiceboxPort.err.log"
+        if (Test-Path -LiteralPath $e) { Get-Content -LiteralPath $e -Tail 12 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }
+    }
+}
 
 # ---- 5) 汇总 + 自动开浏览器 -----------------------------------------
 Write-Host ""
@@ -243,6 +307,9 @@ if (-not $NoFrontend) {
 }
 if (-not $NoServerRuntime) {
     if ($rtReady) { Ok "WS通道  ws://127.0.0.1:$RuntimePort/ws" } else { Warn "WS通道  未就绪 (: $RuntimePort)" }
+}
+if (-not $NoVoicebox) {
+    if ($vbReady) { Ok "本地语音  http://127.0.0.1:$VoiceboxPort" } else { Warn "本地语音  未就绪 (: $VoiceboxPort)" }
 }
 $elapsed = [int]((Get-Date) - $startAt).TotalSeconds
 Say  "  用时 ${elapsed}s" 'DarkGray'
