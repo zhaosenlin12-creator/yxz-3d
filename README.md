@@ -295,3 +295,35 @@ copy airi\apps\stage-web\public\provider-seed.json.example airi\apps\stage-web\p
 
 > 也可以用环境变量覆盖：`MINIMAX_API_KEY`、`DEEPSEEK_API_KEY`、`TRIPO3D_KEY`、
 > `HUNYUAN3D_SECRET_ID`、`HUNYUAN3D_SECRET_KEY`。
+
+### 语音（TTS）用哪一条
+
+语音是一条**降级链**，不是只有浏览器兜底：
+
+1. **本地语音包**（Voicebox / Qwen CustomVoice，默认 `http://127.0.0.1:17493`）——
+   不走网络，最稳，排在最前面。声音档案从 `/profiles` 拉，用户在设置页选的那一个
+   记在 `settings/speech/voice`。
+2. **MiniMax 云端**（`speech-2.5-hd` / `female-shaonv`）——本地服务没起时自动接管。
+3. **浏览器语音**（`browser-web-speech-api`）——最后兜底。
+
+`provider-seed.json` 里 `speech` 段就是这条链：
+
+```json
+{
+  "speech": {
+    "provider": "voicebox-local",
+    "model": "qwen-custom-voice-1.7B",
+    "fallbacks": [
+      { "providerId": "minimax-audio-speech", "model": "speech-2.5-hd", "voice": "female-shaonv" }
+    ]
+  }
+}
+```
+
+改完 `keys.txt` 后重新生成种子即可同步：
+
+```powershell
+cartoon-print-studio\ai\forge-webui\venv\Scripts\python.exe cartoon-print-studio\scripts\seed_provider_seed.py
+```
+
+连不上的服务会进入 60 秒冷却，不会每个分片都去试一次，也不会在控制台刷屏。
