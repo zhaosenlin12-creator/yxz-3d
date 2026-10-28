@@ -37,7 +37,7 @@ const emit = defineEmits<{
 const copied = ref(false)
 const retrying = ref(false)
 const retryError = ref('')
-const modelPreviewUrl = computed(() => props.modelUrl ? yxzPreviewPageUrl(props.modelUrl) : '')
+const modelPreviewUrl = computed(() => props.modelUrl ? yxzPreviewPageUrl(props.modelUrl, props.sessionId) : '')
 
 const gallery = computed<YXZCardPreviewItem[]>(() => {
   const items = props.previews?.length ? props.previews : [{ src: props.previewSrc, caption: props.caption }]

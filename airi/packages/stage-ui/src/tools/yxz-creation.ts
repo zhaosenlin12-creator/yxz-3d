@@ -312,7 +312,14 @@ export async function createYXZCreationTools() {
           })
         }
         catch (error) {
-          throw new Error(error instanceof Error ? error.message : '激光切割卡片生成失败，请稍后重试')
+          // A failing tool must never take the whole turn down with it.
+          // The model gets a structured result and can keep talking to the
+          // visitor instead of the chat freezing mid-sentence.
+          const reason = error instanceof Error ? error.message : '未知错误'
+          return {
+            status: 'laser-card-failed',
+            message: `激光切割卡片这次没能生成出来（${reason}）。请告诉用户稍后可以再试一次，或者先确认作品预览图是否已经生成。`,
+          }
         }
         appendLaserCardCard({
           sessionId: result.sessionId,
@@ -350,28 +357,39 @@ export async function createYXZCreationTools() {
         const abortSignal = options?.abortSignal
         const memory = useYXZRequirementMemory()
         memory.update({ description, constraints })
-        const result = await createYXZPreview({
-          prompt: buildYXZPreviewPrompt(description, constraints),
-          n: 4,
-          signal: abortSignal,
-        })
-        const item = result.previews[0]
-        if (!item)
-          throw new Error('后台没有返回预览图')
-        const toCard = (it: typeof item) => ({
-          index: it.index,
-          src: previewImageSrc(it.path ? { ...it, b64: undefined } : it),
-          caption: it.caption || '产品预览',
-        })
-        const preview = toCard(item)
-        const previews = result.previews.map(toCard)
-        appendCreationCard({ sessionId: result.sessionId, description, options: constraints, preview, previews, status: 'preview' })
-        return {
-          status: 'preview-ready',
-          sessionId: result.sessionId,
-          imageIndex: preview.index,
-          previewUrl: preview.src,
-          message: '预览图已在聊天中展示。请询问用户是否采用并生成 3D 模型。',
+        try {
+          const result = await createYXZPreview({
+            prompt: buildYXZPreviewPrompt(description, constraints),
+            n: 4,
+            signal: abortSignal,
+          })
+          const item = result.previews[0]
+          if (!item)
+            throw new Error('后台没有返回预览图')
+          const toCard = (it: typeof item) => ({
+            index: it.index,
+            src: previewImageSrc(it.path ? { ...it, b64: undefined } : it),
+            caption: it.caption || '产品预览',
+          })
+          const preview = toCard(item)
+          const previews = result.previews.map(toCard)
+          appendCreationCard({ sessionId: result.sessionId, description, options: constraints, preview, previews, status: 'preview' })
+          return {
+            status: 'preview-ready',
+            sessionId: result.sessionId,
+            imageIndex: preview.index,
+            previewUrl: preview.src,
+            message: '预览图已在聊天中展示。请询问用户是否采用并生成 3D 模型。',
+          }
+        }
+        catch (error) {
+          // Never let a failed preview kill the conversation.  The visitor
+          // gets a reply and a way forward instead of a dead chat turn.
+          const reason = error instanceof Error ? error.message : '未知错误'
+          return {
+            status: 'preview-failed',
+            message: `预览图这次没能生成出来（${reason}）。请把情况告诉用户，并说明可以说「再试一次」重新出图，或者补充一下产品细节（用途、造型、尺寸、颜色）后再试。`,
+          }
         }
       },
     }),
@@ -384,37 +402,46 @@ export async function createYXZCreationTools() {
       }).strict(),
       execute: async ({ sessionId, imageIndex }, options) => {
         const abortSignal = options?.abortSignal
-        const sessions = useChatSessionStore()
-        const messages = sessions.getSessionMessages(sessions.activeSessionId)
-        const card = [...messages].reverse().find((message): message is ChatAssistantMessage & { createdAt?: number } => message.role === 'assistant'
-          && message.yxzCreation?.kind === 'yxz-creation'
-          && message.yxzCreation.status === 'preview'
-          && message.yxzCreation.preview.index === imageIndex)
-        const creation = card?.yxzCreation
-        if (!creation)
-          throw new Error('请先在当前对话生成并确认预览图')
-        const latestUser = [...messages].reverse().find(message => message.role === 'user')
-        const userText = typeof latestUser?.content === 'string' ? latestUser.content : ''
-        const cardCreatedAt = card.createdAt ?? 0
-        if (!latestUser || (latestUser.createdAt ?? 0) <= cardCreatedAt)
-          throw new Error('请先查看预览，再回复是否制作 3D 模型')
-        if (!isYXZModelConfirmationText(userText))
-          throw new Error('请先让用户明确确认制作 3D 模型')
-        if (!creation.sessionId || creation.sessionId !== sessionId)
-          throw new Error('预览会话已失效，请重新生成预览')
-        const result = await runYXZModelBuild({
-          sessionId: creation.sessionId,
-          description: creation.description,
-          options: creation.options,
-          preview: creation.preview,
-          imageIndex,
-          signal: abortSignal,
-        })
-        return {
-          status: 'model-ready',
-          glbUrl: result.glbUrl,
-          stlUrl: result.stlUrl,
-          message: '3D 模型已在聊天卡片中提供预览和下载。打印机尚未自动启动。',
+        try {
+          const sessions = useChatSessionStore()
+          const messages = sessions.getSessionMessages(sessions.activeSessionId)
+          const card = [...messages].reverse().find((message): message is ChatAssistantMessage & { createdAt?: number } => message.role === 'assistant'
+            && message.yxzCreation?.kind === 'yxz-creation'
+            && message.yxzCreation.status === 'preview'
+            && message.yxzCreation.preview.index === imageIndex)
+          const creation = card?.yxzCreation
+          if (!creation)
+            throw new Error('请先在当前对话生成并确认预览图')
+          const latestUser = [...messages].reverse().find(message => message.role === 'user')
+          const userText = typeof latestUser?.content === 'string' ? latestUser.content : ''
+          const cardCreatedAt = card.createdAt ?? 0
+          if (!latestUser || (latestUser.createdAt ?? 0) <= cardCreatedAt)
+            throw new Error('请先查看预览，再回复是否制作 3D 模型')
+          if (!isYXZModelConfirmationText(userText))
+            throw new Error('请先让用户明确确认制作 3D 模型')
+          if (!creation.sessionId || creation.sessionId !== sessionId)
+            throw new Error('预览会话已失效，请重新生成预览')
+          const result = await runYXZModelBuild({
+            sessionId: creation.sessionId,
+            description: creation.description,
+            options: creation.options,
+            preview: creation.preview,
+            imageIndex,
+            signal: abortSignal,
+          })
+          return {
+            status: 'model-ready',
+            glbUrl: result.glbUrl,
+            stlUrl: result.stlUrl,
+            message: '3D 模型已在聊天卡片中提供预览和下载。打印机尚未自动启动。',
+          }
+        }
+        catch (error) {
+          const reason = error instanceof Error ? error.message : '未知错误'
+          return {
+            status: 'model-failed',
+            message: `3D 模型这次没能做出来（${reason}）。请把情况告诉用户，并说明可以稍后重试。`,
+          }
         }
       },
     }),

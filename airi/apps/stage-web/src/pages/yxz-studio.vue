@@ -286,11 +286,11 @@ async function loadSessionPreview() {
 }
 
 function presetPreviewUrl(p: YXZPresetModel) {
-  return `/yxz-preview?model=${encodeURIComponent(`${getYXZPrintApiBase()}${p.glbUrl}`)}&up=${encodeURIComponent(p.upAxis ?? 'z')}`
+  return `/yxz-preview?model=${encodeURIComponent(`${getYXZPrintApiBase()}${p.glbUrl}`)}&up=${encodeURIComponent(p.upAxis ?? 'z')}&preset=${encodeURIComponent(p.id)}`
 }
 
 function partPreviewUrl(part: YXZModelPart) {
-  return `/yxz-preview?model=${encodeURIComponent(`${getYXZPrintApiBase()}${part.glb_url}`)}&up=z`
+  return `/yxz-preview?model=${encodeURIComponent(`${getYXZPrintApiBase()}${part.glb_url}`)}&up=z&sid=${encodeURIComponent(sessionId)}`
 }
 
 function presetStlDownload(p: YXZPresetModel) {
@@ -345,7 +345,7 @@ async function startModelBuild() {
   }
 }
 
-const modelPreviewUrl = computed(() => model.value ? `/yxz-preview?model=${encodeURIComponent(model.value.glbUrl)}&up=${encodeURIComponent(model.value.upAxis)}` : '')
+const modelPreviewUrl = computed(() => model.value ? `/yxz-preview?model=${encodeURIComponent(model.value.glbUrl)}&up=${encodeURIComponent(model.value.upAxis)}&sid=${encodeURIComponent(sessionId)}` : '')
 const progressPercent = computed(() => progress.value?.percent ?? 0)
 const origin = typeof window !== 'undefined' ? window.location.origin : ''
 

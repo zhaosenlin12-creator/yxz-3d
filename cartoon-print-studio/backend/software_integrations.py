@@ -60,6 +60,20 @@ def load_overrides() -> dict[str, str]:
     }
 
 
+# A shell is never a slicer.  Saving one as the "path" of a tool makes the
+# button open a console window instead of the program the visitor asked
+# for, and the auto-detected installation is then hidden behind it.
+_SHELL_EXECUTABLES = {"cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe", "explorer.exe"}
+
+
+def is_plausible_executable(executable: str) -> bool:
+    """Reject paths that can never be a design / slicer / laser program."""
+    name = os.path.basename(str(executable or "").strip().strip('"').replace("/", os.sep)).lower()
+    if not name:
+        return False
+    return name not in _SHELL_EXECUTABLES
+
+
 def save_override(tool_id: str, executable: str) -> dict[str, str]:
     """Persist a user-corrected executable path and return the new mapping."""
     overrides = load_overrides()
@@ -284,6 +298,11 @@ def detect_software() -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = []
     for tool_id, name, kind, candidates, formats, verified in definitions:
         override = overrides.get(tool_id, "")
+        if override and not is_plausible_executable(override):
+            # A shell was saved here by mistake; fall back to the real
+            # installation instead of hiding it behind the bad path.
+            print(f"[software] ignoring implausible override for {tool_id}: {override}", flush=True)
+            override = ""
         if override:
             path = override if os.path.isfile(override) else None
         else:

@@ -18,7 +18,10 @@ export interface VisionInferenceInput {
 }
 
 // TODO: this should be configurable
-const VISION_INFERENCE_TIMEOUT_MS = 60_000
+//
+// Exported so the test can follow the value instead of hard-coding a
+// number that silently goes stale when the timeout is tuned.
+export const VISION_INFERENCE_TIMEOUT_MS = 60_000
 
 function parseDataUrl(dataUrl: string) {
   if (!dataUrl.startsWith('data:'))

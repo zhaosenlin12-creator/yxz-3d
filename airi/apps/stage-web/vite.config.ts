@@ -46,6 +46,37 @@ function hasFlagEnableMkcert(): boolean {
 
 export default defineConfig({
   optimizeDeps: {
+    // These heavy 3D / Live2D packages are only reachable through lazy
+    // routes (the 3D preview page, the avatar scene).  Without this list
+    // Vite only discovers them when the first visitor opens that page,
+    // re-optimizes on the fly and answers the already-sent requests with
+    // "504 Outdated Optimize Dep" -- the page then fails to load at all
+    // and the visitor gets a blank screen.  Pre-bundling them at startup
+    // removes that first-visit failure completely.
+    include: [
+      'three',
+      'three/src/math/MathUtils.js',
+      // NOTE: "three/addons/*" and "three/examples/jsm/*" point at the very
+      // same files, but Vite keys its pre-bundled chunks by the import
+      // specifier.  The sources below use both spellings, so both have to
+      // be listed or one of them is discovered late and triggers a
+      // re-optimization.
+      'three/addons/geometries/RoundedBoxGeometry.js',
+      'three/addons/loaders/DRACOLoader.js',
+      'three/addons/loaders/GLTFLoader.js',
+      'three/addons/postprocessing/EffectComposer.js',
+      'three/addons/postprocessing/OutputPass.js',
+      'three/addons/postprocessing/RenderPass.js',
+      'three/addons/postprocessing/ShaderPass.js',
+      'three/addons/postprocessing/UnrealBloomPass.js',
+      'three/examples/jsm/controls/OrbitControls.js',
+      'three/examples/jsm/lights/LightProbeGenerator.js',
+      'three/examples/jsm/loaders/RGBELoader.js',
+      '@tresjs/post-processing',
+      'postprocessing',
+      'pixi-filters',
+      'colorjs.io',
+    ],
     exclude: [
       // Internal Packages
       '@proj-airi/stage-ui/*',

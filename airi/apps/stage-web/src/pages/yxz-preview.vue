@@ -2,12 +2,14 @@
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
 import * as THREE from 'three'
 
-import { resolveYXZModelUrl } from '@proj-airi/stage-ui/composables/use-yxz-print-preview'
+import { detectYXZLocalSoftware, openYXZExportInSoftware, resolveYXZModelUrl } from '@proj-airi/stage-ui/composables/use-yxz-print-preview'
+
+import type { YXZLocalSoftware } from '@proj-airi/stage-ui/composables/use-yxz-print-preview'
 
 const route = useRoute()
 const canvas = ref<HTMLCanvasElement>()
@@ -17,6 +19,16 @@ const errorMessage = ref('')
 // relative path has to be resolved against the backend or the loader gets
 // the app's own HTML page instead of a GLB.
 const modelUrl = resolveYXZModelUrl(String(route.query.model ?? ''))
+// The session the model belongs to.  With it the page can hand the mesh to
+// the slicer on this machine; without it all we can offer is a download.
+const sessionId = String(route.query.sid ?? '').trim()
+// A preset model has no session; it lives in the project's preset folder.
+const presetName = String(route.query.preset ?? '').trim()
+const localSoftware = ref<YXZLocalSoftware[]>([])
+const softwareLoading = ref(false)
+const openingSoftwareId = ref<string>()
+const softwareMessage = ref('')
+const canOpenInSoftware = computed(() => Boolean(sessionId || presetName))
 // Which axis of the file is the height. The print pipeline scales the Z
 // axis to the requested height, so a finished model is Z-up; a raw model
 // from the 3D service can differ, and the caller knows which it is.
@@ -172,6 +184,61 @@ onBeforeUnmount(() => {
   controls?.dispose()
   renderer?.dispose()
 })
+
+/**
+ * Look for slicers / editors installed on this machine.
+ *
+ * The visitor stands in front of the screen, so the model has to be able
+ * to leave the browser: the button says "交给软件打印" and hands the mesh
+ * to whichever slicer is installed.
+ */
+async function detectLocalSoftware() {
+  if (softwareLoading.value)
+    return
+  softwareLoading.value = true
+  softwareMessage.value = ''
+  try {
+    localSoftware.value = await detectYXZLocalSoftware()
+    const count = localSoftware.value.filter(tool => tool.available).length
+    softwareMessage.value = count ? `已找到 ${count} 个可用软件` : '暂未找到已安装的软件'
+  }
+  catch (error) {
+    softwareMessage.value = error instanceof Error ? error.message : '软件检测失败，请确认打印服务已启动'
+  }
+  finally {
+    softwareLoading.value = false
+  }
+}
+
+async function openInLocalSoftware(tool: YXZLocalSoftware) {
+  if (!canOpenInSoftware.value || openingSoftwareId.value)
+    return
+  openingSoftwareId.value = tool.id
+  softwareMessage.value = ''
+  try {
+    const resp = await openYXZExportInSoftware({
+      softwareId: tool.id,
+      sessionId: sessionId || undefined,
+      format: 'stl',
+      ...(presetName ? { path: `presets/models/${presetName}/model.stl` } : {}),
+    })
+    const data = await resp.json().catch(() => ({})) as { message?: string }
+    softwareMessage.value = data?.message || `已打开 ${tool.name}，请在软件里确认参数后再打印`
+  }
+  catch (error) {
+    softwareMessage.value = error instanceof Error ? error.message : '打开软件失败'
+  }
+  finally {
+    openingSoftwareId.value = undefined
+  }
+}
+
+// Auto-detect once the model is on screen: the visitor should not have to
+// hunt for a button to find out what they can print with.
+onMounted(() => {
+  if (canOpenInSoftware.value)
+    void detectLocalSoftware()
+})
 </script>
 
 <template>
@@ -181,8 +248,41 @@ onBeforeUnmount(() => {
         <span>宜小智</span>
         <strong>3D 模型预览</strong>
       </div>
-      <a v-if="modelUrl" :href="`${modelUrl}${modelUrl.includes('?') ? '&' : '?'}download=1`" download>下载模型</a>
+      <div class="yxz-preview-actions">
+        <button
+          v-if="canOpenInSoftware"
+          type="button"
+          class="yxz-preview-button"
+          :disabled="softwareLoading"
+          @click="detectLocalSoftware"
+        >
+          {{ softwareLoading ? '检测中…' : '检测本机软件' }}
+        </button>
+        <a
+          v-if="modelUrl"
+          class="yxz-preview-button ghost"
+          :href="`${modelUrl}${modelUrl.includes('?') ? '&' : '?'}download=1`"
+          download
+        >
+          下载模型
+        </a>
+      </div>
     </header>
+    <div v-if="canOpenInSoftware" class="yxz-preview-software">
+      <div v-if="localSoftware.some(tool => tool.available)" class="yxz-preview-software-list" aria-label="本机软件">
+        <button
+          v-for="tool in localSoftware.filter(tool => tool.available)"
+          :key="tool.id"
+          type="button"
+          class="yxz-preview-button"
+          :disabled="openingSoftwareId === tool.id"
+          @click="openInLocalSoftware(tool)"
+        >
+          {{ openingSoftwareId === tool.id ? '打开中…' : `用 ${tool.name} 打印` }}
+        </button>
+      </div>
+      <small v-if="softwareMessage" class="yxz-preview-software-message">{{ softwareMessage }}</small>
+    </div>
     <section class="yxz-preview-viewer">
       <canvas ref="canvas" aria-label="宜小智 3D 模型预览" />
       <p v-if="loading" class="yxz-preview-state">正在加载模型…</p>
@@ -210,7 +310,44 @@ onBeforeUnmount(() => {
 .yxz-preview-header div { display: flex; flex-direction: column; gap: .2rem; }
 .yxz-preview-header span { color: #087eae; font-size: .78rem; }
 .yxz-preview-header strong { font-size: 1.25rem; }
-.yxz-preview-header a { color: #087eae; text-decoration: underline; }
+.yxz-preview-actions {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: .5rem;
+}
+.yxz-preview-button {
+  padding: .55rem 1.1rem;
+  border: 1px solid #0b7fb4;
+  border-radius: .55rem;
+  background: #0b7fb4;
+  color: #f7fdff;
+  font: inherit;
+  font-size: .9rem;
+  line-height: 1.2;
+  text-decoration: none;
+  cursor: pointer;
+}
+.yxz-preview-button:hover:not(:disabled) { background: #086a99; border-color: #086a99; }
+.yxz-preview-button:disabled { opacity: .55; cursor: progress; }
+.yxz-preview-button.ghost {
+  border-color: #7db9d4;
+  background: transparent;
+  color: #0b7fb4;
+}
+.yxz-preview-button.ghost:hover:not(:disabled) { background: #dff2fb; border-color: #0b7fb4; }
+.yxz-preview-software {
+  display: flex;
+  max-width: 72rem;
+  margin: 0 auto .8rem;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .6rem;
+}
+.yxz-preview-software-list { display: flex; flex-wrap: wrap; gap: .5rem; }
+.yxz-preview-software-message { color: #52758a; }
 .yxz-preview-viewer {
   position: relative;
   max-width: 72rem;

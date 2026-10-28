@@ -419,52 +419,76 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       if (shouldAbort())
         return
 
-      await llmStore.stream(options.model, options.chatProvider, newMessages as Message[], {
-        headers,
-        providerId: options.providerId ?? activeProvider.value,
-        scope: 'consciousness',
-        tools: options.tools,
-        abortSignal: abortController.signal,
-        // NOTICE: xsai stream may emit `finish` before tool steps continue, so keep waiting until
-        // the final non-tool finish to avoid ending the chat turn with no assistant reply.
-        waitForTools: true,
-        onAttemptStart: ({ providerId }) => {
-          if (!providerId || providerId === effectiveProviderId || fullText)
-            return
+      // A broken stream must not take the whole turn down.  The visitor is
+      // standing in front of the screen: a silent, frozen chat looks like a
+      // crash.  We keep the failure, finish the turn and say something.
+      let streamFailure: Error | undefined
+      try {
+        await llmStore.stream(options.model, options.chatProvider, newMessages as Message[], {
+          headers,
+          providerId: options.providerId ?? activeProvider.value,
+          scope: 'consciousness',
+          tools: options.tools,
+          abortSignal: abortController.signal,
+          // NOTICE: xsai stream may emit `finish` before tool steps continue, so keep waiting until
+          // the final non-tool finish to avoid ending the chat turn with no assistant reply.
+          waitForTools: true,
+          onAttemptStart: ({ providerId }) => {
+            if (!providerId || providerId === effectiveProviderId || fullText)
+              return
 
-          effectiveProviderId = providerId
-          categorizer = createStreamingCategorizer(effectiveProviderId)
-        },
-        onStreamEvent: async (event: StreamEvent) => {
-          switch (event.type) {
-            case 'tool-call':
-              toolCallQueue.enqueue({
-                type: 'tool-call',
-                toolCall: event,
-              })
+            effectiveProviderId = providerId
+            categorizer = createStreamingCategorizer(effectiveProviderId)
+          },
+          onStreamEvent: async (event: StreamEvent) => {
+            switch (event.type) {
+              case 'tool-call':
+                toolCallQueue.enqueue({
+                  type: 'tool-call',
+                  toolCall: event,
+                })
 
-              break
-            case 'tool-result':
-              toolCallQueue.enqueue({
-                type: 'tool-call-result',
-                id: event.toolCallId,
-                result: event.result,
-              })
+                break
+              case 'tool-result':
+                toolCallQueue.enqueue({
+                  type: 'tool-call-result',
+                  id: event.toolCallId,
+                  result: event.result,
+                })
 
-              break
-            case 'text-delta':
-              fullText += event.text
-              await parser.consume(event.text)
-              break
-            case 'finish':
-              break
-            case 'error':
-              throw event.error ?? new Error('Stream error')
-          }
-        },
-      })
+                break
+              case 'text-delta':
+                fullText += event.text
+                await parser.consume(event.text)
+                break
+              case 'finish':
+                break
+              case 'error':
+                // Record it and let the stream wind down.  Throwing here
+                // used to abort the whole turn, which is exactly the
+                // "回答到一半就卡住" the visitor kept hitting.
+                streamFailure = event.error ?? new Error('Stream error')
+                console.error('[chat] stream reported an error', streamFailure)
+                break
+            }
+          },
+        })
+      }
+      catch (error) {
+        streamFailure = error instanceof Error ? error : new Error(String(error))
+        console.error('[chat] turn failed', streamFailure)
+      }
 
       await parser.end()
+
+      // Nothing was said and the stream broke: leave the visitor with a
+      // short, usable reply instead of an empty bubble.
+      if (streamFailure && !shouldAbort() && !fullText.trim()) {
+        const fallback = '刚才这一轮没能连上，可能是网络抖了一下。你再说一次你的需求，我接着做。'
+        buildingMessage.content = fallback
+        buildingMessage.slices = [{ type: 'text', text: fallback }]
+        updateUI()
+      }
 
       if (!isStaleGeneration() && buildingMessage.slices.length > 0) {
         chatSession.appendSessionMessage(sessionId, toRaw(buildingMessage))

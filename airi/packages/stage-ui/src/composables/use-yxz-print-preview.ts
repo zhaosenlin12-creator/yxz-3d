@@ -151,7 +151,17 @@ export interface YXZLaserCardResponse {
   message: string
 }
 
-export const YXZ_PREVIEW_TIMEOUT_MS = 180_000
+/**
+ * How long the whole preview call may take, retries included.
+ *
+ * The backend already falls back between image providers on its own, so a
+ * single attempt can legitimately burn 90s + 90s (one provider plus one
+ * retry) before it gives up.  The old 180s ceiling sat exactly on that
+ * worst case, which meant every slow request ended in "预览生成超时" and
+ * took the chat turn down with it.  300s leaves room for a second attempt
+ * while still bounding the wait.
+ */
+export const YXZ_PREVIEW_TIMEOUT_MS = 300_000
 export const YXZ_MODEL_TIMEOUT_MS = 10 * 60_000
 export const YXZ_LASER_CARD_TIMEOUT_MS = 120_000
 
@@ -319,11 +329,16 @@ export async function listYXZModelParts(
   }
 }
 
-export function yxzPreviewPageUrl(modelUrl: string) {
+export function yxzPreviewPageUrl(modelUrl: string, sessionId?: string) {
   if (typeof window === 'undefined')
     return modelUrl
   const url = new URL('/yxz-preview', window.location.origin)
   url.searchParams.set('model', modelUrl)
+  // The session id lets the preview page hand the finished model straight
+  // to the slicer on this machine -- without it the page can only show
+  // the model and offer a download.
+  if (sessionId)
+    url.searchParams.set('sid', sessionId)
   return url.toString()
 }
 
@@ -348,11 +363,16 @@ export async function detectYXZLocalSoftware(fetcher: typeof fetch = fetch): Pro
   }))
 }
 
-export async function openYXZExportInSoftware(request: { softwareId: string, sessionId: string, format?: string }, fetcher: typeof fetch = fetch) {
+export async function openYXZExportInSoftware(request: { softwareId: string, sessionId?: string, format?: string, path?: string }, fetcher: typeof fetch = fetch) {
   const response = await fetcher(`${getYXZPrintApiBase()}/api/software/open`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ software_id: request.softwareId, session_id: request.sessionId, fmt: request.format ?? 'stl' }),
+    body: JSON.stringify({
+      software_id: request.softwareId,
+      session_id: request.sessionId ?? '',
+      fmt: request.format ?? 'stl',
+      ...(request.path ? { path: request.path } : {}),
+    }),
   })
   const raw: unknown = await response.json().catch(() => undefined)
   if (!response.ok)
@@ -570,6 +590,18 @@ async function pollYXZModelProgress(sessionId: string, signal: AbortSignal, onPr
  * generation phase that ran before it), otherwise the card briefly shows
  * finished / preview chatter that has nothing to do with this job.
  */
+/**
+ * A failure where the request never reached the 3D engine -- the backend
+ * was restarting, or the connection was cut.  These are worth a retry
+ * once the backend is back; a rejected model is not.
+ */
+class ModelTransportError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ModelTransportError'
+  }
+}
+
 async function fetchLatestProgressTs(sessionId: string, fetcher: typeof fetch): Promise<number> {
   try {
     const response = await fetcher(`${getYXZPrintApiBase()}/api/progress/${encodeURIComponent(sessionId)}?since=9999999999999`)
@@ -628,63 +660,86 @@ export async function createYXZCartoonModel(request: YXZModelRequest, fetcher: t
   try {
     for (let i = 0; i < engines.length; i++) {
       const engine = engines[i]
-      try {
-        request.onProgress?.({
-          percent: 2,
-          message: i === 0 ? '已收到你的方案，马上开始制作…' : '生成通道暂时不稳定，正在自动换一条继续…',
-          step: 'building',
-          stage: 'queued',
-        })
-        const response = await fetcher(`${getYXZPrintApiBase()}${engine.endpoint}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            session_id: request.sessionId,
-            image_index: request.imageIndex,
-            ...(request.customImage ? { custom_image: request.customImage } : {}),
-            ...engine.body,
-          }),
-          signal: linked.signal,
-        })
-        if (!response.ok) {
-          let detail = ''
+      // A plain attempt plus one retry that only fires when the transport
+      // broke.  The retry repeats the SAME engine: the provider never
+      // failed, the connection to our own backend did.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          request.onProgress?.({
+            percent: 2,
+            message: i === 0 ? '已收到你的方案，马上开始制作…' : '生成通道暂时不稳定，正在自动换一条继续…',
+            step: 'building',
+            stage: 'queued',
+          })
+          let response: Response
           try {
-            const errRaw: unknown = await response.json()
-            if (isRecord(errRaw)) {
-              const d = errRaw.detail
-              detail = typeof d === 'string' ? d : isRecord(d) && typeof d.error === 'string' ? d.error : ''
-            }
+            response = await fetcher(`${getYXZPrintApiBase()}${engine.endpoint}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                session_id: request.sessionId,
+                image_index: request.imageIndex,
+                ...(request.customImage ? { custom_image: request.customImage } : {}),
+                ...engine.body,
+              }),
+              signal: linked.signal,
+            })
           }
-          catch { /* ignore */ }
-          throw new Error(`3D 生成服务暂时不可用（HTTP ${response.status}）${detail ? `：${detail}` : ''}`)
-        }
+          catch (error) {
+            throw new ModelTransportError(error instanceof Error ? error.message : '网络中断')
+          }
+          if (!response.ok) {
+            let detail = ''
+            try {
+              const errRaw: unknown = await response.json()
+              if (isRecord(errRaw)) {
+                const d = errRaw.detail
+                detail = typeof d === 'string' ? d : isRecord(d) && typeof d.error === 'string' ? d.error : ''
+              }
+            }
+            catch { /* ignore */ }
+            const message = `3D 生成服务暂时不可用（HTTP ${response.status}）${detail ? `：${detail}` : ''}`
+            if ([502, 503, 504].includes(response.status))
+              throw new ModelTransportError(message)
+            throw new Error(message)
+          }
 
-        const raw: unknown = await response.json()
-        if (!isRecord(raw) || typeof raw.session_id !== 'string' || typeof raw.model_url !== 'string')
-          throw new Error('3D 生成服务返回的数据格式无法识别')
+          const raw: unknown = await response.json()
+          if (!isRecord(raw) || typeof raw.session_id !== 'string' || typeof raw.model_url !== 'string')
+            throw new Error('3D 生成服务返回的数据格式无法识别')
 
-        request.onProgress?.({ percent: 100, message: '3D 模型已经做好啦，可以预览和下载了', step: 'done', stage: 'done' })
-        return {
-          sessionId: raw.session_id,
-          modelUrl: absolutePrintApiUrl(raw.model_url),
-          glbUrl: absolutePrintApiUrl(`/api/export/${raw.session_id}/glb`),
-          stlUrl: absolutePrintApiUrl(`/api/export/${raw.session_id}/stl`),
-          engine: typeof raw.engine === 'string' ? raw.engine : engine.label,
+          request.onProgress?.({ percent: 100, message: '3D 模型已经做好啦，可以预览和下载了', step: 'done', stage: 'done' })
+          return {
+            sessionId: raw.session_id,
+            modelUrl: absolutePrintApiUrl(raw.model_url),
+            glbUrl: absolutePrintApiUrl(`/api/export/${raw.session_id}/glb`),
+            stlUrl: absolutePrintApiUrl(`/api/export/${raw.session_id}/stl`),
+            engine: typeof raw.engine === 'string' ? raw.engine : engine.label,
+          }
         }
-      }
-      catch (error) {
-        if (linked.timedOut()) {
-          request.onProgress?.({ percent: 0, message: '3D 生成超过 10 分钟仍未完成，请稍后重试', step: 'failed', stage: 'failed' })
-          throw new Error('3D 生成超过 10 分钟仍未完成，请稍后重试')
+        catch (error) {
+          if (linked.timedOut()) {
+            request.onProgress?.({ percent: 0, message: '3D 生成超过 10 分钟仍未完成，请稍后重试', step: 'failed', stage: 'failed' })
+            throw new Error('3D 生成超过 10 分钟仍未完成，请稍后重试')
+          }
+          // The caller cancelled the turn (the chat send recovery aborts a
+          // stalled turn). Stop the engine chain here: trying the next engine
+          // would keep the request alive and keep the chat queued behind it.
+          if (linked.signal.aborted) {
+            throw new Error('3D 生成已取消')
+          }
+          lastError = error instanceof Error ? error : new Error(String(error))
+
+          if (error instanceof ModelTransportError && attempt === 0) {
+            request.onProgress?.({ percent: 8, message: '生成服务正在重启，稍等一下马上继续…', step: 'building', stage: 'queued' })
+            const back = await waitForYXZBackend(yxzBackendRecovery.waitMs, fetcher, linked.signal)
+            if (back && !linked.signal.aborted)
+              continue
+          }
+
+          request.onProgress?.({ percent: 5, message: '这一条生成通道没能完成，正在换一条继续…', step: 'building', stage: 'geometry' })
+          break
         }
-        // The caller cancelled the turn (the chat send recovery aborts a
-        // stalled turn). Stop the engine chain here: trying the next engine
-        // would keep the request alive and keep the chat queued behind it.
-        if (linked.signal.aborted) {
-          throw new Error('3D 生成已取消')
-        }
-        lastError = error instanceof Error ? error : new Error(String(error))
-        request.onProgress?.({ percent: 5, message: '这一条生成通道没能完成，正在换一条继续…', step: 'building', stage: 'geometry' })
       }
     }
   }
@@ -699,12 +754,78 @@ export async function createYXZCartoonModel(request: YXZModelRequest, fetcher: t
   throw lastError ?? new Error('3D 生成失败，请重试')
 }
 
-export async function createYXZPreview(request: YXZPreviewRequest, fetcher: typeof fetch = fetch): Promise<YXZPreviewResponse> {
-  const prompt = request.prompt.trim()
-  if (!prompt)
-    throw new Error('请输入想要制作的产品描述')
+/**
+ * The image providers the backend knows about, in the order it prefers them.
+ * When one call comes back empty we try the next one instead of giving the
+ * visitor an error screen -- a single flaky provider should not end the
+ * guided flow.
+ */
+const YXZ_PREVIEW_PROVIDERS: Array<NonNullable<YXZPreviewRequest['prefer']>> = ['aixj', 'minimax', 'jojo']
 
-  const linked = createRequestSignal(request.signal, YXZ_PREVIEW_TIMEOUT_MS)
+/** A failure that is worth retrying with another provider. */
+class PreviewTransportError extends Error {
+  /**
+   * True when the backend itself looks unreachable -- it was restarting
+   * after a crash, or the connection was cut.  That is worth waiting out;
+   * a plain HTTP error is not.
+   */
+  readonly restartLikely: boolean
+
+  constructor(message: string, restartLikely = false) {
+    super(message)
+    this.name = 'PreviewTransportError'
+    this.restartLikely = restartLikely
+  }
+}
+
+/**
+ * Wait for the backend to answer again.
+ *
+ * The supervisor restarts the backend within seconds when it dies, but a
+ * request that was in flight at that moment is already lost.  Waiting for
+ * the backend to come back and then repeating the request is the
+ * difference between "the visitor sees an error screen" and "the visitor
+ * never notices".
+ */
+export const yxzBackendRecovery = {
+  /** How long to wait for the backend to answer /api/ping again. */
+  waitMs: 30_000,
+  /** Pause between two pings. */
+  pollMs: 1_000,
+}
+
+export async function waitForYXZBackend(
+  timeoutMs = yxzBackendRecovery.waitMs,
+  fetcher: typeof fetch = fetch,
+  signal?: AbortSignal,
+) {
+  const deadline = Date.now() + Math.max(0, timeoutMs)
+  while (Date.now() < deadline) {
+    if (signal?.aborted)
+      return false
+    try {
+      const response = await fetcher(`${getYXZPrintApiBase()}/api/ping`, { cache: 'no-store' })
+      if (response.ok)
+        return true
+    }
+    catch {
+      // Not up yet.
+    }
+    await sleep(yxzBackendRecovery.pollMs, signal)
+  }
+  return false
+}
+
+async function requestPreviewOnce(
+  prompt: string,
+  prefer: NonNullable<YXZPreviewRequest['prefer']>,
+  n: number,
+  sessionId: string,
+  timeoutMs: number,
+  externalSignal: AbortSignal | undefined,
+  fetcher: typeof fetch,
+): Promise<YXZPreviewResponse> {
+  const linked = createRequestSignal(externalSignal, Math.max(5_000, timeoutMs))
   let response: Response
   try {
     response = await fetcher(`${getYXZPrintApiBase()}/api/previews`, {
@@ -712,34 +833,40 @@ export async function createYXZPreview(request: YXZPreviewRequest, fetcher: type
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         prompt,
-        n: Math.min(Math.max(request.n ?? 4, 1), 4),
-        prefer: request.prefer ?? 'aixj',
-        session_id: request.sessionId ?? crypto.randomUUID().replace(DASH_RE, '').slice(0, 12),
+        n,
+        prefer,
+        session_id: sessionId,
       }),
       signal: linked.signal,
     })
   }
   catch (error) {
     if (linked.timedOut())
-      throw new Error('预览生成超过 2 分钟仍未完成，请稍后重试')
-    throw error
+      throw new PreviewTransportError('出图服务这次响应太慢了', true)
+    throw new PreviewTransportError(error instanceof Error ? error.message : '网络中断', true)
   }
   finally {
     linked.dispose()
   }
 
-  if (!response.ok)
-    throw new Error(`预览服务暂时不可用（HTTP ${response.status}）`)
+  if (!response.ok) {
+    // A 5xx from our own backend means the provider chain is already
+    // exhausted -- walking it again from here would just triple the wait.
+    // Only a gateway hiccup is worth a second try.
+    if ([502, 503, 504].includes(response.status))
+      throw new PreviewTransportError(`出图服务暂时不可用（HTTP ${response.status}）`, true)
+    throw new Error(`出图服务暂时不可用（HTTP ${response.status}）`)
+  }
 
   const raw: unknown = await response.json()
   if (!isRecord(raw) || typeof raw.session_id !== 'string' || !Array.isArray(raw.previews))
-    throw new Error('预览服务返回的数据格式无法识别')
+    throw new Error('出图服务返回的数据格式无法识别')
 
   const previews = raw.previews
     .map((item, index) => parsePreviewItem(item, index))
     .filter((item): item is YXZPreviewItem => item !== null)
   if (!previews.length)
-    throw new Error('预览服务没有返回可展示的图片')
+    throw new Error('出图服务没有返回可展示的图片')
 
   return {
     sessionId: raw.session_id,
@@ -747,4 +874,90 @@ export async function createYXZPreview(request: YXZPreviewRequest, fetcher: type
     source: typeof raw.source === 'string' ? raw.source : undefined,
     previews,
   }
+}
+
+export async function createYXZPreview(request: YXZPreviewRequest, fetcher: typeof fetch = fetch): Promise<YXZPreviewResponse> {
+  const prompt = request.prompt.trim()
+  if (!prompt)
+    throw new Error('请输入想要制作的产品描述')
+
+  const n = Math.min(Math.max(request.n ?? 4, 1), 4)
+  const prefer = request.prefer ?? 'aixj'
+  const sessionId = request.sessionId ?? crypto.randomUUID().replace(DASH_RE, '').slice(0, 12)
+  const deadline = Date.now() + YXZ_PREVIEW_TIMEOUT_MS
+
+  // Try the preferred provider first, then the next one in line.  Each
+  // attempt only gets whatever is left of the budget, so the total wait
+  // stays bounded no matter how many providers we walk through.
+  const candidates = [prefer, ...YXZ_PREVIEW_PROVIDERS.filter(provider => provider !== prefer)]
+  let lastError: unknown
+
+  for (const [index, candidate] of candidates.entries()) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 5_000)
+      break
+
+    // Only the first two candidates get a real shot -- beyond that the
+    // budget is already spent and we would just be adding latency.
+    if (index >= 2)
+      break
+
+    try {
+      return await requestPreviewOnce(
+        prompt,
+        candidate,
+        n,
+        sessionId,
+        remaining,
+        request.signal,
+        fetcher,
+      )
+    }
+    catch (error) {
+      if (request.signal?.aborted)
+        throw error
+      lastError = error
+      // The backend already walked its own provider chain; if it came back
+      // with a clean "everything failed" answer, another attempt through a
+      // different provider would repeat the same dead ends.
+      if (!(error instanceof PreviewTransportError))
+        break
+
+      // The transport broke, not the provider: the backend was restarting
+      // after a crash or the connection was cut mid-flight.  Waiting for it
+      // to come back and repeating the very same request is what turns
+      // "the visitor sees an error screen" into "the visitor never
+      // noticed".  Only worth it while there is budget left.
+      if (error.restartLikely) {
+        const waitBudget = Math.min(yxzBackendRecovery.waitMs, deadline - Date.now())
+        if (waitBudget > 3_000) {
+          const back = await waitForYXZBackend(waitBudget, fetcher, request.signal)
+          const retryBudget = deadline - Date.now()
+          if (back && retryBudget > 5_000) {
+            try {
+              return await requestPreviewOnce(
+                prompt,
+                candidate,
+                n,
+                sessionId,
+                retryBudget,
+                request.signal,
+                fetcher,
+              )
+            }
+            catch (retryError) {
+              if (request.signal?.aborted)
+                throw retryError
+              lastError = retryError
+              if (!(retryError instanceof PreviewTransportError))
+                break
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const reason = lastError instanceof Error ? lastError.message : '出图服务暂时没有响应'
+  throw new Error(`预览没能生成出来（${reason}）。你可以直接说「再试一次」，我会换一种方式重新出图。`)
 }

@@ -1,6 +1,11 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { buildYXZPreviewPrompt, createYXZCartoonModel, createYXZPreview, previewImageSrc } from './use-yxz-print-preview'
+import { buildYXZPreviewPrompt, createYXZCartoonModel, createYXZPreview, previewImageSrc, waitForYXZBackend, yxzBackendRecovery } from './use-yxz-print-preview'
+
+afterEach(() => {
+  yxzBackendRecovery.waitMs = 30_000
+  yxzBackendRecovery.pollMs = 1_000
+})
 
 describe('YXZ print preview adapter', () => {
   it('adds selected design constraints without changing the original description', () => {
@@ -26,6 +31,66 @@ describe('YXZ print preview adapter', () => {
   it('rejects malformed responses instead of rendering untrusted data', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response('{}', { status: 200 }))
     await expect(createYXZPreview({ prompt: '测试' }, fetcher)).rejects.toThrow('数据格式')
+  })
+
+  it('waits for the backend to come back and repeats the same request', async () => {
+    yxzBackendRecovery.pollMs = 5
+    const providers: string[] = []
+    let pingCalls = 0
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      if (String(input).includes('/api/ping')) {
+        pingCalls += 1
+        if (pingCalls === 1)
+          throw new Error('connection refused')
+        return new Response('{"ok":true}', { status: 200 })
+      }
+      providers.push(JSON.parse(String(init?.body)).prefer)
+      if (providers.length === 1)
+        throw new Error('network down')
+      return new Response(JSON.stringify({
+        session_id: 'retry1',
+        prompt: '一个小猫摆件',
+        previews: [{ index: 0, path: '/api/data/retry1/previews/img_0.png' }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    })
+
+    const result = await createYXZPreview({ prompt: '一个小猫摆件' }, fetcher)
+    expect(result.sessionId).toBe('retry1')
+    // The provider never failed -- the connection did.  So the retry has to
+    // repeat the same provider instead of walking to a different one.
+    expect(providers).toHaveLength(2)
+    expect(providers[1]).toBe(providers[0])
+  })
+
+  it('falls back to another provider when the backend never comes back', async () => {
+    yxzBackendRecovery.waitMs = 30
+    yxzBackendRecovery.pollMs = 5
+    const providers: string[] = []
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      if (String(input).includes('/api/ping'))
+        throw new Error('backend down')
+      providers.push(JSON.parse(String(init?.body)).prefer)
+      throw new Error('network down')
+    })
+
+    await expect(createYXZPreview({ prompt: '一个小猫摆件' }, fetcher)).rejects.toThrow('预览没能生成出来')
+    expect(providers.length).toBeGreaterThan(1)
+    expect(providers[1]).not.toBe(providers[0])
+  })
+
+  it('does not walk the provider chain again when the backend already gave up', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response('{"detail":"no image"}', { status: 500 }))
+    await expect(createYXZPreview({ prompt: '测试' }, fetcher)).rejects.toThrow('预览没能生成出来')
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports whether the backend came back for the retry', async () => {
+    yxzBackendRecovery.pollMs = 5
+    const down = vi.fn<typeof fetch>().mockRejectedValue(new Error('down'))
+    await expect(waitForYXZBackend(40, down)).resolves.toBe(false)
+
+    const up = vi.fn<typeof fetch>().mockResolvedValue(new Response('{"ok":true}', { status: 200 }))
+    await expect(waitForYXZBackend(1_000, up)).resolves.toBe(true)
   })
 
   it('builds printable model and export URLs from the session response', async () => {
@@ -67,5 +132,56 @@ describe('YXZ print preview adapter', () => {
     }, fetcher)
 
     expect(result.sessionId).toBe('edited123')
+  })
+
+  it('repeats the same 3D engine after the backend restarts', async () => {
+    yxzBackendRecovery.pollMs = 5
+    const endpoints: string[] = []
+    let pingCalls = 0
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/api/progress/'))
+        return new Response(JSON.stringify({ events: [] }), { status: 200 })
+      if (url.includes('/api/ping')) {
+        pingCalls += 1
+        if (pingCalls === 1)
+          throw new Error('connection refused')
+        return new Response('{"ok":true}', { status: 200 })
+      }
+      endpoints.push(url)
+      if (endpoints.length === 1)
+        throw new Error('network down')
+      return new Response(JSON.stringify({
+        session_id: 'abc123',
+        model_url: '/api/data/abc123/model/mesh.glb',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    })
+
+    const result = await createYXZCartoonModel({ sessionId: 'abc123', imageIndex: 0 }, fetcher)
+    expect(result.sessionId).toBe('abc123')
+    // Same engine, not the next one: the transport broke, the engine did not.
+    expect(endpoints).toHaveLength(2)
+    expect(endpoints[1]).toBe(endpoints[0])
+  })
+
+  it('moves on to the next engine when the model itself is rejected', async () => {
+    const endpoints: string[] = []
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/api/progress/'))
+        return new Response(JSON.stringify({ events: [] }), { status: 200 })
+      endpoints.push(url)
+      if (endpoints.length === 1)
+        return new Response('{"detail":"模型不合格"}', { status: 400 })
+      return new Response(JSON.stringify({
+        session_id: 'abc123',
+        model_url: '/api/data/abc123/model/mesh.glb',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    })
+
+    const result = await createYXZCartoonModel({ sessionId: 'abc123', imageIndex: 0 }, fetcher)
+    expect(result.sessionId).toBe('abc123')
+    expect(endpoints).toHaveLength(2)
+    expect(endpoints[0]).not.toBe(endpoints[1])
   })
 })

@@ -77,16 +77,18 @@ describe('useVisionInference', () => {
       }, { once: true })
     }))
 
-    const { useVisionInference } = await import('./use-vision-inference')
+    const { useVisionInference, VISION_INFERENCE_TIMEOUT_MS } = await import('./use-vision-inference')
     const { runVisionInference } = useVisionInference()
 
     const result = runVisionInference({
       imageDataUrl: 'data:image/png;base64,Zm9v',
       workloadId: 'screen:interpret',
     })
-    const expectation = expect(result).rejects.toThrow('Vision inference timed out after 15000ms')
+    const expectation = expect(result).rejects.toThrow(
+      `Vision inference timed out after ${VISION_INFERENCE_TIMEOUT_MS}ms`,
+    )
 
-    await vi.advanceTimersByTimeAsync(15_000)
+    await vi.advanceTimersByTimeAsync(VISION_INFERENCE_TIMEOUT_MS)
 
     await expectation
   })

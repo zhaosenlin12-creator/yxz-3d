@@ -11,6 +11,7 @@ label so a deepseek/aixj-llm/jojo key is never sent to the wrong provider:
 from __future__ import annotations
 import os, time, base64, json, urllib.request, urllib.error
 import re
+import threading
 import progress as _pg
 from typing import List, Tuple, Optional
 
@@ -111,7 +112,91 @@ AIXJ_IMAGE_KEY = AIXJ_IMAGE_KEYS[0] if AIXJ_IMAGE_KEYS else ""
 _JOJO_DEAD_KEYS: set = set()
 _JOJO_DEAD_UNTIL: dict = {}
 _AIXJ_DEAD_KEYS: set = set()
+
+# Every visitor on the network can ask for preview images at the same time.
+# Firing N users x N prompts straight at the provider makes it rate-limit
+# us, and every call then burns its full timeout before failing -- that is
+# what made the guided flow die on a busy machine.  A single global gate
+# keeps the outbound pressure constant: extra requests wait their turn
+# instead of piling onto the provider and timing out.
+#
+# 12 slots = three full 4-image requests in flight at once, which is what
+# the image keys are provisioned for.  Raise it with YXZ_IMAGE_CONCURRENCY
+# when the provider has more headroom.
+OUTBOUND_LIMIT = max(1, int(os.environ.get("YXZ_IMAGE_CONCURRENCY", "12") or 12))
+OUTBOUND_QUEUE_TIMEOUT = max(30.0, float(os.environ.get("YXZ_IMAGE_QUEUE_TIMEOUT", "240") or 240))
+
+# Per-provider gates.  The AIXJ gateway only has one key and it starts
+# dropping TLS handshakes ("handshake operation timed out", ECONNRESET)
+# once too many requests land on it at once.  Six parallel calls against
+# it means four of them burn a full 90s timeout and then a 90s retry --
+# that is what turned one slow preview into a four-minute wait.  Keeping
+# each provider inside its own lane fixes that without capping the whole
+# machine at one request at a time.
+AIXJ_CONCURRENCY = max(1, int(os.environ.get("YXZ_AIXJ_CONCURRENCY", "3") or 3))
+MINIMAX_CONCURRENCY = max(1, int(os.environ.get("YXZ_MINIMAX_CONCURRENCY", "6") or 6))
+JOJO_CONCURRENCY = max(1, int(os.environ.get("YXZ_JOJO_CONCURRENCY", "3") or 3))
+DOWNLOAD_CONCURRENCY = max(1, int(os.environ.get("YXZ_DOWNLOAD_CONCURRENCY", "6") or 6))
+
+_OUTBOUND_SEMAPHORE = threading.BoundedSemaphore(OUTBOUND_LIMIT)
+_AIXJ_SEMAPHORE = threading.BoundedSemaphore(AIXJ_CONCURRENCY)
+_MINIMAX_SEMAPHORE = threading.BoundedSemaphore(MINIMAX_CONCURRENCY)
+_JOJO_SEMAPHORE = threading.BoundedSemaphore(JOJO_CONCURRENCY)
+_DOWNLOAD_SEMAPHORE = threading.BoundedSemaphore(DOWNLOAD_CONCURRENCY)
+
+
+class _OutboundSlot:
+    """Context manager that holds one of the global outbound slots."""
+
+    def __init__(self, semaphore=None, timeout: Optional[float] = None):
+        self.semaphore = semaphore if semaphore is not None else _OUTBOUND_SEMAPHORE
+        self.timeout = timeout
+        self._held = False
+
+    def __enter__(self):
+        if self.timeout is None:
+            self._held = self.semaphore.acquire(timeout=OUTBOUND_QUEUE_TIMEOUT)
+        else:
+            self._held = self.semaphore.acquire(timeout=self.timeout)
+        if not self._held:
+            raise TimeoutError("image provider queue is full")
+        return self
+
+    def __exit__(self, *exc):
+        if self._held:
+            self._held = False
+            self.semaphore.release()
+        return False
 _AIXJ_DEAD_UNTIL: dict = {}
+
+
+def _download_with_retry(url: str, ua: str = "", attempts: int = 3,
+                         timeout: float = 30.0) -> Optional[bytes]:
+    """Fetch a generated image, retrying a couple of times.
+
+    The image host sits behind a CDN that regularly drops the TLS
+    handshake when several downloads land at once.  The generation call
+    has already been paid for at that point, so throwing the picture away
+    and regenerating it costs another minute -- retrying the download is
+    far cheaper.
+    """
+    headers = {"User-Agent": ua} if ua else {}
+    last_error = ""
+    for attempt in range(attempts):
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with _OutboundSlot(_DOWNLOAD_SEMAPHORE):
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    data = r.read()
+            if data:
+                return data
+            last_error = "empty body"
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {e}"
+        if attempt < attempts - 1:
+            time.sleep(1.5 * (attempt + 1))
+    print(f"[download] give up after {attempts} tries: {last_error[:160]}")
+    return None
 
 
 def _aixj_image_call(prompt, *, n=1, size="1024x1024", model=AIXJ_IMAGE_MODEL,
@@ -144,8 +229,9 @@ def _aixj_image_call(prompt, *, n=1, size="1024x1024", model=AIXJ_IMAGE_MODEL,
                 data=data, method="POST",
                 headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
             )
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                payload = json.loads(r.read().decode("utf-8", "ignore"))
+            with _OutboundSlot(_AIXJ_SEMAPHORE):
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    payload = json.loads(r.read().decode("utf-8", "ignore"))
         except urllib.error.HTTPError as e:
             try:
                 err = e.read().decode("utf-8", "ignore")
@@ -177,12 +263,9 @@ def _aixj_image_call(prompt, *, n=1, size="1024x1024", model=AIXJ_IMAGE_MODEL,
                     pass
                 continue
             if url:
-                try:
-                    dl_req = urllib.request.Request(url, headers={"User-Agent": _DL_UA})
-                    with urllib.request.urlopen(dl_req, timeout=30) as r2:
-                        out.append(r2.read())
-                except Exception as e:
-                    print(f"[aixj] download fail: {e}")
+                blob = _download_with_retry(url, ua=_DL_UA)
+                if blob is not None:
+                    out.append(blob)
         if out:
             return out
         print(f"[aixj] key {ki+1}/{n_keys} returned no images")
@@ -222,8 +305,9 @@ def _jojo_call(prompt: str, *, n: int = 1, size: str = "1024x1024",
                 data=data, method="POST",
                 headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
             )
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                payload = json.loads(r.read().decode("utf-8", "ignore"))
+            with _OutboundSlot(_JOJO_SEMAPHORE):
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    payload = json.loads(r.read().decode("utf-8", "ignore"))
         except urllib.error.HTTPError as e:
             try: err = e.read().decode("utf-8", "ignore")
             except Exception: err = str(e.reason)
@@ -295,8 +379,9 @@ def _minimax_image_call(prompt, *, n=1, size="1024x1024", model="image-01",
                     ep, data=data, method="POST",
                     headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
                 )
-                with urllib.request.urlopen(req, timeout=timeout) as r:
-                    payload = json.loads(r.read().decode("utf-8", "ignore"))
+                with _OutboundSlot(_MINIMAX_SEMAPHORE):
+                    with urllib.request.urlopen(req, timeout=timeout) as r:
+                        payload = json.loads(r.read().decode("utf-8", "ignore"))
             except urllib.error.HTTPError as e:
                 try: err = e.read().decode("utf-8", "ignore")
                 except Exception: err = str(e.reason)
@@ -319,11 +404,9 @@ def _minimax_image_call(prompt, *, n=1, size="1024x1024", model="image-01",
                     or [])
             out = []
             for url in urls[:n]:
-                try:
-                    with urllib.request.urlopen(url, timeout=20) as r2:
-                        out.append(r2.read())
-                except Exception as e:
-                    print(f"[minimax-image] download fail: {e}")
+                blob = _download_with_retry(url, timeout=20.0)
+                if blob is not None:
+                    out.append(blob)
             if out:
                 return out
     return None
@@ -372,7 +455,7 @@ def _try_minimax_image(prompts, size, sid=None):
         print(f"[api_image] minimax all done (+{time.time()-t0:.1f}s)")
     return results
 
-def _try_aixj_image(prompts, size, sid=None):
+def _try_aixj_image(prompts, size, sid=None, deadline=None):
     """Generate N preview images via AIXJ (primary), concurrently.
 
     Each prompt is an independent request, so they run in parallel to keep
@@ -394,7 +477,13 @@ def _try_aixj_image(prompts, size, sid=None):
         res = _aixj_image_call(p, n=1, size=size, timeout=90, sid=sid)
         if not res:
             # transient TLS handshake timeouts happen under concurrency;
-            # one retry usually succeeds.
+            # one retry usually succeeds.  The retry is skipped once the
+            # deadline has passed -- otherwise a dead provider burns
+            # 90s + 90s per prompt and the frontend gives up first,
+            # which is what used to kill the whole chat turn.
+            if deadline is not None and time.time() >= deadline:
+                print(f"[api_image] aixj prompt {i+1} failed, no budget left for a retry")
+                return (None, f"aixj#fail{i+1}")
             print(f"[api_image] aixj prompt {i+1} failed, retrying once")
             res = _aixj_image_call(p, n=1, size=size, timeout=90, sid=sid)
         if not res:
@@ -420,8 +509,10 @@ def _merge_slots(items, new_items, prefix):
     """Fill None slots in ``items`` (same prompt order) from ``new_items``.
 
     The k-th None slot maps to the k-th new item; surplus new items are
-    appended. Tags become ``{prefix}#{n}`` so later providers can still
-    recognise which slots are already filled.
+    dropped -- the caller asked for N images, so handing back N+1 makes the
+    frontend render an extra preview and costs another provider call.
+    Tags become ``{prefix}#{n}`` so later providers can still recognise
+    which slots are already filled.
     """
     none_idx = [k for k, (b, t) in enumerate(items) if b is None]
     for i, (blob, tag) in enumerate(new_items):
@@ -429,12 +520,11 @@ def _merge_slots(items, new_items, prefix):
             continue
         if i < len(none_idx):
             items[none_idx[i]] = (blob, f"{prefix}#{none_idx[i]+1}")
-        else:
-            items.append((blob, f"{prefix}#{i+1}"))
     return items
 
 
-def generate_previews(prompts, *, prefer="aixj", size="1024x1024", sid=None):
+def generate_previews(prompts, *, prefer="aixj", size="1024x1024", sid=None,
+                      budget_s: float = 240.0):
     """Generate previews. Strategy depends on prefer:
 
     - "aixj":    try AIXJ image first; on failure fall back to minimax, jojo, then local SD
@@ -450,11 +540,12 @@ def generate_previews(prompts, *, prefer="aixj", size="1024x1024", sid=None):
     a usable preview set.
     """
     items = []
+    deadline = time.time() + max(30.0, float(budget_s or 240.0))
     if prefer in ("auto", "api", "image", "online", ""):
         prefer = "aixj"
 
     if prefer == "aixj":
-        m = _try_aixj_image(prompts, size, sid=sid)
+        m = _try_aixj_image(prompts, size, sid=sid, deadline=deadline)
         if m is not None and any(b for b, _ in m):
             if all(b is not None for b, _ in m):
                 return "aixj-image", m
@@ -475,6 +566,13 @@ def generate_previews(prompts, *, prefer="aixj", size="1024x1024", sid=None):
             prefer = "minimax"
 
     if prefer == "minimax":
+        # Every provider downstream of AIXJ is cheaper, but the chain still
+        # has to fit inside the request budget.  If AIXJ already produced
+        # something, stop here rather than pushing the frontend past its
+        # own timeout.
+        if items and time.time() >= deadline:
+            print("[api_image] budget spent, keeping the aixj result")
+            return "aixj-image", items
         m = _try_minimax_image(prompts, size, sid=sid)
         if m is not None and any(b for b, _ in m):
             if items:
@@ -491,6 +589,9 @@ def generate_previews(prompts, *, prefer="aixj", size="1024x1024", sid=None):
         prefer = "jojo"
 
     if prefer == "jojo" and JOJO_KEYS:
+        if items and time.time() >= deadline:
+            print("[api_image] budget spent, keeping the earlier result")
+            return "aixj-image", items
         t0 = time.time()
         n_total = len(prompts)
         n_keys = len(JOJO_KEYS)
@@ -650,15 +751,10 @@ def refine_preview(reference: bytes, instruction: str, *, sid=None, timeout=150.
                 continue
             out = None
             for url in urls:
-                try:
-                    dl_req = urllib.request.Request(url, headers={"User-Agent": _DL_UA})
-                    with urllib.request.urlopen(dl_req, timeout=30) as r2:
-                        blob = r2.read()
-                    if blob:
-                        out = blob
-                        break
-                except Exception as e:
-                    print(f"[api_image] refine download fail: {e}", flush=True)
+                blob = _download_with_retry(url, ua=_DL_UA, timeout=30.0)
+                if blob:
+                    out = blob
+                    break
             if out:
                 if sid:
                     _pg.Progress(sid, "previews").emit("refine-done", 100, "AI 已按批注修改完成")

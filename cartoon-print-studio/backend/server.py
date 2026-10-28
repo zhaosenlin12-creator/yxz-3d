@@ -24,7 +24,69 @@ _BACKEND = os.path.join(ROOT, "backend")
 import sys
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+# ---- crash forensics -------------------------------------------------
+# The backend used to vanish with exit code 1 and nobody could tell why:
+# the supervisor reopens the stderr file on every restart, which truncates
+# the previous run's log and throws the traceback away.  Everything fatal
+# is therefore also appended to a file that is never truncated.
+import faulthandler
+import atexit
+
+_CRASH_DIR = os.path.join(DATA, "logs")
+try:
+    os.makedirs(_CRASH_DIR, exist_ok=True)
+except Exception:
+    _CRASH_DIR = DATA
+_CRASH_FILE = os.path.join(_CRASH_DIR, "backend-crash.log")
+
+
+def _crash_log(message: str) -> None:
+    """Append a crash breadcrumb; never raise from here."""
+    try:
+        with open(_CRASH_FILE, "a", encoding="utf-8") as fh:
+            fh.write(message.rstrip() + "\n")
+            fh.flush()
+    except Exception:
+        pass
+
+
+try:
+    faulthandler.enable(file=open(_CRASH_FILE, "a", encoding="utf-8"), all_threads=True)
+except Exception:
+    pass
+
+
+def _fatal_excepthook(exc_type, exc_value, exc_tb):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+    _crash_log("=== uncaught exception ===\n" + "".join(
+        traceback.format_exception(exc_type, exc_value, exc_tb)))
+    sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+
+sys.excepthook = _fatal_excepthook
+
+
+def _fatal_threadhook(args):
+    if args.exc_type is SystemExit:
+        return
+    _crash_log("=== uncaught exception in thread %s ===\n" % args.thread.name + "".join(
+        traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+
+
+threading.excepthook = _fatal_threadhook
+
+
+def _log_normal_exit():
+    _crash_log("=== backend exiting %s ===" % time.strftime("%Y-%m-%d %H:%M:%S"))
+
+
+atexit.register(_log_normal_exit)
+
 import sd_client, triposr_runner, bambu, llm_client, api_image, hunyuan_runner, mesh_postprocess, tripo_api, scene_jobs
+import mesh_isolation
 import software_integrations
 import progress
 import project_store
@@ -87,7 +149,8 @@ async def _save_uploaded_file(upload: UploadFile, target: str, max_bytes: int) -
     finally:
         await upload.close()
     return written
-def _save_preview_items(raw_items, pdir, captions, sub_prompts, sid, req_n, pg):
+def _save_preview_items(raw_items, pdir, captions, sub_prompts, sid, req_n, pg,
+                        include_b64: bool = False):
     """Save preview PNGs to disk, skipping any None entries.
 
     Returns (items, n_saved, n_failed). Caller decides how to report
@@ -105,15 +168,16 @@ def _save_preview_items(raw_items, pdir, captions, sub_prompts, sid, req_n, pg):
         path_i = os.path.join(pdir, f"img_{i}.png")
         with open(path_i, "wb") as f:
             f.write(blob)
-        b64 = base64.b64encode(blob).decode()
-        items.append({
+        item = {
             "index": i,
-            "b64": b64,
             "path": f"/api/data/{sid}/previews/img_{i}.png",
             "caption": captions[i] if i < len(captions) else f"图 {i+1}",
             "sub_prompt": sub_prompts[i] if i < len(sub_prompts) else "",
             "tag": tag,
-        })
+        }
+        if include_b64:
+            item["b64"] = base64.b64encode(blob).decode()
+        items.append(item)
         n_saved += 1
     return items, n_saved, n_failed
 
@@ -357,6 +421,9 @@ class PreviewsReq(BaseModel):
     seed: int = 42
     prefer: str = "aixj"   # aixj (gpt-image) -> minimax -> jojo -> local
     session_id: str = ""
+    # Inlining four 1024x1024 PNGs as base64 makes the response ~10 MB.
+    # The chat flow only ever uses the `path`, so the bytes are opt-in.
+    include_b64: bool = False
 
 class RefineReq(BaseModel):
     """按批注修改一版：把带批注的预览图 + 指令发给 AI 图片编辑模型。"""
@@ -473,6 +540,7 @@ class PreviewsV2Req(BaseModel):
     seed: int = 42
     prefer: str = "aixj"   # aixj (gpt-image) -> minimax -> jojo -> local
     session_id: str = ""
+    include_b64: bool = False
 class ThreeDMultiReq(BaseModel):
     session_id: str
     image_index: int = 0
@@ -538,6 +606,19 @@ def health():
             # True while the first probe is still running: the UI shows
             # "checking" instead of wrongly reporting the provider as down.
             "tripo3d_checking": bool(_BALANCE_PROBE["running"])}
+
+
+@app.get("/api/ping")
+def ping():
+    """Cheapest possible liveness probe.
+
+    The supervisor polls this to decide whether the backend is alive.
+    It has to answer instantly and without touching the network or the
+    filesystem: /api/software/detect scans the registry and the start
+    menu, which takes seconds on a cold cache and used to make the
+    supervisor declare a perfectly healthy backend dead.
+    """
+    return {"ok": True, "ts": time.time()}
 
 
 class EdgeTtsReq(BaseModel):
@@ -685,7 +766,10 @@ def engines():
     except Exception:
         cuda, gpu = False, None
     vram_mb = _detect_vram_mb()
-    hunyuan_status = hunyuan_runner.get_status()
+    # The probe runs in a child process: importing torch and touching CUDA
+    # here would hold a GPU context in the API server and take memory away
+    # from the worker that actually builds the mesh.
+    hunyuan_status = mesh_isolation.probe_local_mesh("hunyuan", log_dir=os.path.join(DATA, "logs"))
     return {
         "cuda": cuda,
         "gpu": gpu,
@@ -703,7 +787,10 @@ def engines():
             },
             {
                 "id": "multi",
-                "available": bool(triposr_runner.is_available()),
+                "available": bool(
+                    mesh_isolation.probe_local_mesh("triposr", log_dir=os.path.join(DATA, "logs"))
+                    .get("available")
+                ),
                 "local": True,
                 "label": "TripoSR 多视角",
                 "quality": "中高",
@@ -919,9 +1006,11 @@ def previews(req: PreviewsReq):
         path = os.path.join(pdir, f"img_{i}.png")
         with open(path, "wb") as f:
             f.write(blob)
-        items.append({"index": i, "seed": i, "tag": tag, "source": src,
-                      "b64": base64.b64encode(blob).decode(),
-                      "path": f"/api/data/{sid}/previews/img_{i}.png"})
+        item = {"index": i, "seed": i, "tag": tag, "source": src,
+                "path": f"/api/data/{sid}/previews/img_{i}.png"}
+        if req.include_b64:
+            item["b64"] = base64.b64encode(blob).decode()
+        items.append(item)
     if not items:
         pg.fail("这次没能生成出预览图，请再试一次")
         raise HTTPException(500, "这次没能生成出预览图，请再试一次")
@@ -1001,7 +1090,9 @@ def to_3d(req: ThreeDReq):
     out = os.path.join(sd, "model")
     os.makedirs(out, exist_ok=True)
     try:
-        info = triposr_runner.generate_3d(src, out)
+        info = mesh_isolation.run_local_mesh(
+            "triposr", src, out, log_dir=os.path.join(DATA, "logs")
+        )
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, "这次没能生成出模型，请再试一次")
@@ -1163,7 +1254,9 @@ def _previews_v2_worker(req: PreviewsV2Req, sid: str):
     if not raw_items:
         pg.fail('这次没能生成出预览图，请再试一次')
         return
-    items, n_saved, n_failed = _save_preview_items(raw_items, pdir, captions, sub_prompts, sid, req.n, pg)
+    items, n_saved, n_failed = _save_preview_items(
+        raw_items, pdir, captions, sub_prompts, sid, req.n, pg,
+        include_b64=req.include_b64)
     if not items:
         pg.fail('图片服务暂时不可用，请稍后再试')
         return
@@ -1244,7 +1337,9 @@ def to_3d_multi(req: ThreeDMultiReq):
             canvas.save(aug_path)
         target = os.path.join(out_dir, f"seed_{s}")
         try:
-            info = triposr_runner.generate_3d(aug_path, target)
+            info = mesh_isolation.run_local_mesh(
+                "triposr", aug_path, target, log_dir=os.path.join(DATA, "logs")
+            )
             items.append({
                 "seed": int(s),
                 "aug_path": aug_path,
@@ -1334,7 +1429,11 @@ def to_3d_v2(req: ThreeDV2Req):
     out = os.path.join(sd, "model")
     os.makedirs(out, exist_ok=True)
     try:
-        info = triposr_runner.generate_3d(view_paths, out, mc_res=128, threshold=15.0)
+        info = mesh_isolation.run_local_mesh(
+            "triposr", view_paths, out,
+            log_dir=os.path.join(DATA, "logs"),
+            mc_res=128, threshold=15.0,
+        )
     except Exception as e:
         traceback.print_exc()
         pg.fail("这次没能生成出模型，请再试一次")
@@ -1385,8 +1484,10 @@ def to_3d_hy(req: ThreeDHYReq):
     out = os.path.join(sd, "model")
     os.makedirs(out, exist_ok=True)
     try:
-        info = hunyuan_runner.generate_3d(
+        info = mesh_isolation.run_local_mesh(
+            "hunyuan",
             src, out,
+            log_dir=os.path.join(DATA, "logs"),
             num_inference_steps=req.steps,
             octree_resolution=req.octree,
         )
@@ -1428,6 +1529,12 @@ def to_3d_tripo(req: ThreeDTripoReq):
     # visitor for seconds whenever the provider is slow, which is exactly
     # the "卡住" the workbench must never show.
     bal = _cached_tripo_balance()
+    # 额度可能暂时查不到（后台探针还没跑完）。这时它是「未知」，不是 0，
+    # 更不能是「没定义」—— 之前这里没给默认值，模型生成成功之后组装
+    # 响应时直接抛 UnboundLocalError，整个请求变成 500，前端只好换到
+    # 低质量的本地兜底通道，用户看到的就是「明明有 Tripo 的 key，
+    # 做出来的东西却很糙」。
+    credits: int | None = None
     if isinstance(bal, dict) and bal.get("ok"):
         credits = int(bal.get("balance", 0))
         if credits < 30:
@@ -1632,9 +1739,12 @@ class BambuSetReq(BaseModel):
 
 class SoftwareOpenReq(BaseModel):
     software_id: str
-    session_id: str
+    session_id: str = ""
     fmt: str = "stl"
     image_index: int = 0
+    # An explicit file inside the project (a preset model, for example).
+    # It is validated against the allowed roots before anything is opened.
+    path: str = ""
 
 
 class FromImageReq(BaseModel):
@@ -2050,6 +2160,8 @@ def software_path_set(req: SoftwarePathReq):
         raise HTTPException(400, f"文件不存在：{expanded}")
     if not expanded.lower().endswith(".exe"):
         raise HTTPException(400, "请填写 .exe 可执行文件的路径")
+    if not software_integrations.is_plausible_executable(expanded):
+        raise HTTPException(400, "这是一个命令行外壳程序，不是切片 / 切割软件，请填写软件自己的 exe 路径")
     software_integrations.save_override(tool_id, expanded)
     tool = next(
         (item for item in software_integrations.detect_software() if item["id"] == tool_id),
@@ -2079,9 +2191,37 @@ def software_open(req: SoftwareOpenReq):
     if fmt not in {"stl", "obj", "glb", "png", "svg"}:
         raise HTTPException(400, "当前只支持 STL、OBJ、GLB、PNG 或 SVG 导入")
     sid = (req.session_id or "").strip()
-    if not sid or any(part in sid for part in ("..", "\\", "/")):
+    explicit_path = (req.path or "").strip()
+    if explicit_path:
+        # A preset model or another file that already lives in the project.
+        # Only files under the project's own roots may be opened.  A
+        # relative path is resolved against the project folder so the
+        # browser never has to know where the project sits on disk.
+        raw_path = os.path.expandvars(os.path.expanduser(explicit_path))
+        if not os.path.isabs(raw_path):
+            # The presets live next to cartoon-print-studio while the
+            # session data lives inside it, so both folders are tried.
+            here = os.path.abspath(__file__)
+            project_roots = [
+                os.path.dirname(os.path.dirname(here)),
+                os.path.dirname(os.path.dirname(os.path.dirname(here))),
+            ]
+            candidates = [
+                os.path.join(root, raw_path.replace("/", os.sep))
+                for root in project_roots
+            ]
+            raw_path = next((c for c in candidates if os.path.isfile(c)), candidates[0])
+        candidate = os.path.abspath(raw_path)
+        allowed_roots = [os.path.abspath(DATA)]
+        if _PRESET_ROOT:
+            allowed_roots.append(os.path.abspath(_PRESET_ROOT))
+        if not any(os.path.commonpath([candidate, root]) == root for root in allowed_roots):
+            raise HTTPException(400, "文件不在宜小智项目目录内")
+        if not os.path.isfile(candidate):
+            raise HTTPException(404, "文件不存在")
+    elif not sid or any(part in sid for part in ("..", "\\", "/")):
         raise HTTPException(400, "无效的模型会话")
-    if fmt in {"png", "svg"}:
+    elif fmt in {"png", "svg"}:
         # Laser card sessions store their cut files under data/laser/<sid>/.
         laser_file = os.path.join(DATA, "laser", sid, "card.svg" if fmt == "svg" else "card.png")
         if os.path.isfile(laser_file):
@@ -2096,11 +2236,12 @@ def software_open(req: SoftwareOpenReq):
                 edited = os.path.join(preview_root, "previews", "custom_edit.png")
                 original = os.path.join(preview_root, "previews", f"img_{safe_index}.png")
                 candidate = os.path.abspath(edited if os.path.isfile(edited) else original)
-    else:
+    elif not explicit_path:
         candidate = os.path.abspath(os.path.join(session_dir(sid), "model", f"mesh.{fmt}"))
-    data_root = os.path.abspath(DATA)
-    if os.path.commonpath([candidate, data_root]) != data_root:
-        raise HTTPException(400, "模型路径不在宜小智数据目录内")
+    if not explicit_path:
+        data_root = os.path.abspath(DATA)
+        if os.path.commonpath([candidate, data_root]) != data_root:
+            raise HTTPException(400, "模型路径不在宜小智数据目录内")
     try:
         tool = next((item for item in software_integrations.detect_software() if item["id"] == req.software_id), None)
         if not tool or not tool.get("available") or not tool.get("path"):
@@ -2597,18 +2738,19 @@ def _startup():
             else:
                 print("[startup] SD 1.5 unavailable - using cloud image chain "
                       "(local checkpoint or torch missing)", flush=True)
-            if triposr_runner.is_available():
+            if mesh_isolation.probe_local_mesh("triposr").get("available"):
                 print("[startup] TripoSR available (loads on first use)", flush=True)
             else:
                 print("[startup] TripoSR unavailable - using cloud/cartoon chain "
                       "(model weights or torch missing)", flush=True)
-            if hunyuan_runner.is_available():
+            hy_status = mesh_isolation.probe_local_mesh("hunyuan")
+            if hy_status.get("available"):
                 print("[startup] Hunyuan3D-2 mini available (loads on first use)", flush=True)
             else:
                 # 打印真实原因（模型权重缺失 / 无 CUDA / torch 缺失），
                 # 原来的 "torch missing" 文案会误导排查方向。
                 print(f"[startup] Hunyuan3D-2 mini unavailable "
-                      f"({hunyuan_runner.get_status().get('reason', 'unknown')}) "
+                      f"({hy_status.get('reason', 'unknown')}) "
                       f"- using Tripo3D/cartoon chain", flush=True)
             print(f"[startup] jojo-image key loaded: {bool(api_image.JOJO_KEY)}", flush=True)
             print(f"[startup] AIXJ image keys: {len(api_image.AIXJ_IMAGE_KEYS)}", flush=True)
