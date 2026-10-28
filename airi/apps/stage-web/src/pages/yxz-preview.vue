@@ -187,7 +187,7 @@ onBeforeUnmount(() => {
       <canvas ref="canvas" aria-label="宜小智 3D 模型预览" />
       <p v-if="loading" class="yxz-preview-state">正在加载模型…</p>
       <p v-if="errorMessage" class="yxz-preview-state error">{{ errorMessage }}</p>
-      <small>拖动旋转 · 滚轮缩放 · 预览地址：{{ modelUrl }}</small>
+      <small>拖动旋转 · 滚轮缩放</small>
     </section>
   </main>
 </template>

@@ -1423,24 +1423,20 @@ def to_3d_tripo(req: ThreeDTripoReq):
     if not tripo_api.API_KEY:
         raise HTTPException(503, "3D 生成服务暂时不可用，请检查服务端密钥配置")
     pg = progress.Progress(req.session_id, "3d-tripo", reset=True)
-    # Use cached balance to avoid hanging on flaky network
+    # Only the cached balance is read here.  The probe itself runs in the
+    # background: asking for the balance on the request path would stall the
+    # visitor for seconds whenever the provider is slow, which is exactly
+    # the "卡住" the workbench must never show.
     bal = _cached_tripo_balance()
-    credits = None
     if isinstance(bal, dict) and bal.get("ok"):
         credits = int(bal.get("balance", 0))
-    elif bal is None:
-        # The cache was cold, so no balance is known yet. Asking now costs a
-        # few hundred milliseconds and saves uploading the picture for a
-        # provider that has no credit left.
-        try:
-            fresh = tripo_api.get_balance(timeout=6.0, retries=0)
-        except Exception:
-            fresh = None
-        if isinstance(fresh, dict) and fresh.get("ok"):
-            credits = int(fresh.get("balance", 0))
-    if credits is not None and credits < 30:
-        pg.fail("生成额度暂时用完了，请稍后再试一次")
-        raise HTTPException(402, "3D 生成额度暂时用完了，请稍后再试一次")
+        if credits < 30:
+            pg.fail("生成额度暂时用完了，请稍后再试一次")
+            raise HTTPException(402, "3D 生成额度暂时用完了，请稍后再试一次")
+    # A cold cache means the balance is simply unknown, not zero.  The
+    # background probe is already on its way; if the credits really are gone
+    # Tripo answers with an error and the engine chain moves on to the next
+    # provider, so there is nothing to wait for here.
     pg.emit("upload", 5, "正在上传你的设计稿…", "queued")
     sd = session_dir(req.session_id)
     src = os.path.join(sd, "previews", f"img_{req.image_index}.png")
@@ -2424,7 +2420,7 @@ async def attach_scene_asset(scene_id: str, asset: UploadFile = File(...)):
     return SCENE_STORE.public(record)
 
 
-@app.get("/api/data/{sid}/{rest:path}")
+@app.api_route("/api/data/{sid}/{rest:path}", methods=["GET", "HEAD"])
 def serve_data(sid: str, rest: str):
     p = os.path.join(DATA, sid, rest)
     if not os.path.isfile(p):

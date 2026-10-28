@@ -263,11 +263,11 @@ def process_glb(glb_path: str, out_dir: str, *, target_height_mm: float = 70.0) 
     if viewer_bbox[0][2] < 0:
         viewer.apply_translation([0, 0, -viewer_bbox[0][2]])
     glb_out = os.path.join(out_dir, "mesh.glb")
-    viewer.export(glb_out)
+    mesh_postprocess.export_atomic(viewer, glb_out)
     obj_out = os.path.join(out_dir, "mesh.obj")
     stl_out = os.path.join(out_dir, "mesh.stl")
-    solid.export(obj_out)
-    solid.export(stl_out)
+    mesh_postprocess.export_atomic(solid, obj_out)
+    mesh_postprocess.export_atomic(solid, stl_out)
     return {
         "glb": glb_out,
         "obj": obj_out,

@@ -234,6 +234,34 @@ def component_count(mesh: trimesh.Trimesh) -> int:
     return len(_face_groups(mesh))
 
 
+def export_atomic(mesh, path: str) -> str:
+    """Write a mesh to `path` without ever leaving a half-written file there.
+
+    A mesh export takes seconds.  If the server is stopped half way through,
+    the visitor would be served a truncated file that the browser refuses to
+    open - or, worse, a file that looks fine but is empty.  Writing to a
+    scratch file and moving it into place keeps the served model either the
+    old one or the new one, never a broken one.
+    """
+    import tempfile
+
+    root, ext = os.path.splitext(path)
+    handle, scratch = tempfile.mkstemp(
+        prefix=f".{os.path.basename(root)}-",
+        suffix=ext,
+        dir=os.path.dirname(path) or ".",
+    )
+    os.close(handle)
+    try:
+        mesh.export(scratch)
+        os.replace(scratch, path)
+    except Exception:
+        if os.path.exists(scratch):
+            os.remove(scratch)
+        raise
+    return path
+
+
 def export_view_glb(mesh: trimesh.Trimesh, path: str) -> None:
     """Export a viewer GLB with disconnected parts as separate scene nodes.
 
@@ -243,13 +271,13 @@ def export_view_glb(mesh: trimesh.Trimesh, path: str) -> None:
     """
     groups = _face_groups(mesh)
     if len(groups) <= 1:
-        mesh.export(path)
+        export_atomic(mesh, path)
         return
     scene = trimesh.Scene()
     for index, group in enumerate(groups):
         part = _select_faces(mesh, group)
         scene.add_geometry(part, node_name=f"part_{index + 1}", geom_name=f"part_{index + 1}")
-    scene.export(path)
+    export_atomic(scene, path)
 
 
 def _connected_face_groups(mesh: trimesh.Trimesh) -> list:
@@ -603,6 +631,203 @@ def make_matte_material(mesh, roughness: float = 0.62, metallic: float = 0.0):
     return mesh
 
 
+def _face_components(faces: np.ndarray, n_verts: int) -> np.ndarray:
+    """Label the connected components of the face graph.
+
+    Two faces are in the same component when they share an edge.  The mesh
+    stores a texture seam as two different vertex indices that sit in the
+    same place, so this grouping is exactly the texture islands: a seam
+    cuts the surface open in the index topology and the pieces on either
+    side land in different components.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    n_faces = len(faces)
+    if n_faces == 0:
+        return np.zeros(0, dtype=np.int64)
+
+    edges = np.sort(
+        np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]),
+        axis=1,
+    )
+    key = edges[:, 0].astype(np.int64) * np.int64(max(n_verts, 1)) + edges[:, 1]
+    owner = np.tile(np.arange(n_faces), 3)
+    order = np.argsort(key, kind="stable")
+    key = key[order]
+    owner = owner[order]
+
+    start = np.flatnonzero(np.concatenate([[True], key[1:] != key[:-1]]))
+    counts = np.diff(np.concatenate([start, [len(key)]]))
+    # Every face around one edge belongs together, so a non-manifold edge
+    # does not split a shell in two.
+    multi = np.nonzero(counts >= 2)[0]
+    rows, cols = [], []
+    for slot in multi:
+        idx = start[slot] + np.arange(counts[slot] - 1)
+        rows.extend(owner[idx].tolist())
+        cols.extend(owner[idx + 1].tolist())
+    if rows:
+        graph = coo_matrix(
+            (np.ones(len(rows)), (np.array(rows), np.array(cols))),
+            shape=(n_faces, n_faces),
+        )
+    else:
+        graph = coo_matrix((n_faces, n_faces))
+    _, labels = connected_components(graph, directed=False)
+    return labels
+
+
+def _decimate_preserving_uv(vertices: np.ndarray,
+                             faces: np.ndarray,
+                             uv: np.ndarray,
+                             target_faces: int):
+    """Decimate a textured mesh without tearing the texture apart.
+
+    The cloud engines hand the model over as a surface that is cut open at
+    every texture seam: two vertices sit in the same place but carry two
+    different UVs, one for each side of the cut.  A plain simplification
+    merges those two points, keeps a single UV, and the triangles on the
+    other side stretch across the whole atlas - the white cracks the
+    visitor sees all over the model.
+
+    The work is done in three steps:
+
+    1. The mesh is welded by position, so the surface is closed and the
+       simplifier cannot tear it apart.
+    2. The welded mesh is simplified as one piece, which keeps every
+       island exactly where it was.
+    3. The result is split back into its texture islands and every island
+       gets its own copy of the shared points, so each copy can carry the
+       UV of its own side of the seam.  The UVs are read off the closest
+       spot of the original surface, which keeps every triangle inside one
+       island of the atlas.
+    """
+    from fast_simplification import simplify
+    from scipy.spatial import cKDTree
+
+    n_verts = len(vertices)
+    labels = _face_components(faces, n_verts)
+
+    # -- 1) weld by position --------------------------------------------
+    _, weld_id = np.unique(np.round(vertices, 6), axis=0, return_inverse=True)
+    weld_count = np.bincount(weld_id)
+    welded_vertices = np.zeros((len(weld_count), 3))
+    np.add.at(welded_vertices, weld_id, vertices)
+    welded_vertices /= weld_count[:, None]
+    welded_faces = weld_id[faces]
+    keep = ((welded_faces[:, 0] != welded_faces[:, 1])
+            & (welded_faces[:, 1] != welded_faces[:, 2])
+            & (welded_faces[:, 0] != welded_faces[:, 2]))
+    welded_faces = welded_faces[keep]
+    if not len(welded_faces):
+        return vertices, faces, uv
+
+    # -- 2) simplify the welded mesh -------------------------------------
+    simplified = simplify(
+        points=welded_vertices,
+        triangles=welded_faces,
+        target_count=int(target_faces),
+        agg=7,
+    )
+    new_vertices = np.asarray(simplified[0], dtype=np.float64)
+    new_faces = np.asarray(simplified[1], dtype=np.int64)
+    if not len(new_faces):
+        return vertices, faces, uv
+
+    # -- 3) split back into the texture islands --------------------------
+    # Every simplified triangle belongs to the island of the original
+    # triangle it grew out of.
+    centroids = vertices[faces].mean(axis=1)
+    face_tree = cKDTree(centroids)
+    _, nearest_face = face_tree.query(new_vertices[new_faces].mean(axis=1), k=1)
+    face_island = labels[nearest_face]
+
+    out_v, out_f, out_uv = [], [], []
+    offset = 0
+    for island in np.unique(face_island):
+        selection = np.nonzero(face_island == island)[0]
+        island_faces = new_faces[selection]
+        used = np.unique(island_faces)
+        remap = np.full(len(new_vertices), -1, dtype=np.int64)
+        remap[used] = np.arange(len(used))
+        out_v.append(new_vertices[used])
+        out_f.append(remap[island_faces] + offset)
+        out_uv.append(_project_uvs(
+            new_vertices[used],
+            vertices,
+            faces[labels == island],
+            uv,
+        ))
+        offset += len(used)
+
+    return (
+        np.concatenate(out_v, axis=0),
+        np.concatenate(out_f, axis=0),
+        np.concatenate(out_uv, axis=0),
+    )
+
+
+def _barycentric_weights(triangles: np.ndarray, points: np.ndarray) -> np.ndarray:
+    """Barycentric coordinates of points that sit on their own triangle."""
+    a = triangles[:, 0]
+    b = triangles[:, 1]
+    c = triangles[:, 2]
+    v0 = b - a
+    v1 = c - a
+    v2 = points - a
+    d00 = (v0 * v0).sum(axis=1)
+    d01 = (v0 * v1).sum(axis=1)
+    d11 = (v1 * v1).sum(axis=1)
+    d20 = (v2 * v0).sum(axis=1)
+    d21 = (v2 * v1).sum(axis=1)
+    denom = d00 * d11 - d01 * d01
+    denom = np.where(np.abs(denom) < 1e-20, 1e-20, denom)
+    v = (d11 * d20 - d01 * d21) / denom
+    w = (d00 * d21 - d01 * d20) / denom
+    return np.stack([1.0 - v - w, v, w], axis=1)
+
+
+def _project_uvs(points: np.ndarray,
+                 vertices: np.ndarray,
+                 faces: np.ndarray,
+                 uv: np.ndarray,
+                 candidates: int = 8) -> np.ndarray:
+    """Look up the texture coordinate of the closest spot on a surface.
+
+    Every point is matched against the closest triangle of the given patch
+    and the UVs of that triangle are interpolated.  Because all three
+    corners come from one triangle they stay inside one island of the
+    atlas, which is what keeps the paint from smearing across the whole
+    texture.
+    """
+    from scipy.spatial import cKDTree
+
+    if not len(faces) or not len(points):
+        return np.zeros((len(points), 2))
+    triangles = vertices[faces]
+    face_uv = uv[faces]
+    tree = cKDTree(triangles.mean(axis=1))
+    _, found = tree.query(points, k=min(candidates, len(faces)))
+    if found.ndim == 1:
+        found = found[:, None]
+
+    best_distance = np.full(len(points), np.inf)
+    best_index = np.zeros(len(points), dtype=np.int64)
+    best_point = np.zeros((len(points), 3))
+    for slot in range(found.shape[1]):
+        index = found[:, slot]
+        closest = trimesh.triangles.closest_point(triangles[index], points)
+        distance = np.linalg.norm(closest - points, axis=1)
+        better = distance < best_distance
+        best_distance[better] = distance[better]
+        best_index[better] = index[better]
+        best_point[better] = closest[better]
+
+    weights = _barycentric_weights(triangles[best_index], best_point)
+    return (weights[:, :, None] * face_uv[best_index]).sum(axis=1)
+
+
 def optimize_for_web(mesh, *, target_faces: int = 60000, texture_size: int = 1024):
     """Shrink a textured mesh for a fast web preview and small print files.
 
@@ -610,8 +835,11 @@ def optimize_for_web(mesh, *, target_faces: int = 60000, texture_size: int = 102
     roughly 35 MB per GLB: the browser has to download all of it before the
     visitor sees their model.  Decimating the geometry and downscaling the
     textures keeps the silhouette and the paint while shrinking the download
-    by roughly 5x.  UVs are per-vertex on these meshes, so they are carried
-    over by nearest-neighbour lookup.
+    by roughly 5x.
+
+    The geometry is simplified per texture island, because a simplifier that
+    ignores the UVs welds the seam vertices apart and paints the model with
+    white cracks.
     """
     if mesh is None or len(mesh.faces) == 0:
         return mesh
@@ -625,10 +853,21 @@ def optimize_for_web(mesh, *, target_faces: int = 60000, texture_size: int = 102
     new_vertices, new_faces = vertices, faces
     new_uv = None if uv is None else np.asarray(uv)
 
-    if len(faces) > target_faces:
+    if len(faces) > target_faces and uv is not None and len(uv) == len(vertices):
+        try:
+            new_vertices, new_faces, new_uv = _decimate_preserving_uv(
+                vertices,
+                faces,
+                np.asarray(uv),
+                int(target_faces),
+            )
+        except Exception as exc:
+            print(f"[mesh] decimation skipped: {exc}", flush=True)
+            new_vertices, new_faces = vertices, faces
+            new_uv = np.asarray(uv)
+    elif len(faces) > target_faces:
         try:
             from fast_simplification import simplify
-            from scipy.spatial import cKDTree
 
             simplified = simplify(
                 points=vertices,
@@ -638,14 +877,14 @@ def optimize_for_web(mesh, *, target_faces: int = 60000, texture_size: int = 102
             )
             new_vertices = np.asarray(simplified[0], dtype=np.float64)
             new_faces = np.asarray(simplified[1], dtype=np.int64)
-            if uv is not None and len(uv) == len(vertices):
-                tree = cKDTree(vertices)
-                _, nearest = tree.query(new_vertices, k=1)
-                new_uv = np.asarray(uv)[nearest]
+            new_uv = None if uv is None else np.asarray(uv)
         except Exception as exc:
             print(f"[mesh] decimation skipped: {exc}", flush=True)
             new_vertices, new_faces = vertices, faces
             new_uv = None if uv is None else np.asarray(uv)
+    else:
+        new_vertices, new_faces = vertices, faces
+        new_uv = None if uv is None else np.asarray(uv)
 
     result = trimesh.Trimesh(vertices=new_vertices, faces=new_faces, process=False)
     if new_uv is not None and material is not None:
@@ -664,9 +903,10 @@ def _save_mesh(mesh: trimesh.Trimesh, output_dir: str) -> dict:
     glb = os.path.join(output_dir, "mesh.glb")
     obj = os.path.join(output_dir, "mesh.obj")
     stl = os.path.join(output_dir, "mesh.stl")
-    mesh.export(glb)
-    mesh.export(obj)
-    mesh.export(stl)
+    # Write to a scratch file first: a half-written mesh that is served to
+    # the browser is worse than the previous one.
+    for path in (glb, obj, stl):
+        export_atomic(mesh, path)
     return {"glb": glb, "obj": obj, "stl": stl}
 
 

@@ -1,6 +1,8 @@
 const TRAILING_SLASH_RE = /\/$/
 const HTTP_URL_RE = /^https?:\/\//i
 const DASH_RE = /-/g
+/** Addresses that mean "this computer" - they mean something else to a guest. */
+const LOOPBACK_HOST_RE = /^(127\.0\.0\.1|localhost|::1|\[::1\])$/i
 
 export interface YXZPreviewRequest {
   prompt: string
@@ -150,7 +152,21 @@ export const YXZ_MODEL_TIMEOUT_MS = 10 * 60_000
 export const YXZ_LASER_CARD_TIMEOUT_MS = 120_000
 
 export function getYXZPrintApiBase() {
-  return (import.meta.env.VITE_CARTOON_PRINT_API || 'http://127.0.0.1:8000').replace(TRAILING_SLASH_RE, '')
+  const configured = (import.meta.env.VITE_CARTOON_PRINT_API || 'http://127.0.0.1:8000').replace(TRAILING_SLASH_RE, '')
+  // 局域网里别的电脑打开这个页面时，配置里的 127.0.0.1 指的是访问者自己
+  // 那台电脑：对话走 runtime 通道还能通，3D 生成和预览走这个地址必然失败。
+  // 前端已经把 /api 代理到本机的宜小智后端，所以这里改用同源地址，
+  // 只要能打开网页就能生成和预览。
+  if (typeof window !== 'undefined' && window.location.hostname && !LOOPBACK_HOST_RE.test(window.location.hostname)) {
+    try {
+      if (LOOPBACK_HOST_RE.test(new URL(configured).hostname))
+        return ''
+    }
+    catch {
+      // Not a plain URL - keep the configured value.
+    }
+  }
+  return configured
 }
 
 export function buildYXZPreviewPrompt(description: string, options: string[] = []) {

@@ -42,7 +42,12 @@ export function initializeAuth() {
   // (e.g. /auth/callback). initializeAuth() only restores existing
   // sessions and refresh schedules — it does NOT consume the code.
 
-  fetchSession().catch(() => {})
+  // Only ask the server about a session when there is a token to look up.
+  // Without one the answer is always "no session", so the request buys
+  // nothing - it only adds a console error on a machine that cannot reach
+  // the AIRI cloud, such as a visitor on the local network.
+  if (getAuthToken())
+    fetchSession().catch(() => {})
 
   // Restore OIDC token refresh scheduling from persisted state
   const authStore = useAuthStore()

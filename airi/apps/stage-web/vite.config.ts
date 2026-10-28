@@ -24,6 +24,15 @@ import { VitePWA } from 'vite-plugin-pwa'
 const stageUIAssetsRoot = resolve(join(import.meta.dirname, '..', '..', 'packages', 'stage-ui', 'src', 'assets'))
 const sharedCacheDir = resolve(join(import.meta.dirname, '..', '..', '.cache'))
 
+// The 宜小智 backend (3D generation, model files, speech pack).  The
+// frontend proxies /api to it, so a visitor on the local network only needs
+// the frontend port open - the backend stays on this machine.
+const printApiTarget = (env.VITE_CARTOON_PRINT_API || 'http://127.0.0.1:8000').replace(/\/+$/, '')
+// The local Voicebox speech pack runs on this machine as well.  Visitors on
+// the network must reach it through the frontend, because a loopback address
+// in their browser points at their own computer.
+const voiceboxTarget = (env.VITE_VOICEBOX_API || 'http://127.0.0.1:17493').replace(/\/+$/, '')
+
 function hasFlagEnableMkcert(): boolean {
   if (process.argv.includes('--mkcert')) {
     return true
@@ -77,6 +86,17 @@ export default defineConfig({
     },
   },
   server: {
+    proxy: {
+      '/api': {
+        target: printApiTarget,
+        changeOrigin: true,
+      },
+      '/voicebox-api': {
+        target: voiceboxTarget,
+        changeOrigin: true,
+        rewrite: (path: string) => path.replace(/^\/voicebox-api/, ''),
+      },
+    },
     fs: {
       // To mute errors like:
       //   The request id ".../node_modules/@fontsource/sniglet/files/sniglet-latin-400-normal.woff" is outside of Vite serving allow list.

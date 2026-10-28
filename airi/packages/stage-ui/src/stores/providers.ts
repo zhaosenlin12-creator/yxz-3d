@@ -69,8 +69,48 @@ import { createWebSpeechAPIProvider } from './providers/web-speech-api'
  * the 宜小智 backend lives.
  */
 function getEdgeTtsBaseUrl(): string {
-  const raw = import.meta.env.VITE_CARTOON_PRINT_API || 'http://127.0.0.1:8000'
-  return raw.replace(TRAILING_SLASH_RE, '')
+  const raw = (import.meta.env.VITE_CARTOON_PRINT_API || 'http://127.0.0.1:8000').replace(TRAILING_SLASH_RE, '')
+  // Same story as the 3D preview: from another computer on the network the
+  // configured loopback address points at the visitor's own machine, so the
+  // speech pack is asked for through the frontend's own /api proxy.
+  if (typeof window !== 'undefined' && window.location.hostname
+    && !/^(127\.0\.0\.1|localhost|::1|\[::1\])$/i.test(window.location.hostname)) {
+    try {
+      if (/^(127\.0\.0\.1|localhost|::1|\[::1\])$/i.test(new URL(raw).hostname))
+        return ''
+    }
+    catch {
+      // Not a plain URL - keep the configured value.
+    }
+  }
+  return raw
+}
+
+/**
+ * Where the local Voicebox speech pack lives.
+ *
+ * Voicebox runs on the machine that hosts 宜小智.  A visitor on the local
+ * network has no Voicebox of their own, so the loopback address in the
+ * saved provider config would point at their own computer and every
+ * request would fail.  For them the pack is reached through the frontend's
+ * own /voicebox-api proxy, which forwards to the host.
+ */
+function resolveVoiceboxBaseUrl(configured?: unknown): string {
+  const raw = (typeof configured === 'string' && configured.trim()
+    ? configured.trim()
+    : 'http://127.0.0.1:17493').replace(TRAILING_SLASH_RE, '')
+  if (typeof window === 'undefined' || !window.location.hostname)
+    return raw
+  if (/^(127\.0\.0\.1|localhost|::1|\[::1\])$/i.test(window.location.hostname))
+    return raw
+  try {
+    if (/^(127\.0\.0\.1|localhost|::1|\[::1\])$/i.test(new URL(raw).hostname))
+      return '/voicebox-api'
+  }
+  catch {
+    // Not a plain URL - keep the configured value.
+  }
+  return raw
 }
 
 /** Pull `text` / `voice` out of the OpenAI-style body @xsai generates. */
@@ -348,9 +388,7 @@ export const useProvidersStore = defineStore('providers', () => {
       }),
       requiresCredentials: false,
       createProvider: async (config) => {
-        const baseUrl = typeof config.baseUrl === 'string' && config.baseUrl.trim()
-          ? config.baseUrl.trim().replace(TRAILING_SLASH_RE, '')
-          : 'http://127.0.0.1:17493'
+        const baseUrl = resolveVoiceboxBaseUrl(config.baseUrl)
         const defaultProfileId = typeof config.profileId === 'string' ? config.profileId.trim() : ''
         const modelSize = config.modelSize === '0.6B' ? '0.6B' : '1.7B'
         const instruct = typeof config.instruct === 'string' ? config.instruct : undefined
@@ -413,9 +451,7 @@ export const useProvidersStore = defineStore('providers', () => {
           },
         ],
         listVoices: async (config) => {
-          const baseUrl = typeof config.baseUrl === 'string' && config.baseUrl.trim()
-            ? config.baseUrl.trim().replace(TRAILING_SLASH_RE, '')
-            : 'http://127.0.0.1:17493'
+          const baseUrl = resolveVoiceboxBaseUrl(config.baseUrl)
           const response = await fetch(`${baseUrl}/profiles`)
           if (!response.ok)
             throw new Error(`Voicebox 声音档案不可用（HTTP ${response.status}）`)
@@ -477,9 +513,25 @@ export const useProvidersStore = defineStore('providers', () => {
       }),
       requiresCredentials: false,
       createProvider: async (config) => {
-        const baseUrl = typeof config.baseUrl === 'string' && config.baseUrl.trim()
+        const configuredBase = typeof config.baseUrl === 'string' && config.baseUrl.trim()
           ? config.baseUrl.trim().replace(TRAILING_SLASH_RE, '')
           : getEdgeTtsBaseUrl()
+        // A stored loopback address belongs to the machine that saved it.
+        // A visitor from another computer has to ask for the speech pack
+        // through the frontend's own /api proxy.
+        const baseUrl = (() => {
+          if (typeof window !== 'undefined' && window.location.hostname
+            && !/^(127\.0\.0\.1|localhost|::1|\[::1\])$/i.test(window.location.hostname)) {
+            try {
+              if (/^(127\.0\.0\.1|localhost|::1|\[::1\])$/i.test(new URL(configuredBase).hostname))
+                return ''
+            }
+            catch {
+              // Not a plain URL - keep the configured value.
+            }
+          }
+          return configuredBase
+        })()
         const defaultVoice = typeof config.voice === 'string' && config.voice.trim()
           ? config.voice.trim()
           : 'zh-CN-XiaoxiaoNeural'

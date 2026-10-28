@@ -17,6 +17,11 @@ class SoftwareDiscoveryTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.addCleanup(self.temp.cleanup)
+        # The registry / shortcut lookup is memoised for a few minutes, so a
+        # lookup from an earlier test would still be cached here and the
+        # patched candidates below would never be looked at.
+        software_integrations._discovery_cache["value"] = None
+        software_integrations._discovery_cache["expires_at"] = 0.0
 
     def executable(self, name):
         path = self.root / name

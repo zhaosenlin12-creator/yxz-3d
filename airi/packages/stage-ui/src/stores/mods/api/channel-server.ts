@@ -58,6 +58,30 @@ export const useModsServerChannelStore = defineStore('mods:channels:proj-airi:se
   const reconnectedCallbacks = new Set<() => void>()
 
   const defaultWebSocketUrl = import.meta.env.VITE_AIRI_WS_URL || 'ws://localhost:6121/ws'
+  /**
+   * The runtime listens on this machine.  A visitor that opened the page
+   * from another computer on the network must not be pointed at its own
+   * `localhost`, so a loopback host is replaced with the host the page was
+   * loaded from.
+   */
+  const resolveWebSocketUrl = (url: string) => {
+    const value = (url || '').trim()
+    if (!value)
+      return defaultWebSocketUrl
+    try {
+      const parsed = new URL(value)
+      const pageHost = typeof window !== 'undefined' ? window.location.hostname : ''
+      if (pageHost && !/^(127\.0\.0\.1|localhost|::1|\[::1\])$/i.test(pageHost)
+        && /^(127\.0\.0\.1|localhost|::1|\[::1\])$/i.test(parsed.hostname)) {
+        parsed.hostname = pageHost
+        return parsed.toString()
+      }
+    }
+    catch {
+      // Not a plain URL - keep it as it is.
+    }
+    return value
+  }
   const websocketUrl = useLocalStorage('settings/connection/websocket-url', defaultWebSocketUrl)
   const websocketAuthToken = useLocalStorage('settings/connection/websocket-auth-token', '')
   const registeredListeners: ChannelListenerEntry[] = []
@@ -109,7 +133,7 @@ export const useModsServerChannelStore = defineStore('mods:channels:proj-airi:se
     initializing.value = new Promise<void>((resolve) => {
       client.value = new Client({
         name: isStageWeb() ? WebSocketEventSource.StageWeb : isStageTamagotchi() ? WebSocketEventSource.StageTamagotchi : WebSocketEventSource.StageWeb,
-        url: websocketUrl.value || defaultWebSocketUrl,
+        url: resolveWebSocketUrl(websocketUrl.value || defaultWebSocketUrl),
         token: options?.token ?? (websocketAuthToken.value || undefined),
         websocketConstructor: websocketConstructor.value,
         heartbeat: {

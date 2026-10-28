@@ -155,7 +155,11 @@ if ($NoServerRuntime) {
     $out = Join-Path $run "runtime-$RuntimePort.out.log"
     $err = Join-Path $run "runtime-$RuntimePort.err.log"
     $prevPort = $env:PORT
+    $prevHost = $env:HOST
     $env:PORT = "$RuntimePort"
+    # The channel has to be reachable from the other computers on the
+    # network, otherwise they can open the workbench but never talk to it.
+    $env:HOST = '0.0.0.0'
     Step "启动 server-runtime (: $RuntimePort) ..."
     try {
         $runtimeProc = Start-Process -FilePath $tsx `
@@ -165,6 +169,8 @@ if ($NoServerRuntime) {
     } finally {
         if ($null -eq $prevPort) { Remove-Item Env:PORT -ErrorAction SilentlyContinue }
         else { $env:PORT = $prevPort }
+        if ($null -eq $prevHost) { Remove-Item Env:HOST -ErrorAction SilentlyContinue }
+        else { $env:HOST = $prevHost }
     }
     Ok "server-runtime 进程 PID=$($runtimeProc.Id)"
 }

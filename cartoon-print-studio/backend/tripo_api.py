@@ -644,8 +644,13 @@ def _prepare_source(mesh) -> Any:
         mesh.apply_scale(mesh_postprocess.PRINT_LENGTH_MM / largest)
     # Drop the loose fragments, keep every real body of the figurine.
     mesh = mesh_postprocess.keep_significant_shells(mesh)
-    # merge_tex keeps the UV coordinates, so the paint survives the cleanup
-    mesh.merge_vertices(merge_tex=True)
+    # Only merge vertices that really are the same point *and* carry the
+    # same texture coordinates.  trimesh's merge_tex=True welds vertices
+    # regardless of their UVs, which closes the texture seams: the two
+    # copies of a seam vertex end up with one UV and the triangles on the
+    # other side stretch across the whole atlas, which is what paints the
+    # white cracks over the model.
+    mesh.merge_vertices(merge_tex=False)
     mesh.update_faces(mesh.unique_faces())
     mesh.remove_unreferenced_vertices()
     return mesh
@@ -684,16 +689,17 @@ def process_for_print(pbr_glb_path: str, out_dir: str, *,
     paths: Dict[str, str] = {}
     stl_path = os.path.join(out_dir, "mesh.stl")
     obj_path = os.path.join(out_dir, "mesh.obj")
-    printable.export(stl_path)
+    import mesh_postprocess
+    mesh_postprocess.export_atomic(printable, stl_path)
     paths["stl"] = stl_path
-    printable.export(obj_path)
+    mesh_postprocess.export_atomic(printable, obj_path)
     paths["obj"] = obj_path
 
     # GLB keeps visual (PBR textures) — viewers in the browser use this
     if keep_visual:
         glb_path = os.path.join(out_dir, "mesh.glb")
         try:
-            viewer.export(glb_path)
+            mesh_postprocess.export_atomic(viewer, glb_path)
             paths["glb"] = glb_path
         except Exception as e:
             print(f"[tripo] glb export failed: {e}", flush=True)
