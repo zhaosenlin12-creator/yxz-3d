@@ -77,6 +77,10 @@ def main() -> int:
         # in the settings, so they must survive a reload: only a seed that
         # really wants to move the voice sets this flag.
         "speechOverride": False,
+        # Bumped whenever the speech chain (primary + fallbacks) changes. The
+        # frontend applies the seed once while the stored version is older,
+        # so an existing installation moves onto the new chain exactly once.
+        "speechChainVersion": 2,
         "providers": {
             "minimax": {
                 **minimax,
@@ -100,21 +104,37 @@ def main() -> int:
                 "modelSize": "1.7B",
                 "instruct": "温暖、活泼、亲切，带一点可爱的卡通感，语速自然，像宜小智在和用户面对面交流。",
             },
+            # Free Microsoft Edge neural voices. The synthesis happens in the
+            # local backend, so the frontend only needs the backend address.
+            "edge-tts-free": {
+                "baseUrl": "http://127.0.0.1:8000",
+                "model": "edge-tts",
+                "voice": "zh-CN-XiaoxiaoNeural",
+                "rate": "+0%",
+                "pitch": "+0Hz",
+                "volume": "+0%",
+            },
         },
         "activeProvider": "minimax",
         "activeModel": "MiniMax-M2.7",
         "speech": {
-            # The local voice pack goes first because it does not depend on a
-            # network round trip; MiniMax is the cloud backup for when the
-            # local service is not running.
-            "provider": "voicebox-local",
-            "model": "qwen-custom-voice-1.7B",
+            # MiniMax is the primary voice: it has the fullest Chinese voice
+            # pack and the narration quality the 宜小智 videos rely on. The
+            # local Voicebox pack is the first backup (no network round trip)
+            # and the free Edge neural voices close the list.
+            "provider": "minimax-audio-speech",
+            "model": "speech-2.5-hd",
+            "voice": "female-shaonv",
             "fallbacks": [
                 {
-                    "providerId": "minimax-audio-speech",
-                    "model": "speech-2.5-hd",
-                    "voice": "female-shaonv",
-                }
+                    "providerId": "voicebox-local",
+                    "model": "qwen-custom-voice-1.7B",
+                },
+                {
+                    "providerId": "edge-tts-free",
+                    "model": "edge-tts",
+                    "voice": "zh-CN-XiaoxiaoNeural",
+                },
             ],
         },
     }

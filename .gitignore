@@ -164,6 +164,9 @@ airi/apps/stage-web/public/provider-seed.json
 # rebuilt with:
 #   python cartoon-print-studio/scripts/build_preset_models.py --stage models
 presets/build/*.tmp
+# The Tripo task bookkeeping the preset build writes next to the model.
+# It only records how a preset was generated, it is not needed at runtime.
+presets/models/*/_tripo_state.json
 
 # Character model assets & runtime data (shipped in zip only)
 cartoon-print-studio/data/yxz_character_tripo

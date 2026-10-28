@@ -61,6 +61,37 @@ import { buildOpenAICompatibleProvider } from './providers/openai-compatible-bui
 import { buildOpenRouterAudioSpeechProvider } from './providers/openrouter/audio-speech'
 import { createWebSpeechAPIProvider } from './providers/web-speech-api'
 
+/**
+ * The local backend that also serves the free Edge speech pack.
+ *
+ * The Edge voices are rendered server side (the `edge-tts` package talks to
+ * Microsoft's websocket endpoint), so the frontend only needs to know where
+ * the 宜小智 backend lives.
+ */
+function getEdgeTtsBaseUrl(): string {
+  const raw = import.meta.env.VITE_CARTOON_PRINT_API || 'http://127.0.0.1:8000'
+  return raw.replace(TRAILING_SLASH_RE, '')
+}
+
+/** Pull `text` / `voice` out of the OpenAI-style body @xsai generates. */
+function parseOpenAiSpeechBody(rawBody: string | undefined): { text: string, voice?: string } {
+  let parsed: Record<string, unknown> = {}
+  if (typeof rawBody === 'string' && rawBody.length > 0) {
+    try {
+      parsed = JSON.parse(rawBody) as Record<string, unknown>
+    }
+    catch {
+      parsed = {}
+    }
+  }
+
+  const text = typeof parsed.text === 'string'
+    ? parsed.text
+    : (typeof parsed.input === 'string' ? parsed.input : '')
+  const voice = typeof parsed.voice === 'string' ? parsed.voice : undefined
+  return { text, voice }
+}
+
 const ALIYUN_NLS_REGIONS = [
   'cn-shanghai',
   'cn-shanghai-internal',
@@ -419,6 +450,128 @@ export const useProvidersStore = defineStore('providers', () => {
         validateProviderConfig: (config) => {
           const baseUrl = typeof config.baseUrl === 'string' ? config.baseUrl.trim() : ''
           const errors = [!baseUrl && new Error('Voicebox Base URL is required.')].filter(Boolean) as Error[]
+          return {
+            errors,
+            reason: errors.map(error => error.message).join(', '),
+            valid: errors.length === 0,
+          }
+        },
+      },
+    },
+    'edge-tts-free': {
+      id: 'edge-tts-free',
+      category: 'speech',
+      tasks: ['text-to-speech', 'tts'],
+      nameKey: 'settings.pages.providers.provider.edge-tts-free.title',
+      name: 'Edge Neural Voices (Free)',
+      descriptionKey: 'settings.pages.providers.provider.edge-tts-free.description',
+      description: 'Microsoft Edge 免费神经语音，无需密钥',
+      icon: 'i-solar:volume-high-bold-duotone',
+      defaultOptions: () => ({
+        baseUrl: getEdgeTtsBaseUrl(),
+        model: 'edge-tts',
+        voice: 'zh-CN-XiaoxiaoNeural',
+        rate: '+0%',
+        pitch: '+0Hz',
+        volume: '+0%',
+      }),
+      requiresCredentials: false,
+      createProvider: async (config) => {
+        const baseUrl = typeof config.baseUrl === 'string' && config.baseUrl.trim()
+          ? config.baseUrl.trim().replace(TRAILING_SLASH_RE, '')
+          : getEdgeTtsBaseUrl()
+        const defaultVoice = typeof config.voice === 'string' && config.voice.trim()
+          ? config.voice.trim()
+          : 'zh-CN-XiaoxiaoNeural'
+        const rate = typeof config.rate === 'string' && config.rate.trim() ? config.rate.trim() : '+0%'
+        const pitch = typeof config.pitch === 'string' && config.pitch.trim() ? config.pitch.trim() : '+0Hz'
+        const volume = typeof config.volume === 'string' && config.volume.trim() ? config.volume.trim() : '+0%'
+
+        const provider: SpeechProvider = {
+          speech: (model: string) => ({
+            apiKey: '',
+            baseURL: `${baseUrl}/`,
+            model,
+            fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
+              const rawBody = typeof init?.body === 'string' && init.body.length > 0 ? init.body : undefined
+              const parsed = parseOpenAiSpeechBody(rawBody)
+              const text = parsed.text
+              if (!text)
+                throw new Error('Edge 语音包没有收到需要合成的文本')
+              const voice = typeof parsed.voice === 'string' && parsed.voice.trim()
+                ? parsed.voice.trim()
+                : defaultVoice
+
+              const response = await fetch(`${baseUrl}/api/tts/edge`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ text, voice, rate, pitch, volume }),
+                signal: init?.signal,
+              })
+              if (!response.ok) {
+                let detail = ''
+                try {
+                  detail = await response.text()
+                }
+                catch {
+                  detail = ''
+                }
+                throw new Error(`Edge 语音包合成失败（HTTP ${response.status}）${detail ? `：${detail.slice(0, 180)}` : ''}`)
+              }
+              return response
+            },
+          }),
+        }
+
+        return provider
+      },
+      capabilities: {
+        listModels: async () => [
+          {
+            id: 'edge-tts',
+            name: 'Edge Neural Voices',
+            provider: 'edge-tts-free',
+            description: '微软 Edge 免费神经语音，中英文自然度接近商用 TTS',
+            contextLength: 0,
+            deprecated: false,
+          },
+        ],
+        listVoices: async (config) => {
+          const baseUrl = typeof config.baseUrl === 'string' && config.baseUrl.trim()
+            ? config.baseUrl.trim().replace(TRAILING_SLASH_RE, '')
+            : getEdgeTtsBaseUrl()
+          const response = await fetch(`${baseUrl}/api/tts/edge/voices`)
+          if (!response.ok)
+            throw new Error(`Edge 语音包不可用（HTTP ${response.status}）`)
+
+          const raw: unknown = await response.json()
+          const list = Array.isArray(raw) ? raw : ((raw as { voices?: unknown })?.voices ?? [])
+          if (!Array.isArray(list))
+            return []
+
+          return list.flatMap((item) => {
+            if (!item || typeof item !== 'object')
+              return []
+            const voice = item as Record<string, unknown>
+            if (typeof voice.id !== 'string' || typeof voice.name !== 'string')
+              return []
+            const locale = typeof voice.locale === 'string' ? voice.locale : 'zh-CN'
+            return [{
+              id: voice.id,
+              name: voice.name,
+              provider: 'edge-tts-free',
+              description: typeof voice.description === 'string' ? voice.description : `Edge 在线语音：${voice.name}`,
+              gender: voice.gender === 'Male' ? 'male' : 'female',
+              languages: [{ code: locale, title: locale }],
+            }]
+          })
+        },
+      },
+      validators: {
+        chatPingCheckAvailable: false,
+        validateProviderConfig: (config) => {
+          const baseUrl = typeof config.baseUrl === 'string' ? config.baseUrl.trim() : ''
+          const errors = [!baseUrl && new Error('Edge 语音包需要本机后端地址。')].filter(Boolean) as Error[]
           return {
             errors,
             reason: errors.map(error => error.message).join(', '),

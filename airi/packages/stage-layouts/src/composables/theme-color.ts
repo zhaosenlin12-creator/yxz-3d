@@ -53,7 +53,15 @@ export function useThemeColor(colorFrom: () => string | Promise<string>) {
       const meta = document.querySelector('meta[name="theme-color"]')
       if (!meta)
         return
-      meta.setAttribute('content', new Color(await colorFrom()).to('srgb').toString({ format: 'hex' }))
+      const raw = String(await colorFrom() ?? '').trim()
+      if (!raw)
+        return
+      // A bare number is not a colour. Older browsers can still hold one in
+      // localStorage (the wave background used to store the theme hue as if
+      // it were a colour), and parsing it throws on every frame.
+      if (!/^(#|rgb|hsl|oklch|lab|lch|color\()/i.test(raw))
+        return
+      meta.setAttribute('content', new Color(raw).to('srgb').toString({ format: 'hex' }))
     }
     catch (error) {
       // The theme colour is cosmetic — never let it break the page.

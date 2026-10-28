@@ -171,7 +171,14 @@ async function applySelection(isImport = false) {
   busy.value = true
   try {
     if (selectedOption.value.kind === 'wave') {
-      const color = themeColorsHue.toString()
+      // The wave background does not carry a sampled colour: its tint comes
+      // from the theme hue. That hue is a plain degree number, and handing
+      // the raw number to the colour parser made every theme-colour update
+      // fail with "Could not parse 220.44 as a color".
+      const hue = Number(themeColorsHue)
+      const color = Number.isFinite(hue)
+        ? `hsl(${Math.round(hue)} 72% 52%)`
+        : ''
 
       const payload = { option: { ...selectedOption.value, blur: enableBlur.value }, color }
       if (isImport)

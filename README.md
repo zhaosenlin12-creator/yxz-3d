@@ -300,25 +300,37 @@ copy airi\apps\stage-web\public\provider-seed.json.example airi\apps\stage-web\p
 
 语音是一条**降级链**，不是只有浏览器兜底：
 
-1. **本地语音包**（Voicebox / Qwen CustomVoice，默认 `http://127.0.0.1:17493`）——
-   不走网络，最稳，排在最前面。声音档案从 `/profiles` 拉，用户在设置页选的那一个
+1. **MiniMax 云端**（`speech-2.5-hd` / `female-shaonv`）——音色最全，排最前面。
+   按字符计费，一句话十几个字符，消耗极低；`keys.txt` 里的两个 key 会轮换着，
+   第一个用完自动切第二个。
+2. **本地语音包**（Voicebox / Qwen CustomVoice，默认 `http://127.0.0.1:17493`）——
+   不走网络，云端不可用时接管。声音档案从 `/profiles` 拉，用户在设置页选的那一个
    记在 `settings/speech/voice`。
-2. **MiniMax 云端**（`speech-2.5-hd` / `female-shaonv`）——本地服务没起时自动接管。
-3. **浏览器语音**（`browser-web-speech-api`）——最后兜底。
+3. **Edge 免费神经语音**（`edge-tts-free`）——由本地后端 `edge-tts` 渲染，
+   不要 key，最后兜底，保证宜小智永远不会哑掉。
+
+> **不使用浏览器自带的 `speechSynthesis`。** 它音色平板，还依赖操作系统装了什么
+> 声音；最后一级用的是本地后端渲染的 Edge 神经语音（`/api/tts/edge`），
+> 两者不是一回事。
 
 `provider-seed.json` 里 `speech` 段就是这条链：
 
 ```json
 {
   "speech": {
-    "provider": "voicebox-local",
-    "model": "qwen-custom-voice-1.7B",
+    "provider": "minimax-audio-speech",
+    "model": "speech-2.5-hd",
+    "voice": "female-shaonv",
     "fallbacks": [
-      { "providerId": "minimax-audio-speech", "model": "speech-2.5-hd", "voice": "female-shaonv" }
+      { "providerId": "voicebox-local", "model": "qwen-custom-voice-1.7B" },
+      { "providerId": "edge-tts-free", "model": "edge-tts", "voice": "zh-CN-XiaoxiaoNeural" }
     ]
   }
 }
 ```
+
+`speechChainVersion` 是这条链的版本号：装好新版本后种子会**只接管一次**，
+把机器挪到新链上；之后你在设置页里手挑的音色就保留下来了，不会被种子拖回去。
 
 改完 `keys.txt` 后重新生成种子即可同步：
 

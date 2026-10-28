@@ -209,9 +209,27 @@ def process_glb(glb_path: str, out_dir: str, *, target_height_mm: float = 70.0) 
     # Hunyuan3D outputs Y-up; convert to Z-up with a flat bottom for slicing.
     mesh = mesh_postprocess.clean_for_print(mesh, add_base=False, source_up="y")
     mesh.apply_translation(-mesh.centroid)
-    if max(mesh.extents) > 0:
-        scale = 100.0 / max(mesh.extents)
+    # The requested size is the standing height. After the Y-up -> Z-up
+    # conversion the height is the Z extent, which is the same rule the
+    # Tripo path uses. Scaling by the longest side instead ignored the
+    # parameter completely and always produced a 100mm model.
+    extents = mesh.extents
+    height = float(extents[2]) if len(extents) >= 3 else 0.0
+    target = float(target_height_mm or 0)
+    if target > 0 and height > 0:
+        scale = target / height
+    elif max(extents) > 0:
+        scale = 100.0 / max(extents)
+    else:
+        scale = 1.0
+    if scale > 0:
         mesh.apply_scale(scale)
+    # The debris filter runs on the 100 mm scale that clean_for_print uses.
+    # Scaling down afterwards can leave a speck of a few triangles behind,
+    # and a stray loose triangle is enough to make a slicer report the model
+    # as not watertight. Drop those once more, now that the mesh has its
+    # final size.
+    mesh = _drop_print_debris(mesh)
     # Lower to z=0 for a stable print bed
     bbox = mesh.bounds
     if bbox[0][2] < 0:
@@ -230,6 +248,38 @@ def process_glb(glb_path: str, out_dir: str, *, target_height_mm: float = 70.0) 
         "faces": len(mesh.faces),
         "extents_mm": mesh.extents.tolist(),
     }
+
+
+def _drop_print_debris(mesh, *, min_faces: int = 8):
+    """Remove tiny loose fragments from a freshly scaled print mesh."""
+    import numpy as np
+    import trimesh
+
+    if mesh is None or len(mesh.faces) < min_faces:
+        return mesh
+    try:
+        from trimesh.graph import connected_components
+        groups = connected_components(mesh.face_adjacency, nodes=np.arange(len(mesh.faces)))
+    except Exception as _e:
+        print(f"[hunyuan] debris pass skipped: {_e}", flush=True)
+        return mesh
+
+    groups = [np.asarray(group, dtype=np.int64) for group in groups]
+    if len(groups) <= 1:
+        return mesh
+
+    groups.sort(key=len, reverse=True)
+    keep = groups[0]
+    if len(keep) == len(mesh.faces):
+        return mesh
+    try:
+        cleaned = mesh.submesh([keep], append=True, repair=False)
+    except Exception as _e:
+        print(f"[hunyuan] debris pass failed: {_e}", flush=True)
+        return mesh
+    print(f"[hunyuan] dropped {len(groups) - 1} loose fragment(s) "
+          f"({len(mesh.faces) - len(cleaned.faces)} faces)", flush=True)
+    return cleaned
 
 
 def image_to_model(image_path: str, out_dir: str, *,

@@ -21,6 +21,15 @@ export interface ProviderSeedFile {
    * wants to move the voice has to ask for it explicitly.
    */
   speechOverride?: boolean
+  /**
+   * Version of the speech chain (primary + fallbacks) the seed describes.
+   *
+   * The chain itself is normally the operator's choice and therefore kept
+   * across reloads. Bumping the version is how a release moves an existing
+   * installation onto a new chain exactly once: the seed wins while the
+   * stored version is older, and afterwards hand-picked voices stay put.
+   */
+  speechChainVersion?: number
   speech?: {
     provider?: string
     model?: string
@@ -39,6 +48,7 @@ export interface ProviderSeedResult {
 }
 
 const DEFAULT_SEED_URL = '/provider-seed.json'
+const SPEECH_CHAIN_VERSION_KEY = 'settings/speech/chain-version'
 
 /**
  * Read the optional local provider seed file.
@@ -114,17 +124,25 @@ export function applyProviderSeed(seed: ProviderSeedFile): ProviderSeedResult {
   // seed configures it separately. Only take over when nothing was chosen
   // yet: a hand-picked voice has to survive a restart.
   const speechSeed = seed.speech
+  // A seed that ships a newer chain moves the installation onto it once.
+  const seedChainVersion = typeof seed.speechChainVersion === 'number' ? seed.speechChainVersion : 0
+  const storedChainVersion = Number(localStorage.getItem(SPEECH_CHAIN_VERSION_KEY) || 0)
+  const chainOutdated = seedChainVersion > storedChainVersion
+
   if (speechSeed?.provider) {
     const speechStore = useSpeechStore()
     const currentProvider = speechStore.activeSpeechProvider
     const isUnconfigured = !currentProvider || currentProvider === 'speech-noop'
 
-    if (isUnconfigured || seed.speechOverride) {
+    if (isUnconfigured || seed.speechOverride || chainOutdated) {
       speechStore.activeSpeechProvider = speechSeed.provider
       if (speechSeed.model)
         speechStore.activeSpeechModel = speechSeed.model
       if (speechSeed.voice)
         speechStore.activeSpeechVoiceId = speechSeed.voice
+      // The voice object belongs to the previous provider: a voice id only
+      // means something for the provider it came from.
+      speechStore.activeSpeechVoice = undefined
       applied.push(`speech:${speechSeed.provider}`)
     }
     else {
@@ -139,7 +157,7 @@ export function applyProviderSeed(seed: ProviderSeedFile): ProviderSeedResult {
     const speechStore = useSpeechStore()
     const hasChain = (speechStore.activeSpeechFallbacks ?? []).length > 0
 
-    if (!hasChain || seed.speechOverride) {
+    if (!hasChain || seed.speechOverride || chainOutdated) {
       speechStore.activeSpeechFallbacks = speechSeed.fallbacks
       applied.push(`speech:fallbacks(${speechSeed.fallbacks.length})`)
     }
@@ -147,6 +165,9 @@ export function applyProviderSeed(seed: ProviderSeedFile): ProviderSeedResult {
       skipped.push('speech:fallbacks')
     }
   }
+
+  if (chainOutdated)
+    localStorage.setItem(SPEECH_CHAIN_VERSION_KEY, String(seedChainVersion))
 
   return { applied, skipped }
 }

@@ -89,17 +89,34 @@ $providers['voicebox-local'] = @{
     instruct  = '温暖、活泼、亲切，带一点可爱的卡通感，语速自然，像宜小智在和用户面对面交流。'
 }
 
+# 免费的 Edge 神经语音作为最后一道兜底：没有 key、不依赖本地语音包，
+# 由本地后端渲染（edge-tts），永远保证宜小智能开口。
+$providers['edge-tts-free'] = @{
+    baseUrl = 'http://127.0.0.1:8000'
+    model   = 'edge-tts'
+    voice   = 'zh-CN-XiaoxiaoNeural'
+    rate    = '+0%'
+    pitch   = '+0Hz'
+    volume  = '+0%'
+}
+
 $modules = @{
     speech = @{
-        # 本地语音包优先：本地服务不走网络，最稳；MiniMax 作为云端备份。
-        activeProvider = 'voicebox-local'
-        activeModel    = 'qwen-custom-voice-1.7B'
+        # 语音链路：MiniMax 主（音色最全）→ 本地 Voicebox 语音包备 →
+        # 免费 Edge 神经语音兜底。三级都能出声音，永远不会哑掉。
+        activeProvider = 'minimax-audio-speech'
+        activeModel    = 'speech-2.5-hd'
+        voice          = 'female-shaonv'
         language       = 'zh-CN'
         fallbacks      = @(
             @{
-                providerId = 'minimax-audio-speech'
-                model      = 'speech-2.5-hd'
-                voice      = 'female-shaonv'
+                providerId = 'voicebox-local'
+                model      = 'qwen-custom-voice-1.7B'
+            },
+            @{
+                providerId = 'edge-tts-free'
+                model      = 'edge-tts'
+                voice      = 'zh-CN-XiaoxiaoNeural'
             }
         )
     }

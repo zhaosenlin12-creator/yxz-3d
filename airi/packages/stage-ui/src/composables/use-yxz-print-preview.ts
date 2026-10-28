@@ -241,6 +241,64 @@ function absolutePrintApiUrl(path: string, baseUrl = getYXZPrintApiBase()) {
   return `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`
 }
 
+/**
+ * Turn a model path into a URL the browser can actually fetch.
+ *
+ * The 3D preview page is served by the frontend, but the model files live
+ * on the 宜小智 backend. A relative path such as `/api/presets/.../model.glb`
+ * would therefore be resolved against the frontend origin and answer with
+ * the app's own HTML page, which the GLTF loader cannot parse.
+ */
+export function resolveYXZModelUrl(path: string, baseUrl = getYXZPrintApiBase()) {
+  const value = (path || '').trim()
+  if (!value)
+    return ''
+  return absolutePrintApiUrl(value, baseUrl)
+}
+
+export interface YXZModelPart {
+  index: number
+  name: string
+  glb_url: string
+  stl_url: string
+  faces: number
+  extents_mm: number[]
+  volume_mm3: number
+}
+
+export interface YXZModelPartsResponse {
+  sessionId: string
+  count: number
+  parts: YXZModelPart[]
+}
+
+/**
+ * Split a finished model into its separate bodies.
+ *
+ * The web workbench can animate the bodies apart, but printing them
+ * separately needs one file per body - that is what the backend writes
+ * here.
+ */
+export async function listYXZModelParts(
+  sessionId: string,
+  fetcher: typeof fetch = fetch,
+): Promise<YXZModelPartsResponse> {
+  const response = await fetcher(
+    `${getYXZPrintApiBase()}/api/sessions/${encodeURIComponent(sessionId)}/parts`,
+  )
+  if (!response.ok)
+    throw new Error(`零件拆分失败（HTTP ${response.status}）`)
+  const raw: unknown = await response.json()
+  if (!isRecord(raw) || !Array.isArray(raw.parts))
+    return { sessionId, count: 0, parts: [] }
+  const parts = raw.parts.filter((item): item is YXZModelPart => isRecord(item))
+  return {
+    sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : sessionId,
+    count: typeof raw.count === 'number' ? raw.count : parts.length,
+    parts,
+  }
+}
+
 export function yxzPreviewPageUrl(modelUrl: string) {
   if (typeof window === 'undefined')
     return modelUrl

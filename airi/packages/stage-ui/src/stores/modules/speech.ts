@@ -201,6 +201,19 @@ export const useSpeechStore = defineStore('speech', () => {
       })
     }
 
+    // Nothing was configured at all. Rather than staying silent, fall back
+    // to the free Edge neural voices: they need no key and are rendered by
+    // the local backend. The browser's own speech engine is deliberately
+    // not used - it sounds flat and it depends on what the OS happens to
+    // expose.
+    if (!chain.length) {
+      chain.push({
+        providerId: 'edge-tts-free',
+        model: 'edge-tts',
+        voice: 'zh-CN-XiaoxiaoNeural',
+      })
+    }
+
     return chain
   }
 

@@ -7,7 +7,7 @@ from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 # Resolve paths: env override (packaged mode) > sibling of backend/ (source mode)
 _ROOT = (
@@ -29,6 +29,7 @@ import software_integrations
 import progress
 import project_store
 import laser_card
+import edge_tts_api
 SCENE_STORE = scene_jobs.SceneJobStore(DATA)
 PROJECT_STORE = project_store.ProjectStore(DATA)
 app = FastAPI(title="Cartoon Print Studio API")
@@ -44,6 +45,9 @@ EXT_MIME = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".webp": "image/webp",
+    # The laser cut file is an SVG: the laser software and the browser both
+    # need it to be served as an image, not as an opaque download.
+    ".svg": "image/svg+xml",
     ".mp4": "video/mp4",
     ".mov": "video/quicktime",
     ".webm": "video/webm",
@@ -535,6 +539,40 @@ def health():
             # "checking" instead of wrongly reporting the provider as down.
             "tripo3d_checking": bool(_BALANCE_PROBE["running"])}
 
+
+class EdgeTtsReq(BaseModel):
+    text: str = Field(..., min_length=1, max_length=4000)
+    voice: Optional[str] = None
+    rate: Optional[str] = None
+    pitch: Optional[str] = None
+    volume: Optional[str] = None
+
+
+@app.get("/api/tts/edge/voices")
+async def edge_tts_voices():
+    """The free Microsoft Edge neural voices 宜小智 can fall back to."""
+    try:
+        voices = await edge_tts_api.list_voices()
+    except Exception as exc:
+        raise HTTPException(503, str(exc))
+    return {"ok": True, "voices": voices}
+
+
+@app.post("/api/tts/edge")
+async def edge_tts_speak(req: EdgeTtsReq):
+    """Render a line of speech with an Edge neural voice (free, no key)."""
+    try:
+        audio = await edge_tts_api.synthesize(
+            req.text,
+            voice=req.voice,
+            rate=req.rate or edge_tts_api.DEFAULT_RATE,
+            pitch=req.pitch or edge_tts_api.DEFAULT_PITCH,
+            volume=req.volume or edge_tts_api.DEFAULT_VOLUME,
+        )
+    except Exception as exc:
+        raise HTTPException(503, f"Edge 语音包合成失败：{exc}")
+    return Response(content=audio, media_type="audio/mpeg")
+
 @app.get("/api/demo")
 def demo_model():
     """Return a bundled local model for the zero-wait first experience.
@@ -646,10 +684,12 @@ def engines():
         gpu = torch.cuda.get_device_name(0) if cuda else None
     except Exception:
         cuda, gpu = False, None
+    vram_mb = _detect_vram_mb()
     hunyuan_status = hunyuan_runner.get_status()
     return {
         "cuda": cuda,
         "gpu": gpu,
+        "vramMb": vram_mb,
         "engines": [
             {
                 "id": "hunyuan",
@@ -680,6 +720,40 @@ def engines():
                 "note": "最快的离线兜底路径",
             },
             {
+                # Stable Fast 3D reconstructs a whole object in about a
+                # second, but it only fits on a card with enough memory.
+                "id": "sf3d",
+                "available": False,
+                "local": True,
+                "label": "Stable Fast 3D",
+                "quality": "很高（带贴图）",
+                "cost": "本地免费",
+                "requiresVramMb": 10_000,
+                "note": _engine_note(
+                    "Stable Fast 3D",
+                    vram_mb,
+                    10_000,
+                    "权重未安装，或显存不足 10 GB",
+                ),
+            },
+            {
+                # Hunyuan3D-2.1 is the high-resolution sibling of the mini
+                # model that already runs here.
+                "id": "hunyuan21",
+                "available": False,
+                "local": True,
+                "label": "Hunyuan3D-2.1",
+                "quality": "最高（高模）",
+                "cost": "本地免费",
+                "requiresVramMb": 12_000,
+                "note": _engine_note(
+                    "Hunyuan3D-2.1",
+                    vram_mb,
+                    12_000,
+                    "权重未安装，或显存不足 12 GB",
+                ),
+            },
+            {
                 "id": "tripo3d",
                 "available": bool(tripo_api.health().get("key_loaded")),
                 "local": False,
@@ -690,6 +764,38 @@ def engines():
             },
         ],
     }
+
+
+def _detect_vram_mb() -> Optional[int]:
+    """Total VRAM of the first NVIDIA card, in megabytes.
+
+    ``nvidia-smi`` is queried directly so the number is available even when
+    the Python environment has no torch: the VRAM decides whether the
+    high-end engines can run at all.
+    """
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        first = result.stdout.strip().splitlines()[0].strip()
+        return int(first) if first.isdigit() else None
+    except Exception:
+        return None
+
+
+def _engine_note(label: str, vram_mb: Optional[int], required_mb: int, fallback: str) -> str:
+    """Explain honestly why a high-end engine is (not) available here."""
+    if vram_mb is None:
+        return f"未检测到 NVIDIA 显卡，{label} 无法运行"
+    if vram_mb < required_mb:
+        return f"当前显卡显存 {vram_mb // 1024} GB，{label} 需要 {required_mb // 1024} GB 以上"
+    return f"显存满足（{vram_mb // 1024} GB），但权重尚未安装"
 
 @app.get("/api/session/{sid}/result")
 def session_result(sid: str):
@@ -2000,6 +2106,105 @@ def export_model(sid: str, fmt: str, download: bool = False):
     )
 
 
+@app.get("/api/sessions/{sid}/parts")
+def session_parts(sid: str):
+    """Split a finished model into its separate bodies and export each one.
+
+    An AI generated model often arrives as several disconnected bodies (a
+    figure and its base, an arm that was not merged with the torso, ...).
+    The web workbench can animate them apart, but to *print* them separately
+    every body needs its own file. This endpoint writes one GLB and one STL
+    per body and reports what each of them is.
+    """
+    import trimesh
+
+    sd = session_dir(sid)
+    mesh_path = os.path.join(sd, "model", "mesh.glb")
+    if not os.path.isfile(mesh_path):
+        raise HTTPException(404, "模型还没有生成，暂时无法拆分零件")
+
+    out_dir = os.path.join(sd, "parts")
+    manifest_path = os.path.join(out_dir, "parts.json")
+    # The split only has to run again when the model itself changed.
+    try:
+        mesh_mtime = os.path.getmtime(mesh_path)
+        manifest_mtime = os.path.getmtime(manifest_path)
+    except OSError:
+        mesh_mtime = manifest_mtime = 0.0
+
+    if manifest_mtime >= mesh_mtime and os.path.isfile(manifest_path):
+        try:
+            with open(manifest_path, encoding="utf-8") as handle:
+                cached = json.load(handle)
+            if cached.get("sessionId") == sid:
+                return cached
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    try:
+        mesh = trimesh.load(mesh_path, force="mesh")
+    except Exception as exc:
+        raise HTTPException(500, f"模型读取失败：{exc}") from exc
+
+    groups = mesh_postprocess._face_groups(mesh)
+    if not groups:
+        raise HTTPException(500, "模型没有可拆分的几何体")
+
+    os.makedirs(out_dir, exist_ok=True)
+    parts = []
+    # A body that is smaller than half a millimetre is a rendering speck,
+    # not a part a user could print. The cloud generators leave a few of
+    # those behind, and listing them would only add noise to the panel.
+    min_extent_mm = 0.5
+    # The biggest body first: it is the part a user prints as the main
+    # figure, the rest are accessories.
+    ordered = sorted(groups, key=len, reverse=True)
+    for group in ordered:
+        try:
+            part = mesh_postprocess._select_faces(mesh, group)
+        except Exception as exc:
+            print(f"[parts] body skipped: {exc}", flush=True)
+            continue
+        if part is None or len(part.faces) == 0:
+            continue
+        if max([float(value) for value in part.extents.tolist()] or [0.0]) < min_extent_mm:
+            continue
+        index = len(parts) + 1
+        part_name = f"part_{index}"
+        glb_path = os.path.join(out_dir, f"{part_name}.glb")
+        stl_path = os.path.join(out_dir, f"{part_name}.stl")
+        try:
+            part.export(glb_path)
+            part.export(stl_path)
+        except Exception as exc:
+            print(f"[parts] body {index} export failed: {exc}", flush=True)
+            continue
+        extents = [round(float(value), 2) for value in part.extents.tolist()]
+        try:
+            volume = round(float(abs(part.volume)), 2)
+        except Exception:
+            volume = 0.0
+        parts.append({
+            "index": index,
+            "name": "主体" if index == 1 else f"零件 {index}",
+            "glb_url": f"/api/data/{sid}/parts/{part_name}.glb",
+            "stl_url": f"/api/data/{sid}/parts/{part_name}.stl",
+            "faces": int(len(part.faces)),
+            "extents_mm": extents,
+            "volume_mm3": volume,
+        })
+
+    payload = {
+        "sessionId": sid,
+        "count": len(parts),
+        "source": "connected-components",
+        "parts": parts,
+    }
+    with open(manifest_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    return payload
+
+
 @app.get("/api/printability/{sid}")
 def printability(sid: str):
     """Run a lightweight local preflight before sending a model to print."""
@@ -2136,6 +2341,43 @@ def submit_scene(scene_id: str):
     return SCENE_STORE.public(SCENE_STORE.load(scene_id) or record)
 
 
+@app.post("/api/scenes/import", status_code=201)
+async def import_scene_asset(asset: UploadFile = File(...), title: str = Form("导入的真实场景")):
+    """Load an existing Gaussian Splat result without running a training job.
+
+    GraphDECO / gsplat produce a ``.ply`` or ``.splat`` file. Training one on
+    this machine needs a GPU worker, but *loading* a result that was trained
+    elsewhere (or exported by another tool) has to work everywhere, so the
+    file goes straight into the SuperSplat viewer.
+    """
+    original = scene_jobs.safe_name(asset.filename or "scene.ply", "scene.ply")
+    lower = original.lower()
+    if not any(lower.endswith(ext) for ext in scene_jobs.SPLAT_EXTENSIONS):
+        raise HTTPException(415, "仅支持 .ply / .splat / .sog / .spz 场景成果")
+
+    record = SCENE_STORE.create(title, [])
+    scene_id = record["sceneId"]
+    rel_path = f"scene/result/{original}"
+    abs_path = os.path.join(DATA, scene_id, *rel_path.split("/"))
+    size = await _save_uploaded_file(asset, abs_path, scene_jobs.MAX_ASSET_BYTES)
+    asset_url = f"/api/data/{scene_id}/{rel_path}"
+    viewer_url = (
+        f"/vendor/supersplat/index.html?content={quote(asset_url, safe='/:')}"
+        "&settings=/vendor/supersplat/settings.json&lang=zh-CN"
+    )
+    record["status"] = "READY"
+    record["message"] = "真实场景已经可以探索"
+    record["result"] = {
+        "name": original,
+        "format": os.path.splitext(lower)[1].lstrip("."),
+        "size": size,
+        "assetUrl": asset_url,
+        "viewerUrl": viewer_url,
+    }
+    SCENE_STORE.save(record)
+    return SCENE_STORE.public(record)
+
+
 @app.post("/api/scenes/{scene_id}/asset")
 async def attach_scene_asset(scene_id: str, asset: UploadFile = File(...)):
     record = SCENE_STORE.load(scene_id)
@@ -2198,7 +2440,35 @@ def get_session_model(sid: str):
         "glb_url": f"/api/export/{sid}/glb",
         "stl_url": f"/api/export/{sid}/stl" if _has("mesh.stl") else None,
         "obj_url": f"/api/export/{sid}/obj" if _has("mesh.obj") else None,
+        # The print prep scales the Z axis to the requested height, so a
+        # finished model stands upright with Z as its height.
+        "up_axis": "z",
     }
+
+
+@app.get("/api/sessions/{sid}/previews")
+def get_session_previews(sid: str):
+    """List the preview pictures a session produced.
+
+    The workbench opens straight from a chat, where only the session id is
+    known. The full result endpoint embeds every picture as base64, which is
+    far too heavy to fetch just to learn which pictures exist, so this one
+    only reports their paths.
+    """
+    sd = session_dir(sid)
+    preview_dir = os.path.join(sd, "previews")
+    items = []
+    if os.path.isdir(preview_dir):
+        for fname in sorted(os.listdir(preview_dir)):
+            if not fname.startswith("img_") or not fname.endswith(".png"):
+                continue
+            try:
+                index = int(fname[4:-4])
+            except ValueError:
+                continue
+            items.append({"index": index, "path": f"/api/data/{sid}/previews/{fname}"})
+    items.sort(key=lambda item: item["index"])
+    return {"session_id": sid, "previews": items}
 
 
 # ---------------------------------------------------------------------------
@@ -2219,6 +2489,16 @@ _PRESET_NAMES = {
     "pose_hip": ("双手叉腰", "白色宇航服宜小智 · 双手叉腰自信站姿 · 可 3D 打印摆件"),
     "pose_salute": ("举手敬礼", "白色宇航服宜小智 · 举手敬礼精神站姿 · 可 3D 打印摆件"),
     "pose_wave_hy": ("招手·混元3D", "宜小智招手打招呼 · 混元3D 云端生成 · 可 3D 打印摆件"),
+}
+
+# Which axis of the file is the height. The Tripo presets were printed with
+# the Z axis scaled to 100 mm, the raw Hunyuan model kept its own Y-up
+# orientation.
+_PRESET_UP_AXIS = {
+    "pose_wave": "z",
+    "pose_hip": "z",
+    "pose_salute": "z",
+    "pose_wave_hy": "y",
 }
 
 
@@ -2244,6 +2524,7 @@ def list_preset_models():
             "thumbUrl": f"/api/presets/{name}/thumb.png" if os.path.isfile(thumb) else None,
             "glbUrl": f"/api/presets/{name}/model.glb",
             "stlUrl": f"/api/presets/{name}/model.stl" if os.path.isfile(stl) else None,
+            "upAxis": _PRESET_UP_AXIS.get(name, "z"),
         })
     return {"items": items}
 

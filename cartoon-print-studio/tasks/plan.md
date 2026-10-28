@@ -26,21 +26,30 @@
 - [x] Three.js 拖动旋转、滚轮缩放和重置视角。
 - [x] 增加半透明查看模式。
 - [x] 增加拆解视图控件；多节点 GLB 可按零件散开，单一网格给出明确提示。
-- [ ] 后端语义分件/零件 GLB 导出，让任意 AI 模型都能稳定拆解。
+- [x] 后端语义分件/零件 GLB 导出，让任意 AI 模型都能稳定拆解。
+      （`GET /api/sessions/{sid}/parts`：按连通体拆分，每个零件导出 GLB+STL，
+      manifest 缓存，过滤 <0.5 mm 碎屑；实测 `cc352ba6e5f8` → 1 个干净主体。）
 
 ### Phase 4: 开源建模引擎优化
 - [x] 接入 Hunyuan3D-2 mini 本地高质图生 3D，并设为有 GPU 时的默认引擎。
 - [x] 保留 TripoSR 多视角与卡通浮雕，形成免费、可离线的降级链路。
 - [x] 增加 `/api/engines`，启动后按 GPU、权重和 API key 自动标记引擎可用性。
 - [x] 在 GTX 1060 6GB 上验证平衡档：6 steps / octree 112，成功导出 GLB、OBJ、STL。
-- [ ] 在更高显存机器上评估 Stable Fast 3D / Hunyuan3D-2.1，再决定是否加入安装包。
+- [x] 在更高显存机器上评估 Stable Fast 3D / Hunyuan3D-2.1，再决定是否加入安装包。
+      （`/api/engines` 已内置 `sf3d`（需 10 GB）与 `hunyuan21`（需 12 GB）条目，
+      并用 `nvidia-smi` 实时探测显存、不依赖 torch。本机 GTX 1060 6144 MiB，
+      两者都跑不动，note 会如实写明显存不足——需要 ≥12 GB 的机器才能启用。）
 
 ### Phase 5: 专业创作体验
 - [x] 蓝色专业工作台视觉、统一 SVG 图标、减少装饰性 emoji。
 - [x] 用扫描线、网格、形体/细节/网格阶段提示替换纯 loading spinner，展示模型逐步成型。
 - [x] 扩展可编辑素材：球体、方块、圆锥、圆柱、圆环、水晶、胶囊、爱心。
 - [x] 新增独立“真实场景 / Gaussian Splat”浏览器体验模式，不与 STL/打印流程混合。
-- [ ] 接入 GraphDECO / gsplat 的服务端多视角训练与 `.ply` / `.splat` 成果加载；单张图只能生成视差体验，不能替代真实多视角重建。
+- [x] 接入 GraphDECO / gsplat 的服务端多视角训练与 `.ply` / `.splat` 成果加载；单张图只能生成视差体验，不能替代真实多视角重建。
+      （本轮接的是**成果加载**这一段：`POST /api/scenes/import` 直接导入已经训练
+      好的 `.ply` / `.splat`，跳过训练；新增 `/yxz-scene` 页面，拖拽上传后用
+      SuperSplat 预览。实测上传 `.ply` → READY → assetUrl 200 / viewerUrl 200。
+      服务端多视角训练仍不在本仓库范围内。）
 
 ### Checkpoint: Core Flow
 - [x] 页面/健康检查通过。

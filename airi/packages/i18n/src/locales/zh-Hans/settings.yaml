@@ -865,6 +865,16 @@ pages:
         playground:
           default-text: '你好，我是宜小智。告诉我你想创造什么吧。'
         title: 'Voicebox（本地）'
+      edge-tts-free:
+        description: '微软 Edge 免费神经语音，无需密钥'
+        fields:
+          field:
+            voice:
+              description: '选择 Edge 在线语音，宜小智推荐晓晓（女声）或云希（男声）。'
+              label: 'Edge 语音'
+        playground:
+          default-text: '你好，我是宜小智。告诉我你想创造什么吧。'
+        title: 'Edge 免费语音包'
       mistral:
         description: 'mistral.ai'
         title: 'Mistral'

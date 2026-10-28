@@ -865,6 +865,16 @@ pages:
         playground:
           default-text: Hello! I am YXZ. Tell me what you would like to create.
         title: Voicebox (Local)
+      edge-tts-free:
+        description: Free Microsoft Edge neural voices, no API key
+        fields:
+          field:
+            voice:
+              description: Pick an Edge online voice. Xiaoxiao (female) or Yunxi (male) suit YXZ.
+              label: Edge voice
+        playground:
+          default-text: Hello! I am YXZ. Tell me what you would like to create.
+        title: Edge Free Voices
       mistral:
         description: mistral.ai
         title: Mistral

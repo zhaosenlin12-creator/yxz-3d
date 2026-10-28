@@ -7,16 +7,82 @@ import { useRoute } from 'vue-router'
 
 import * as THREE from 'three'
 
+import { resolveYXZModelUrl } from '@proj-airi/stage-ui/composables/use-yxz-print-preview'
+
 const route = useRoute()
 const canvas = ref<HTMLCanvasElement>()
 const loading = ref(true)
 const errorMessage = ref('')
-const modelUrl = String(route.query.model ?? '')
+// The model lives on the 宜小智 backend, not on the frontend origin: a
+// relative path has to be resolved against the backend or the loader gets
+// the app's own HTML page instead of a GLB.
+const modelUrl = resolveYXZModelUrl(String(route.query.model ?? ''))
+// Which axis of the file is the height. The print pipeline scales the Z
+// axis to the requested height, so a finished model is Z-up; a raw model
+// from the 3D service can differ, and the caller knows which it is.
+const upAxis = String(route.query.up ?? '').trim().toLowerCase()
 let renderer: THREE.WebGLRenderer | undefined
 let scene: THREE.Scene | undefined
 let camera: THREE.PerspectiveCamera | undefined
 let controls: OrbitControls | undefined
 let frame = 0
+
+const AXIS_NAMES = ['x', 'y', 'z'] as const
+
+/**
+ * Work out how the model has to be turned so that it is shown the way it
+ * will be printed.
+ *
+ * The thickness of a printable model is always its smallest dimension, and
+ * the thinnest axis has to point *away* from the camera - otherwise a flat
+ * relief is only visible edge on and looks like a sliver. Of the two
+ * remaining axes the taller one is the height; when the two are nearly the
+ * same the print convention (Z) wins, because that is the axis the print
+ * pipeline scaled.
+ */
+function pickOrientation(size: THREE.Vector3, hint: string) {
+  const extents = [size.x, size.y, size.z]
+  const sorted = [0, 1, 2].sort((a, b) => extents[a] - extents[b])
+  const thin = sorted[0]
+  const rest = sorted.slice(1)
+
+  const hintIndex = AXIS_NAMES.indexOf(hint as (typeof AXIS_NAMES)[number])
+  let up: number
+  if (hintIndex >= 0 && hintIndex !== thin) {
+    up = hintIndex
+  }
+  else {
+    const [shorter, taller] = rest
+    const nearlyEqual = Math.abs(extents[shorter] - extents[taller]) / Math.max(extents[shorter], extents[taller]) < 0.25
+    up = nearlyEqual && rest.includes(2) ? 2 : taller
+  }
+
+  const width = rest.find(index => index !== up) ?? rest[0]
+  return { thin, up, width }
+}
+
+/**
+ * Turn the model into the orientation the printer expects.
+ *
+ * The axes are swapped, which can turn the rotation into a mirror image.
+ * Flipping the depth axis keeps it a proper rotation and leaves the model
+ * upright, it only decides which side of it faces the camera.
+ */
+function applyOrientation(model: THREE.Object3D, size: THREE.Vector3, hint: string) {
+  const { thin, up, width } = pickOrientation(size, hint)
+  const images = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()]
+  images[width].set(1, 0, 0)
+  images[up].set(0, 1, 0)
+  images[thin].set(0, 0, 1)
+
+  const matrix = new THREE.Matrix4().makeBasis(images[0], images[1], images[2])
+  if (matrix.determinant() < 0) {
+    images[thin].set(0, 0, -1)
+    matrix.makeBasis(images[0], images[1], images[2])
+  }
+  model.quaternion.setFromRotationMatrix(matrix)
+  model.updateMatrixWorld(true)
+}
 
 function resize() {
   if (!renderer || !camera || !canvas.value)
@@ -57,22 +123,13 @@ function startViewer() {
     if (!scene || !camera || !controls)
       return
     const model = gltf.scene
-    // Models may come from Tripo (Y-up), Hunyuan3D (Z-up after print prep) or
-    // local export. Normalize the orientation automatically: whichever axis is
-    // the tallest becomes the up axis, so the figure always stands upright.
+    // Models come from Tripo (Y-up), from Hunyuan3D (Z-up once it went
+    // through the print prep) or from a local export. Turn every one of
+    // them into the print orientation: the thinnest axis points away from
+    // the camera and the height points up.
     const rawBox = new THREE.Box3().setFromObject(model)
     const rawSize = rawBox.getSize(new THREE.Vector3())
-    const axes: Array<[string, number]> = [
-      ['x', rawSize.x],
-      ['y', rawSize.y],
-      ['z', rawSize.z],
-    ]
-    axes.sort((a, b) => b[1] - a[1])
-    const up = axes[0]?.[0] ?? 'y'
-    if (up === 'z')
-      model.rotation.x = -Math.PI / 2
-    else if (up === 'x')
-      model.rotation.z = Math.PI / 2
+    applyOrientation(model, rawSize, upAxis)
     const box = new THREE.Box3().setFromObject(model)
     const size = box.getSize(new THREE.Vector3())
     const center = box.getCenter(new THREE.Vector3())

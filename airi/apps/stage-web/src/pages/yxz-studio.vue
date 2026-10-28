@@ -1,17 +1,17 @@
 <script setup lang="ts">
-import type { YXZBuildStage, YXZLaserCardResponse, YXZLaserTemplate, YXZModelProgress } from '../../../../packages/stage-ui/src/composables/use-yxz-print-preview'
+import type { YXZBuildStage, YXZLaserCardResponse, YXZLaserTemplate, YXZModelPart, YXZModelProgress } from '../../../../packages/stage-ui/src/composables/use-yxz-print-preview'
 
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
 import YXZPreviewCanvasEditor from '../../../../packages/stage-ui/src/components/scenes/YXZPreviewCanvasEditor.vue'
 
-import { createYXZCartoonModel, createYXZLaserBackground, createYXZLaserCard, detectYXZLocalSoftware, formatYXZElapsed, getYXZPrintApiBase, listYXZLaserTemplates, openYXZLaserCardInSoftware, resolveYXZBuildStage, YXZ_BUILD_STAGES } from '../../../../packages/stage-ui/src/composables/use-yxz-print-preview'
+import { createYXZCartoonModel, createYXZLaserBackground, createYXZLaserCard, detectYXZLocalSoftware, formatYXZElapsed, getYXZPrintApiBase, listYXZLaserTemplates, listYXZModelParts, openYXZLaserCardInSoftware, resolveYXZBuildStage, YXZ_BUILD_STAGES } from '../../../../packages/stage-ui/src/composables/use-yxz-print-preview'
 
 const route = useRoute()
 const sessionId = String(route.query.session ?? '')
 const imageIndex = Number(route.query.image ?? 0)
-const previewSrc = String(route.query.src ?? '')
+const previewSrc = ref(String(route.query.src ?? ''))
 const caption = String(route.query.caption ?? '宜小智创作方案')
 
 interface YXZPresetModel {
@@ -21,6 +21,8 @@ interface YXZPresetModel {
   thumbUrl: string | null
   glbUrl: string
   stlUrl: string | null
+  /** Which axis of the file is the height, so the preview can stand it up. */
+  upAxis?: string
 }
 
 const editedDataUrl = ref('')
@@ -28,7 +30,9 @@ const building = ref(false)
 const progress = ref<YXZModelProgress | null>(null)
 const buildStartedAt = ref(0)
 const elapsedMs = ref(0)
-const model = ref<{ glbUrl: string, stlUrl: string } | null>(null)
+const model = ref<{ glbUrl: string, stlUrl: string, upAxis: string } | null>(null)
+/** The separate bodies of the current model, for printing them one by one. */
+const parts = ref<YXZModelPart[]>([])
 const errorMessage = ref('')
 const presets = ref<YXZPresetModel[]>([])
 const presetsLoading = ref(true)
@@ -219,20 +223,68 @@ async function loadExistingModel() {
     model.value = {
       glbUrl: `${getYXZPrintApiBase()}${data.glb_url}`,
       stlUrl: data.stl_url ? `${getYXZPrintApiBase()}${data.stl_url}` : '',
+      upAxis: typeof data.up_axis === 'string' ? data.up_axis : 'z',
     }
     progress.value = { percent: 100, message: '已载入本方案此前生成的 3D 模型', step: 'done' }
+    void loadParts()
   }
   catch { /* the model simply does not exist yet */ }
+}
+
+// The separate bodies of the model, so each of them can be printed on its
+// own. A model that is one solid body simply reports a single part.
+async function loadParts() {
+  if (!sessionId)
+    return
+  try {
+    const result = await listYXZModelParts(sessionId)
+    parts.value = result.parts
+  }
+  catch {
+    // The split is an extra: a model without separable bodies must not
+    // break the workbench.
+    parts.value = []
+  }
 }
 
 onMounted(() => {
   void loadPresets()
   void loadLaserTemplates()
   void loadExistingModel()
+  void loadSessionPreview()
 })
 
+// The workbench is usually opened straight from a chat session, which only
+// carries the session id. Recover the picture that session produced so the
+// canvas editor and the laser card have something to work with.
+async function loadSessionPreview() {
+  if (previewSrc.value || !sessionId)
+    return
+  const base = getYXZPrintApiBase()
+  try {
+    const resp = await fetch(`${base}/api/sessions/${encodeURIComponent(sessionId)}/previews`)
+    if (!resp.ok)
+      return
+    const data = await resp.json()
+    const previews = Array.isArray(data?.previews) ? data.previews : []
+    const wanted = previews.find((item: { index: number }) => item?.index === imageIndex)
+    const fallback = previews[0]
+    const picked = wanted ?? fallback
+    if (picked?.path)
+      previewSrc.value = `${base}${picked.path}`
+  }
+  catch {
+    // A session without previews is normal: the workbench still works, the
+    // canvas simply has nothing to edit yet.
+  }
+}
+
 function presetPreviewUrl(p: YXZPresetModel) {
-  return `/yxz-preview?model=${encodeURIComponent(`${getYXZPrintApiBase()}${p.glbUrl}`)}`
+  return `/yxz-preview?model=${encodeURIComponent(`${getYXZPrintApiBase()}${p.glbUrl}`)}&up=${encodeURIComponent(p.upAxis ?? 'z')}`
+}
+
+function partPreviewUrl(part: YXZModelPart) {
+  return `/yxz-preview?model=${encodeURIComponent(`${getYXZPrintApiBase()}${part.glb_url}`)}&up=z`
 }
 
 function presetStlDownload(p: YXZPresetModel) {
@@ -270,9 +322,10 @@ async function startModelBuild() {
         progress.value = { ...p, stage: p.stage ?? resolveYXZBuildStage(p.step, p.percent) }
       },
     })
-    model.value = { glbUrl: result.glbUrl, stlUrl: result.stlUrl }
+    model.value = { glbUrl: result.glbUrl, stlUrl: result.stlUrl, upAxis: 'z' }
     progress.value = { percent: 100, message: '3D 模型已经做好啦，可以预览和下载了', step: 'done', stage: 'done' }
     activeView.value = '3d'
+    void loadParts()
   }
   catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '3D 生成失败，请重试'
@@ -284,7 +337,7 @@ async function startModelBuild() {
   }
 }
 
-const modelPreviewUrl = computed(() => model.value ? `/yxz-preview?model=${encodeURIComponent(model.value.glbUrl)}` : '')
+const modelPreviewUrl = computed(() => model.value ? `/yxz-preview?model=${encodeURIComponent(model.value.glbUrl)}&up=${encodeURIComponent(model.value.upAxis)}` : '')
 const progressPercent = computed(() => progress.value?.percent ?? 0)
 const origin = typeof window !== 'undefined' ? window.location.origin : ''
 
@@ -394,6 +447,32 @@ function goBack() {
             <a :href="modelPreviewUrl" target="_blank" rel="noopener noreferrer">新窗口打开 3D 预览 ↗</a>
             <a :href="`${model.stlUrl}${model.stlUrl.includes('?') ? '&' : '?'}download=1`" download rel="noreferrer">下载 STL（打印用）</a>
           </div>
+          <section v-if="parts.length" class="yxz-studio-parts" aria-label="模型零件拆分">
+            <header class="yxz-studio-parts-head">
+              <strong>零件拆分</strong>
+              <small>这个模型由 {{ parts.length }} 个独立零件组成，可以分别预览和打印</small>
+            </header>
+            <div class="yxz-studio-parts-grid">
+              <article v-for="part in parts" :key="part.index" class="yxz-studio-part">
+                <h5>{{ part.name }}</h5>
+                <p>{{ part.extents_mm.join(' × ') }} mm · {{ part.faces.toLocaleString('en-US') }} 面</p>
+                <div class="yxz-studio-part-actions">
+                  <a
+                    class="yxz-studio-preset-link"
+                    :href="partPreviewUrl(part)"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >3D 预览</a>
+                  <a
+                    class="yxz-studio-preset-link"
+                    :href="`${getYXZPrintApiBase()}${part.stl_url}${part.stl_url.includes('?') ? '&' : '?'}download=1`"
+                    download
+                    rel="noreferrer"
+                  >下载 STL</a>
+                </div>
+              </article>
+            </div>
+          </section>
         </template>
         <div v-else-if="building" class="yxz-studio-3d-building">
           <div class="yxz-studio-3d-building-preview">
@@ -620,6 +699,10 @@ function goBack() {
 
 <style scoped>
 .yxz-studio {
+  /* The shell hands the page a viewport-sized flex box. Without this the
+     page is squeezed into it and the dark background stops halfway down
+     while the content keeps going. */
+  flex: 0 0 auto;
   min-height: 100vh;
   background:
     radial-gradient(1200px 700px at 30% -10%, rgba(56, 182, 255, .14) 0%, transparent 60%),
@@ -922,6 +1005,60 @@ function goBack() {
   padding: 8px 14px;
   font-size: 13px;
   text-decoration: none;
+}
+
+.yxz-studio-parts {
+  margin-top: 16px;
+  border-top: 1px solid #1d4a6b;
+  padding-top: 14px;
+}
+
+.yxz-studio-parts-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+
+.yxz-studio-parts-head strong {
+  color: #d6efff;
+  font-size: 15px;
+}
+
+.yxz-studio-parts-head small {
+  color: #8fb9d6;
+  font-size: 12px;
+}
+
+.yxz-studio-parts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.yxz-studio-part {
+  border: 1px solid #1d4a6b;
+  border-radius: 10px;
+  background: #0e3350;
+  padding: 10px 12px;
+}
+
+.yxz-studio-part h5 {
+  margin: 0 0 4px;
+  color: #d6efff;
+  font-size: 14px;
+}
+
+.yxz-studio-part p {
+  margin: 0 0 8px;
+  color: #8fb9d6;
+  font-size: 12px;
+}
+
+.yxz-studio-part-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .yxz-studio-3d-empty {

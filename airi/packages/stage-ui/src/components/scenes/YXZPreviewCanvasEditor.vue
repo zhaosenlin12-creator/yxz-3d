@@ -264,6 +264,13 @@ function requestRefine() {
 async function loadImage() {
   imageReady.value = false
   imageError.value = ''
+  // Nothing to edit: the session has no preview picture (yet). This is not a
+  // failure, so it must not be reported as one.
+  if (!props.imageSrc) {
+    baseImage = undefined
+    imageError.value = ''
+    return
+  }
   await nextTick()
   const image = new Image()
   image.onload = () => {
@@ -353,7 +360,10 @@ watch(() => props.imageSrc, loadImage)
         @pointercancel="stopDrawing"
         @pointerleave="stopDrawing"
       />
-      <span v-if="!imageReady && !imageError" class="yxz-canvas-loading">正在加载预览…</span>
+      <span v-if="!imageReady && !imageError && props.imageSrc" class="yxz-canvas-loading">正在加载预览…</span>
+      <span v-if="!imageReady && !imageError && !props.imageSrc" class="yxz-canvas-loading">
+        这个方案还没有可编辑的预览图
+      </span>
       <span v-if="imageError" class="yxz-canvas-loading yxz-canvas-load-error">
         {{ imageError }}
         <button type="button" class="yxz-canvas-retry" @click="loadImage">重试</button>

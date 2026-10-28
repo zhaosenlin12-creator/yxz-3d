@@ -129,8 +129,6 @@ const speechStore = useSpeechStore()
 const { ssmlEnabled, activeSpeechProvider, activeSpeechModel, activeSpeechVoice, pitch } = storeToRefs(speechStore)
 const activeCardId = computed(() => activeCard.value?.name ?? 'default')
 const speechRuntimeStore = useSpeechRuntimeStore()
-const browserSpeechSynthesis = typeof window !== 'undefined' ? window.speechSynthesis : undefined
-const browserSpeechVoice = ref<SpeechSynthesisVoice>()
 
 const { currentMotion } = storeToRefs(useLive2d())
 
@@ -255,64 +253,11 @@ const playbackManager = createPlaybackManager<AudioBuffer>({
   ownerOverflowPolicy: 'steal-oldest',
 })
 
-function syncBrowserSpeechVoice() {
-  if (!browserSpeechSynthesis)
-    return
-
-  const selectedLanguage = speechStore.selectedLanguage || 'zh-CN'
-  const normalizedLanguage = selectedLanguage.toLowerCase()
-  const voices = browserSpeechSynthesis.getVoices()
-
-  browserSpeechVoice.value
-    = voices.find(voice => voice.lang.toLowerCase() === normalizedLanguage)
-      ?? voices.find(voice => voice.lang.toLowerCase().startsWith(normalizedLanguage.split('-')[0] || normalizedLanguage))
-      ?? voices[0]
-}
-
-async function speakWithBrowserTts(text: string): Promise<boolean> {
-  if (!browserSpeechSynthesis || typeof SpeechSynthesisUtterance === 'undefined')
-    return false
-
-  const content = text.trim()
-  if (!content)
-    return false
-
-  syncBrowserSpeechVoice()
-
-  return new Promise<boolean>((resolve) => {
-    const utterance = new SpeechSynthesisUtterance(content)
-    utterance.lang = speechStore.selectedLanguage || 'zh-CN'
-    utterance.rate = speechStore.rate || 1
-    utterance.pitch = 1 + ((pitch.value || 0) / 100)
-    utterance.volume = 1
-
-    if (browserSpeechVoice.value)
-      utterance.voice = browserSpeechVoice.value
-
-    utterance.onend = () => resolve(true)
-    utterance.onerror = (event) => {
-      console.error('[Stage] Browser TTS playback failed', event)
-      resolve(false)
-    }
-
-    try {
-      browserSpeechSynthesis.cancel()
-      browserSpeechSynthesis.speak(utterance)
-    }
-    catch (error) {
-      console.error('[Stage] Browser TTS invocation failed', {
-        error: errorMessageFrom(error) ?? 'Unknown error',
-      })
-      resolve(false)
-    }
-  })
-}
-
 // Tracks whether the configured speech provider actually produced audio for
 // the reply that is currently being spoken. When the provider is broken
 // (expired key, exhausted quota, unreachable endpoint) 宜小智 used to fall
-// completely silent; with these counters we can fall back to the browser
-// speech synthesis so the narration never disappears.
+// completely silent; with these counters the pipeline can report what went
+// wrong and try the next provider in the chain.
 let providerTtsOkCount = 0
 let providerTtsFailCount = 0
 
@@ -334,20 +279,35 @@ function isProviderCoolingDown(providerId: string) {
   return true
 }
 
+// A fragment that carries no pronounceable character (a lone "。" or "？")
+// must not be sent to a voice at all: the Edge pack rejects it outright and
+// every other voice would read it as a pause anyway. Skipping it here keeps
+// the chain from dropping to a worse voice for a fragment nobody can hear.
+const SPEAKABLE_TEXT_RE = /[0-9A-Za-zÀ-ɏ぀-ヿ㐀-鿿豈-﫿]/
+
+function hasSpeakableText(text: string) {
+  return SPEAKABLE_TEXT_RE.test(text)
+}
+
 const speechPipeline = createSpeechPipeline<AudioBuffer>({
   tts: async (request, signal) => {
     if (signal.aborted)
       return null
 
     // The primary provider is the one the user picked; the backups take over
-    // when it cannot produce audio (local voice pack not running, cloud key
-    // throttled, ...). A local voice pack is the more stable of the two, so
-    // it usually goes first and the cloud API is the fallback.
+    // when it cannot produce audio (cloud key throttled, local voice pack
+    // not running, ...). The order is the operator's choice: MiniMax first
+    // for the fullest voice pack, the local Voicebox pack behind it, and
+    // the free Edge voices close the list. The browser's own speech engine
+    // is deliberately not part of the chain.
     const chain = speechStore.resolveSpeechChain()
     if (!chain.length)
       return null
 
     if (!request.text && !request.special)
+      return null
+
+    if (request.text && !hasSpeakableText(request.text))
       return null
 
     for (const candidate of chain) {
@@ -371,6 +331,21 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
       // every candidate resolves its own voice.
       let model = candidate.model
       let voice = knownVoices.find(item => item.id === candidate.voice) ?? knownVoices[0]
+
+      // The voice list of a provider can still be loading (or the service
+      // can be down). The configured voice id is still usable on its own,
+      // so do not skip the candidate just because the catalogue is empty.
+      if (!voice && candidate.voice) {
+        voice = {
+          id: candidate.voice,
+          name: candidate.voice,
+          description: candidate.voice,
+          previewURL: '',
+          languages: [],
+          provider: providerId,
+          gender: 'neutral',
+        }
+      }
 
       if (providerId === 'openai-compatible-audio-speech') {
         // Always prefer provider config for OpenAI Compatible (user configured it there)
@@ -582,7 +557,6 @@ function handleYXZChatRecovery() {
   currentChatIntent?.cancel('chat-send-recovery')
   currentChatIntent = null
   playbackManager.stopAll('chat-send-recovery')
-  browserSpeechSynthesis?.cancel()
   setYXZInteractionStatus('idle')
 }
 
@@ -593,36 +567,20 @@ async function speakYXZWelcome() {
   welcomeSpeechBusy.value = true
   setYXZInteractionStatus('speaking')
   playbackManager.stopAll('new-welcome')
-  browserSpeechSynthesis?.cancel()
 
   try {
-    if (activeSpeechProvider.value && activeSpeechProvider.value !== 'speech-noop') {
-      welcomeSpeechNeedsGesture.value = false
-      const okBefore = providerTtsOkCount
-      const failBefore = providerTtsFailCount
-      const intent = speechRuntimeStore.openIntent({
-        ownerId: activeCardId.value,
-        priority: 'normal',
-        behavior: 'queue',
-      })
-      intent.writeLiteral(YXZ_PROACTIVE_INTRO_TEXT)
-      intent.writeFlush()
-      intent.end()
-      // Watchdog: a broken speech provider (expired key / exhausted quota)
-      // would make the greeting completely silent, so repeat it with the
-      // browser engine once we know the provider failed without producing
-      // any audio.
-      window.setTimeout(() => {
-        if (providerTtsOkCount !== okBefore || providerTtsFailCount <= failBefore)
-          return
-        void speakWithBrowserTts(YXZ_PROACTIVE_INTRO_TEXT)
-      }, 3000)
-      return
-    }
-
-    const didSpeak = await speakWithBrowserTts(YXZ_PROACTIVE_INTRO_TEXT)
-    welcomeSpeechNeedsGesture.value = !didSpeak
-    setYXZInteractionStatus(didSpeak ? 'success' : 'idle')
+    // The speech chain (MiniMax -> local Voicebox -> free Edge voices)
+    // resolves itself, so the greeting goes through the same pipeline as
+    // every other line.
+    welcomeSpeechNeedsGesture.value = false
+    const intent = speechRuntimeStore.openIntent({
+      ownerId: activeCardId.value,
+      priority: 'normal',
+      behavior: 'queue',
+    })
+    intent.writeLiteral(YXZ_PROACTIVE_INTRO_TEXT)
+    intent.writeFlush()
+    intent.end()
   }
   finally {
     welcomeSpeechBusy.value = false
@@ -632,7 +590,6 @@ async function speakYXZWelcome() {
 chatHookCleanups.push(onBeforeMessageComposed(async () => {
   setYXZInteractionStatus('listening')
   playbackManager.stopAll('new-message')
-  browserSpeechSynthesis?.cancel()
   providerTtsOkCount = 0
   providerTtsFailCount = 0
 
@@ -699,37 +656,31 @@ chatHookCleanups.push(onAssistantResponseEnd(async (_message) => {
 
   // NOTICE: speechPipeline already streams TTS for the configured provider
   // (e.g. minimax-audio-speech) via onTokenLiteral + writeLiteral. Re-speaking
-  // the whole reply with window.speechSynthesis here caused double playback
-  // (provider voice + browser voice at the same time). Keep browser TTS as a
-  // fallback only when no provider is configured.
+  // the whole reply here caused double playback (provider voice + second
+  // voice at the same time).
+  //
+  // The speech chain is MiniMax -> local Voicebox -> free Edge voices, so a
+  // broken key or an offline voice pack is already covered. The browser's
+  // own speech engine is not used as a hidden extra fallback: it sounds flat
+  // and it depends on what the operating system happens to expose.
   if (activeSpeechProvider.value !== 'speech-noop' && activeSpeechProvider.value) {
-    // The provider is configured but produced nothing at all (broken key,
-    // exhausted quota, ...). Speak the reply with the browser engine so the
-    // narration is still delivered.
     if (providerTtsOkCount === 0 && providerTtsFailCount > 0 && assistantResponseText.value.trim()) {
-      console.warn('[Stage] Provider TTS produced no audio, falling back to browser speech', {
+      console.warn('[Stage] Provider TTS produced no audio', {
         provider: activeSpeechProvider.value,
         model: activeSpeechModel.value,
         failures: providerTtsFailCount,
       })
-      setYXZInteractionStatus('speaking')
-      const didSpeak = await speakWithBrowserTts(assistantResponseText.value)
-      setYXZInteractionStatus(didSpeak ? 'success' : 'idle')
     }
     return
   }
 
-  setYXZInteractionStatus('speaking')
-  const didSpeak = await speakWithBrowserTts(assistantResponseText.value)
-  setYXZInteractionStatus(didSpeak ? 'success' : 'idle')
-  if (!didSpeak) {
-    console.warn('[Stage] No audible TTS was produced', {
-      provider: activeSpeechProvider.value,
-      model: activeSpeechModel.value,
-      voice: activeSpeechVoice.value?.id,
-      textLength: assistantResponseText.value.length,
-    })
-  }
+  setYXZInteractionStatus('idle')
+  console.warn('[Stage] No audible TTS was produced', {
+    provider: activeSpeechProvider.value,
+    model: activeSpeechModel.value,
+    voice: activeSpeechVoice.value?.id,
+    textLength: assistantResponseText.value.length,
+  })
   // const res = await embed({
   //   ...transformersProvider.embed('Xenova/nomic-embed-text-v1'),
   //   input: message,
@@ -755,7 +706,6 @@ if (typeof window !== 'undefined') {
   events.forEach((event) => {
     window.addEventListener(event, resumeAudioContextOnInteraction, { once: true, passive: true })
   })
-  window.speechSynthesis?.addEventListener('voiceschanged', syncBrowserSpeechVoice)
 }
 
 onMounted(async () => {
@@ -802,8 +752,6 @@ onUnmounted(() => {
   if (yxzStatusResetTimer)
     clearTimeout(yxzStatusResetTimer)
   resetLive2dLipSync()
-  browserSpeechSynthesis?.cancel()
-  window.speechSynthesis?.removeEventListener('voiceschanged', syncBrowserSpeechVoice)
   window.removeEventListener('yxz:chat-recovery', handleYXZChatRecovery)
   chatHookCleanups.forEach(dispose => dispose?.())
   viewUpdateCleanups.forEach(dispose => dispose?.())

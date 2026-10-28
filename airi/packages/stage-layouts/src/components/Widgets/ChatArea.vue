@@ -951,7 +951,7 @@ watch(sendMode, () => {
                 'transition-all duration-200 active:scale-95',
               ]"
               text="lg neutral-500 dark:neutral-400"
-              :title="t('settings.hearing.title')"
+              :title="t('settings.pages.modules.hearing.title')"
             >
               <Transition name="fade" mode="out-in">
                 <IndicatorMicVolume v-if="enabled" class="h-5 w-5" />
