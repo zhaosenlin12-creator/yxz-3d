@@ -48,6 +48,7 @@ import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { getProviderValidationIntervalMs, listProviders as listDefinedProviders, ProviderValidationCheck } from '../libs/providers'
+import { createMinimaxKeyRotatingFetch, splitApiKeys } from '../utils/minimax-key-rotation'
 import { buildMinimaxTtsBody } from '../utils/minimax-tts'
 import { buildVoiceboxTtsBody } from '../utils/voicebox-tts'
 import { getKokoroWorker } from '../workers/kokoro'
@@ -1397,19 +1398,25 @@ export const useProvidersStore = defineStore('providers', () => {
       }),
       createProvider: async (config) => {
         const baseUrl = typeof config.baseUrl === 'string' && config.baseUrl.trim() ? config.baseUrl.trim() : 'https://api.minimaxi.com/v1/'
-        const apiKey = typeof config.apiKey === 'string' ? config.apiKey.trim() : ''
         // NOTICE: a single MiniMax key can silently run out of Token Plan
-        // quota while the app still looks correctly configured. Allow a list
-        // of keys and rotate through them when one is rejected.
+        // quota while the app still looks correctly configured. The provider
+        // field may therefore carry a comma separated list of keys, and the
+        // legacy `apiKeys` array is still honoured. The request is retried
+        // with the next key as soon as one of them is rejected.
         const apiKeys = [
-          apiKey,
+          ...splitApiKeys(config.apiKey),
           ...(Array.isArray((config as Record<string, unknown>).apiKeys)
             ? ((config as Record<string, unknown>).apiKeys as unknown[])
                 .filter((key): key is string => typeof key === 'string' && key.trim().length > 0)
                 .map(key => key.trim())
             : []),
         ].filter((key, index, all) => key.length > 0 && all.indexOf(key) === index)
+        const apiKey = apiKeys[0] ?? ''
         const speechBaseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
+        // A MiniMax key that ran out of Token Plan is answered with HTTP 200
+        // and an error body, so the request is retried with the next key
+        // instead of failing the whole utterance.
+        const rotatingFetch = createMinimaxKeyRotatingFetch(apiKeys)
 
         function hexToBytes(hex: string): Uint8Array {
           const normalizedHex = hex.trim().replace(HEX_PREFIX_RE, '')
@@ -1441,56 +1448,36 @@ export const useProvidersStore = defineStore('providers', () => {
                 : undefined
               const minimaxBody = JSON.stringify(buildMinimaxTtsBody(rawBody))
 
-              // MiniMax business errors (invalid key / exhausted quota / bad
-              // voice) come back as HTTP 200 with the real reason inside
-              // `base_resp.status_code`. Those are worth retrying with the
-              // next key; anything else is a hard failure.
-              const KEY_LEVEL_ERROR_CODES = new Set([1002, 1004, 1008, 1027, 2056])
-              let lastError: Error | undefined
+              const response = await rotatingFetch(`${speechBaseUrl}t2a_v2`, {
+                method: 'POST',
+                headers: {
+                  'content-type': 'application/json',
+                  'authorization': `Bearer ${apiKey}`,
+                },
+                body: minimaxBody,
+              })
 
-              for (const key of apiKeys.length > 0 ? apiKeys : ['']) {
-                const response = await fetch(`${speechBaseUrl}t2a_v2`, {
-                  method: 'POST',
-                  headers: {
-                    'content-type': 'application/json',
-                    'authorization': `Bearer ${key}`,
-                  },
-                  body: minimaxBody,
-                })
-
-                const json = await response.json()
-                const hexAudio = json?.data?.audio || json?.data?.audio_hex || json?.data?.audioData || json?.data?.base64_audio || json?.audio || json?.result?.audio
-                const baseResp = json?.base_resp
-                const statusCode = typeof baseResp?.status_code === 'number' ? baseResp.status_code : undefined
-
-                if (!response.ok) {
-                  lastError = new Error(baseResp?.status_msg || json?.message || `MiniMax TTS failed: ${response.status} ${response.statusText}`)
-                  continue
-                }
-                if (statusCode !== undefined && statusCode !== 0) {
-                  const statusMsg = baseResp?.status_msg || 'unknown error'
-                  lastError = new Error(`MiniMax TTS error ${statusCode}: ${statusMsg}`)
-                  if (KEY_LEVEL_ERROR_CODES.has(statusCode))
-                    continue
-                  throw lastError
-                }
-                if (!hexAudio || typeof hexAudio !== 'string') {
-                  lastError = new Error(`MiniMax TTS returned no audio data (trace_id: ${json?.trace_id ?? 'unknown'})`)
-                  continue
-                }
-
-                const bytes = hexToBytes(hexAudio)
-                const audioBuffer = new Uint8Array(bytes.byteLength)
-                audioBuffer.set(bytes)
-                return new Response(new Blob([audioBuffer], { type: 'audio/mpeg' }), {
-                  status: 200,
-                  headers: {
-                    'content-type': 'audio/mpeg',
-                  },
-                })
+              const json = await response.json()
+              const hexAudio = json?.data?.audio || json?.data?.audio_hex || json?.data?.audioData || json?.data?.base64_audio || json?.audio || json?.result?.audio
+              if (!response.ok) {
+                throw new Error(json?.base_resp?.status_msg || json?.message || `MiniMax TTS failed: ${response.status} ${response.statusText}`)
+              }
+              if (!hexAudio || typeof hexAudio !== 'string') {
+                // MiniMax reports a rejected key (exhausted quota, wrong
+                // credentials) as HTTP 200 without any audio: surface the real
+                // reason instead of a misleading "no audio data" message.
+                throw new Error(json?.base_resp?.status_msg || json?.message || 'MiniMax TTS returned no audio data')
               }
 
-              throw lastError ?? new Error('MiniMax TTS failed: no API key configured')
+              const bytes = hexToBytes(hexAudio)
+              const audioBuffer = new Uint8Array(bytes.byteLength)
+              audioBuffer.set(bytes)
+              return new Response(new Blob([audioBuffer], { type: 'audio/mpeg' }), {
+                status: 200,
+                headers: {
+                  'content-type': 'audio/mpeg',
+                },
+              })
             },
           }),
         }

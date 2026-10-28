@@ -182,8 +182,10 @@ def render_front(spec: dict[str, Any], size_mm: tuple[float, float], artwork: Op
     if artwork is None:
         overlay = Image.new("RGBA", (card_w, card_h), (0, 0, 0, 0))
         odraw = ImageDraw.Draw(overlay)
-        odraw.ellipse((28, 28, 118, 118), fill=(*accent, 110))
-        odraw.ellipse((card_w - 190, card_h - 190, card_w - 30, card_h - 30), outline=(*accent, 70), width=4)
+        # A thin, low-alpha ring only.  A filled blob in the accent colour
+        # turns muddy olive on the blue gradient and reads as a printing
+        # defect rather than a decoration.
+        odraw.ellipse((card_w - 150, card_h - 150, card_w - 34, card_h - 34), outline=(*accent, 45), width=3)
         background = Image.alpha_composite(background.convert("RGBA"), overlay).convert("RGB")
 
     draw = ImageDraw.Draw(background)

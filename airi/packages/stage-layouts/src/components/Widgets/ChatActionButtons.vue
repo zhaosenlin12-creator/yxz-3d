@@ -13,9 +13,12 @@ const laserCardPanelOpen = ref(false)
 
 // Dynamically import laser card panel to avoid circular dependencies
 const YXZCreationWorkbench = computed(() => {
-  return defineAsyncComponent(() =>
-    import('@proj-airi/stage-ui/components/scenes/YXZCreationWorkbench.vue'),
-  )
+  return defineAsyncComponent(async () => {
+    // 走包入口而不是直接引 .vue：stage-ui 的 exports 只把 .ts 暴露成子路径，
+    // 直接引 .vue 路径 vue-tsc 解析不到（运行时 vite 能兜住，类型检查不行）。
+    const scenes = await import('@proj-airi/stage-ui/components/scenes')
+    return scenes.YXZCreationWorkbench
+  })
 })
 
 function handleLaserCardStatus(status: string) {

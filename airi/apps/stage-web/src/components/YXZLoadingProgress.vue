@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { computed } from 'vue'
 
 interface LoadingPhase {
   phase: 'download' | 'parse' | 'shader' | 'anim' | 'ready'
@@ -12,7 +12,7 @@ const props = withDefaults(defineProps<{
   progress?: number
 }>(), {
   phase: 'download',
-  progress: 0
+  progress: 0,
 })
 
 const phaseLabels = {
@@ -20,28 +20,37 @@ const phaseLabels = {
   parse: '解析 VRM 骨骼结构',
   shader: '编译实时着色器',
   anim: '初始化动画系统',
-  ready: '加载完成'
+  ready: '加载完成',
 }
 
 const message = computed(() => phaseLabels[props.phase])
 
 const tips = computed(() => {
-  if (props.phase === 'download') return '💡 首次加载需要下载高精度 3D 模型'
-  if (props.phase === 'shader') return '✨ 正在编译实时光影效果'
-  if (props.progress > 50 && props.phase !== 'ready') return '⏳ 马上就好，请稍候…'
+  if (props.phase === 'download')
+    return '💡 首次加载需要下载高精度 3D 模型'
+  if (props.phase === 'shader')
+    return '✨ 正在编译实时光影效果'
+  if (props.progress > 50 && props.phase !== 'ready')
+    return '⏳ 马上就好，请稍候…'
   return ''
 })
 </script>
 
 <template>
   <div class="yxz-loading-progress">
-    <div class="loading-spinner"></div>
-    <div class="loading-phase">{{ message }}</div>
-    <div class="loading-progress-bar">
-      <div class="loading-progress-fill" :style="{ width: `${progress}%` }"></div>
+    <div class="loading-spinner" />
+    <div class="loading-phase">
+      {{ message }}
     </div>
-    <div class="loading-percent">{{ Math.round(progress) }}%</div>
-    <div v-if="tips" class="loading-tips">{{ tips }}</div>
+    <div class="loading-progress-bar">
+      <div class="loading-progress-fill" :style="{ width: `${progress}%` }" />
+    </div>
+    <div class="loading-percent">
+      {{ Math.round(progress) }}%
+    </div>
+    <div v-if="tips" class="loading-tips">
+      {{ tips }}
+    </div>
   </div>
 </template>
 

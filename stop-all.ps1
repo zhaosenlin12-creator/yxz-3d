@@ -12,8 +12,9 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 function Stop-ProjectInstances {
     param([int]$From, [int]$To, [string]$Label, [scriptblock]$IsOurs)
     $hit = $false
+    $listening = Get-ListeningPorts
     for ($p = $From; $p -le $To; $p++) {
-        if (-not (Test-Port $p)) { continue }
+        if (-not $listening.Contains($p)) { continue }
         if (-not (& $IsOurs $p)) { continue }
         $conns = Get-NetTCPConnection -LocalPort $p -State Listen
         foreach ($c in $conns) {
@@ -30,6 +31,7 @@ function Stop-ProjectInstances {
 
 Stop-ProjectInstances -From 5199 -To 5230 -Label '前端' -IsOurs { param($p) Test-FrontendIdentity "http://127.0.0.1:$p" }
 Stop-ProjectInstances -From 8000 -To 8030 -Label '后端' -IsOurs { param($p) Test-BackendIdentity "http://127.0.0.1:$p" }
+Stop-ProjectInstances -From 6121 -To 6130 -Label 'WS通道' -IsOurs { param($p) Test-ServerRuntimeIdentity -Port $p }
 
 Write-Host ""
 Say '  完成。日志在 .run 目录，需要时可用 start-all.ps1 重新拉起。' 'DarkGray'

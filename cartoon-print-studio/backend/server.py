@@ -132,6 +132,74 @@ def session_dir(sid: str) -> str:
     return p
 
 
+@app.post("/api/upload-image", status_code=201)
+async def upload_image(image: UploadFile = File(...), source: str = Form("camera")):
+    """Accept a camera / picker image, keep it as the session preview and describe it.
+
+    The picture is stored as ``previews/img_0.png`` inside a fresh session so
+    the existing preview -> 3D pipeline can reuse it directly. The returned
+    description pre-fills the chat input; when no vision provider answers the
+    caller still gets a usable factual description.
+    """
+    if not image.content_type or not image.content_type.startswith("image/"):
+        raise HTTPException(415, "只支持上传图片文件")
+
+    sid = uuid.uuid4().hex[:12]
+    previews = os.path.join(session_dir(sid), "previews")
+    os.makedirs(previews, exist_ok=True)
+
+    img_path = os.path.join(previews, "img_0.png")
+    size = await _save_uploaded_file(image, img_path, 15 * 1024 * 1024)
+
+    try:
+        from PIL import Image as PILImage
+        with PILImage.open(img_path) as decoded:
+            decoded.load()
+            if max(decoded.size) > 4096:
+                raise HTTPException(413, "图片尺寸过大，请使用 4096x4096 以下的图片")
+            if decoded.mode not in ("RGBA", "RGB"):
+                decoded = decoded.convert("RGBA")
+            decoded.save(img_path, "PNG")
+            width, height = decoded.size
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(400, f"图片无法读取：{exc}") from exc
+
+    description = ""
+    try:
+        with open(img_path, "rb") as handle:
+            img_base64 = base64.b64encode(handle.read()).decode()
+        vision_prompt = (
+            "请用一句话描述这张图片的主要内容，重点说明适合制作什么样的创意作品，控制在20字以内。"
+        )
+        reply = llm_client.vision_chat(vision_prompt, img_base64)
+        if reply:
+            description = reply.strip()
+    except Exception as vision_err:
+        print(f"[upload-image] vision analysis failed: {vision_err}")
+    if not description:
+        description = f"一张 {width}x{height} 的照片"
+
+    with open(os.path.join(DATA, sid, "_source.json"), "w", encoding="utf-8") as handle:
+        json.dump({
+            "source": source,
+            "created_at": int(time.time()),
+            "width": width,
+            "height": height,
+            "size_bytes": size,
+        }, handle, ensure_ascii=False)
+
+    return {
+        "session_id": sid,
+        "image_path": f"/api/data/{sid}/previews/img_0.png",
+        "description": description,
+        "width": width,
+        "height": height,
+        "message": "照片已上传成功",
+    }
+
+
 class SessionForkReq(BaseModel):
     image_index: int = Field(default=0, ge=0, le=9)
 

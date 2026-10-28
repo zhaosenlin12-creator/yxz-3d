@@ -62,9 +62,13 @@ function startViewer() {
     // the tallest becomes the up axis, so the figure always stands upright.
     const rawBox = new THREE.Box3().setFromObject(model)
     const rawSize = rawBox.getSize(new THREE.Vector3())
-    const axes = [['x', rawSize.x], ['y', rawSize.y], ['z', rawSize.z]] as const
-    axes.sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))
-    const up = axes[0][0]
+    const axes: Array<[string, number]> = [
+      ['x', rawSize.x],
+      ['y', rawSize.y],
+      ['z', rawSize.z],
+    ]
+    axes.sort((a, b) => b[1] - a[1])
+    const up = axes[0]?.[0] ?? 'y'
     if (up === 'z')
       model.rotation.x = -Math.PI / 2
     else if (up === 'x')

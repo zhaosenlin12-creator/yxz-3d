@@ -15,6 +15,19 @@ function Test-Port {
     return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
 }
 
+# 一次性拿到本机所有处于 LISTEN 的端口。
+# 逐端口调 Get-NetTCPConnection 每次都要初始化 CIM，几十个端口扫下来
+# 能白白耗掉十几秒；这里一次查询搞定，后面用哈希表 O(1) 判断。
+function Get-ListeningPorts {
+    $set = New-Object 'System.Collections.Generic.HashSet[int]'
+    try {
+        Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | ForEach-Object {
+            [void]$set.Add([int]$_.LocalPort)
+        }
+    } catch { }
+    return ,$set
+}
+
 function Wait-Port {
     param([int]$Port, [int]$TimeoutSec = 60, [string]$Label = '')
     $end = (Get-Date).AddSeconds($TimeoutSec)
@@ -26,30 +39,68 @@ function Wait-Port {
 }
 
 # ---- HTTP 探测 --------------------------------------------------------
+# Get-HttpResponse：直接用 HttpWebRequest 发请求。
+#   - Proxy = $null：本机回环地址绝不能走系统代理（否则每个关闭端口都要
+#     等满超时，一轮端口扫描能白白耗掉一两分钟）。
+#   - 状态码 + 原始字节一起返回：4xx/5xx 也算“有东西在应答”，
+#     字节由调用方按 UTF-8 自行解码（PS 5.1 的 Invoke-WebRequest 会按
+#     系统 GBK 解码，中文标记会被解成乱码）。
+function Get-HttpResponse {
+    param([string]$Url, [int]$TimeoutSec = 3)
+    try {
+        $req = [System.Net.HttpWebRequest]::Create($Url)
+        $req.Timeout = $TimeoutSec * 1000
+        $req.ReadWriteTimeout = $TimeoutSec * 1000
+        $req.Proxy = $null
+        $req.AllowAutoRedirect = $true
+        $req.UserAgent = 'yxz-3d-local/1.0'
+        $resp = $req.GetResponse()
+        $ms = New-Object System.IO.MemoryStream
+        $resp.GetResponseStream().CopyTo($ms)
+        $code = [int]$resp.StatusCode
+        $bytes = $ms.ToArray()
+        $resp.Close()
+        return [pscustomobject]@{ StatusCode = $code; Bytes = $bytes }
+    } catch [System.Net.WebException] {
+        $ex = $_.Exception
+        if ($ex.Response) {
+            try {
+                $ms = New-Object System.IO.MemoryStream
+                $ex.Response.GetResponseStream().CopyTo($ms)
+                $code = [int]$ex.Response.StatusCode
+                $bytes = $ms.ToArray()
+                $ex.Response.Close()
+                return [pscustomobject]@{ StatusCode = $code; Bytes = $bytes }
+            } catch { return $null }
+        }
+        return $null
+    } catch { return $null }
+}
+
 # Test-HttpOk：只要对方是活的 HTTP 服务就算 True（4xx/5xx 也算）。
 #              只用于「端口上有没有东西在应答」，**不能**用来判断
 #              「这个服务是不是我们自己的」——别的程序也会应答 404。
 function Test-HttpOk {
     param([string]$Url, [int]$TimeoutSec = 3)
-    try {
-        $r = Invoke-WebRequest -Uri $Url -TimeoutSec $TimeoutSec -UseBasicParsing
-        return ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500)
-    } catch {
-        if ($_.Exception.Response) { return $true }
-        return $false
-    }
+    $r = Get-HttpResponse -Url $Url -TimeoutSec $TimeoutSec
+    if (-not $r) { return $false }
+    return ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500)
 }
 
 # Test-HttpMarker：要求 200 且响应体包含指定标记串。
 #                  用来确认“这个端口上的服务确实是本项目的”。
+# 注意：Windows PowerShell 5.1 的 Invoke-WebRequest 会用系统默认编码
+#       （中文 Windows 上是 GBK）解码「没有 charset 的响应体」，
+#       中文标记会被解成乱码导致匹配永远失败。所以这里取原始字节，
+#       自己按 UTF-8 解码，PS 5.1 / PS 7 行为一致。
 function Test-HttpMarker {
     param([string]$Url, [string]$Marker, [int]$TimeoutSec = 3)
-    try {
-        $r = Invoke-WebRequest -Uri $Url -TimeoutSec $TimeoutSec -UseBasicParsing
-        if ($r.StatusCode -ne 200) { return $false }
-        if (-not $Marker) { return $true }
-        return ($r.Content -match [regex]::Escape($Marker))
-    } catch { return $false }
+    $r = Get-HttpResponse -Url $Url -TimeoutSec $TimeoutSec
+    if (-not $r) { return $false }
+    if ($r.StatusCode -ne 200) { return $false }
+    if (-not $Marker) { return $true }
+    $text = [Text.Encoding]::UTF8.GetString($r.Bytes)
+    return ($text -match [regex]::Escape($Marker))
 }
 
 # 本项目后端的身份标识（server.py 里 FastAPI(title=...)）
@@ -61,7 +112,10 @@ function Test-BackendIdentity {
 # 本项目前端的身份标识（index.html 里的 title）
 function Test-FrontendIdentity {
     param([string]$BaseUrl, [int]$TimeoutSec = 3)
-    return (Test-HttpMarker -Url "$BaseUrl/" -Marker '宜小智' -TimeoutSec $TimeoutSec)
+    # 双保险：中文标题 + 一个本项目 index.html 独有的 ASCII 标记，
+    # 任一命中即认为是本项目的前端。
+    return ((Test-HttpMarker -Url "$BaseUrl/" -Marker '宜小智' -TimeoutSec $TimeoutSec) -or
+            (Test-HttpMarker -Url "$BaseUrl/" -Marker 'apple-mobile-web-app-capable' -TimeoutSec $TimeoutSec))
 }
 
 # ---- 终端输出 ---------------------------------------------------------
@@ -290,9 +344,10 @@ function Get-WheelCacheDir {
 # ---- 找一个空闲端口 ----------------------------------------------------
 function Get-FreePort {
     param([int]$Preferred = 8000, [int]$MaxTry = 60)
+    $listening = Get-ListeningPorts
     for ($i = 0; $i -lt $MaxTry; $i++) {
         $p = $Preferred + $i
-        if (-not (Test-Port $p)) {
+        if (-not $listening.Contains($p)) {
             try {
                 $l = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $p)
                 $l.Start(); $l.Stop()
@@ -382,7 +437,9 @@ function Get-RemoteFileResumable {
 # 一堆僵尸后端。这里按端口区间扫描，用 openapi 里的项目标识认人。
 function Find-ProjectBackend {
     param([int]$From = 8000, [int]$To = 8030)
+    $listening = Get-ListeningPorts
     for ($p = $From; $p -le $To; $p++) {
+        if (-not $listening.Contains($p)) { continue }
         if (Test-BackendIdentity "http://127.0.0.1:$p") { return $p }
     }
     return $null
@@ -390,8 +447,35 @@ function Find-ProjectBackend {
 
 function Find-ProjectFrontend {
     param([int]$From = 5199, [int]$To = 5230)
+    $listening = Get-ListeningPorts
     for ($p = $From; $p -le $To; $p++) {
+        if (-not $listening.Contains($p)) { continue }
         if (Test-FrontendIdentity "http://127.0.0.1:$p") { return $p }
+    }
+    return $null
+}
+
+# ---- AIRI server-runtime（WS 通道服务）--------------------------------
+# 这个服务只在 /ws 上提供 WebSocket，普通 HTTP 请求会回 404，
+# 所以没法用响应体当身份标识。改用「端口在监听 + 占用进程的命令行
+# 指向 server-runtime 的 run.js」双重判定，避免误杀别的程序。
+function Test-ServerRuntimeIdentity {
+    param([int]$Port = 6121)
+    $conns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    if (-not $conns) { return $false }
+    foreach ($c in $conns) {
+        $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$($c.OwningProcess)" -ErrorAction SilentlyContinue).CommandLine
+        if ($cmd -and ($cmd -match 'server-runtime' -or $cmd -match 'src[\\/]bin[\\/]run\.(js|mjs)')) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Find-ProjectServerRuntime {
+    param([int]$From = 6121, [int]$To = 6130)
+    for ($p = $From; $p -le $To; $p++) {
+        if (Test-ServerRuntimeIdentity -Port $p) { return $p }
     }
     return $null
 }

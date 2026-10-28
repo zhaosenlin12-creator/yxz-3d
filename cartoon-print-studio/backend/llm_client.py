@@ -221,6 +221,59 @@ def llm_call(prompt, *, timeout=20, deadline=None, max_retries=1):
     return None, None
 
 
+def vision_chat(prompt: str, image_b64: str, *, timeout=12, deadline=None) -> Optional[str]:
+    """Describe an image with the MiniMax chat endpoint.
+
+    The native v2 chat endpoint accepts an OpenAI-style content array, so the
+    picture travels as a base64 data URL next to the text prompt. Returns the
+    reply, or None when no provider accepted the request (the caller then
+    falls back to a plain description).
+    """
+    if not MINIMAX_API_KEYS or not image_b64:
+        return None
+    body = {
+        "model": "MiniMax-Text-01",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64," + image_b64}},
+                    {"type": "text", "text": prompt},
+                ],
+            },
+        ],
+        "temperature": 0.2,
+        "max_tokens": 200,
+    }
+    data = json.dumps(body).encode("utf-8")
+    for key in MINIMAX_API_KEYS:
+        if not key:
+            continue
+        attempt_timeout = timeout
+        if deadline is not None:
+            attempt_timeout = max(1.0, min(timeout, deadline - time.time()))
+            if attempt_timeout < 1.0:
+                return None
+        try:
+            req = urllib.request.Request(
+                MINIMAX_ENDPOINTS[0], data=data, method="POST",
+                headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=attempt_timeout) as r:
+                payload = json.loads(r.read().decode("utf-8", "ignore"))
+        except Exception:
+            continue
+        base = payload.get("base_resp", {}) or {}
+        if base.get("status_code", 0) != 0:
+            continue
+        reply = payload.get("reply", "")
+        if not reply and payload.get("choices"):
+            reply = _extract_openai_text(payload)
+        if reply:
+            return reply.strip()
+    return None
+
+
 def has_provider() -> bool:
     return any(MINIMAX_API_KEYS) or any(DEEPSEEK_API_KEYS)
 

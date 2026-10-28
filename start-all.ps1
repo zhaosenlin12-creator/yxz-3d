@@ -17,9 +17,11 @@
 param(
     [int]$BackendPort = 8000,
     [int]$FrontendPort = 5199,
+    [int]$RuntimePort = 6121,
     [switch]$NoBrowser,
     [switch]$NoFrontend,
     [switch]$NoBackend,
+    [switch]$NoServerRuntime,
     [switch]$SkipInstall
 )
 
@@ -32,6 +34,7 @@ New-Item -ItemType Directory -Force -Path $run | Out-Null
 
 $backendRoot  = Join-Path $root 'cartoon-print-studio'
 $frontendRoot = Join-Path $root 'airi\apps\stage-web'
+$runtimeRoot  = Join-Path $root 'airi\packages\server-runtime'
 $venvPy       = Join-Path $backendRoot 'ai\forge-webui\venv\Scripts\python.exe'
 
 Write-Host "==============================================" -ForegroundColor Cyan
@@ -47,6 +50,10 @@ if (-not $SkipInstall) {
     if (-not $NoFrontend) {
         $vite = Join-Path $frontendRoot 'node_modules\vite\bin\vite.js'
         if (-not (Test-Path -LiteralPath $vite)) { $needInstall = $true }
+    }
+    if (-not $NoServerRuntime) {
+        $tsxBin = Join-Path $root 'airi\node_modules\.bin\tsx.cmd'
+        if (-not (Test-Path -LiteralPath $tsxBin)) { $needInstall = $true }
     }
     if ($needInstall) {
         Write-Host ""
@@ -131,6 +138,37 @@ if ($NoFrontend) {
     Ok "前端进程 PID=$($frontendProc.Id)"
 }
 
+# ---- 3.5) 启动 AIRI server-runtime（WS 通道服务）--------------------
+# 前端默认连 ws://localhost:6121/ws。少了这个服务，控制台会一直刷
+# "WebSocket connection failed"，订阅/通道相关能力也不稳。
+$runtimeProc = $null
+$rtReady = $NoServerRuntime
+if ($NoServerRuntime) {
+    Step "已按参数跳过 server-runtime"
+} elseif ($existingRt = Find-ProjectServerRuntime -From $RuntimePort -To ($RuntimePort + 10)) {
+    $RuntimePort = $existingRt
+    $rtReady = $true
+    Ok "server-runtime 已在运行（: $RuntimePort），直接复用"
+} else {
+    $tsx = Join-Path $root 'airi\node_modules\.bin\tsx.cmd'
+    if (-not (Test-Path -LiteralPath $tsx)) { Fail "未找到 tsx，请先运行 install-new-pc.ps1"; exit 1 }
+    $out = Join-Path $run "runtime-$RuntimePort.out.log"
+    $err = Join-Path $run "runtime-$RuntimePort.err.log"
+    $prevPort = $env:PORT
+    $env:PORT = "$RuntimePort"
+    Step "启动 server-runtime (: $RuntimePort) ..."
+    try {
+        $runtimeProc = Start-Process -FilePath $tsx `
+            -ArgumentList @('./src/bin/run.js') `
+            -WorkingDirectory $runtimeRoot -RedirectStandardOutput $out -RedirectStandardError $err `
+            -WindowStyle Hidden -PassThru
+    } finally {
+        if ($null -eq $prevPort) { Remove-Item Env:PORT -ErrorAction SilentlyContinue }
+        else { $env:PORT = $prevPort }
+    }
+    Ok "server-runtime 进程 PID=$($runtimeProc.Id)"
+}
+
 # ---- 4) 并行等待就绪（一个循环同时盯两个）---------------------------
 $beDeadline = (Get-Date).AddSeconds(120)
 $feDeadline = (Get-Date).AddSeconds(180)
@@ -149,18 +187,40 @@ if (-not $NoBackend -and -not $backendReuse) {
         if (Test-Path -LiteralPath $e) { Get-Content -LiteralPath $e -Tail 25 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }
     }
 }
-if (-not $NoFrontend -and -not (Test-FrontendIdentity "http://127.0.0.1:$FrontendPort")) {
-    Step "等待前端就绪（首次冷编译约 20-60 秒）..."
-    while ((Get-Date) -lt $feDeadline) {
-        if ($frontendProc -and $frontendProc.HasExited) { break }
-        if (Test-HttpOk "http://127.0.0.1:$FrontendPort/") { $feReady = $true; break }
-        Start-Sleep -Milliseconds 600
+if (-not $NoFrontend) {
+    # 注意：就绪判定要分两支。以前写成「已经能识别就直接跳过等待」，
+    # 结果 feReady 永远留着 False，明明起来了却报「前端未就绪」。
+    if (Test-FrontendIdentity "http://127.0.0.1:$FrontendPort") {
+        $feReady = $true
+        Ok "前端就绪 http://127.0.0.1:$FrontendPort"
+    } else {
+        Step "等待前端就绪（首次冷编译约 20-60 秒）..."
+        while ((Get-Date) -lt $feDeadline) {
+            if ($frontendProc -and $frontendProc.HasExited) { break }
+            if (Test-HttpOk "http://127.0.0.1:$FrontendPort/") { $feReady = $true; break }
+            Start-Sleep -Milliseconds 600
+        }
+        if ($feReady) { Ok "前端就绪 http://127.0.0.1:$FrontendPort" }
+        else {
+            Fail "前端未就绪"
+            $e = Join-Path $run "frontend-$FrontendPort.err.log"
+            if (Test-Path -LiteralPath $e) { Get-Content -LiteralPath $e -Tail 25 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }
+        }
     }
-    if ($feReady) { Ok "前端就绪 http://127.0.0.1:$FrontendPort" }
+}
+if (-not $NoServerRuntime -and -not $rtReady) {
+    Step "等待 server-runtime 就绪 ..."
+    $rtDeadline = (Get-Date).AddSeconds(90)
+    while ((Get-Date) -lt $rtDeadline) {
+        if ($runtimeProc -and $runtimeProc.HasExited) { break }
+        if (Test-ServerRuntimeIdentity -Port $RuntimePort) { $rtReady = $true; break }
+        Start-Sleep -Milliseconds 500
+    }
+    if ($rtReady) { Ok "server-runtime 就绪 ws://127.0.0.1:$RuntimePort/ws" }
     else {
-        Fail "前端未就绪"
-        $e = Join-Path $run "frontend-$FrontendPort.err.log"
-        if (Test-Path -LiteralPath $e) { Get-Content -LiteralPath $e -Tail 25 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }
+        Warn "server-runtime 未就绪（WS 通道不可用，主界面仍可使用）"
+        $e = Join-Path $run "runtime-$RuntimePort.err.log"
+        if (Test-Path -LiteralPath $e) { Get-Content -LiteralPath $e -Tail 15 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }
     }
 }
 
@@ -174,6 +234,9 @@ if (-not $NoBackend) {
 }
 if (-not $NoFrontend) {
     if ($feReady) { Ok "前端  http://127.0.0.1:$FrontendPort" } else { Fail "前端 未就绪 (: $FrontendPort)" }
+}
+if (-not $NoServerRuntime) {
+    if ($rtReady) { Ok "WS通道  ws://127.0.0.1:$RuntimePort/ws" } else { Warn "WS通道  未就绪 (: $RuntimePort)" }
 }
 $elapsed = [int]((Get-Date) - $startAt).TotalSeconds
 Say  "  用时 ${elapsed}s" 'DarkGray'

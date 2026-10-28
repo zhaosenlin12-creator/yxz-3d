@@ -132,11 +132,9 @@ export async function generateYXZModelFromConfirmation(sessionId: string, userTe
   const card = [...messages].reverse().find((message): message is ChatAssistantMessage & { createdAt?: number } => message.role === 'assistant'
     && message.yxzCreation?.kind === 'yxz-creation'
     && message.yxzCreation.status === 'preview')
-  if (!card?.yxzCreation)
+  const creation = card?.yxzCreation
+  if (!creation)
     throw new Error('请先在当前对话生成预览图')
-  // Capture the payload once: property narrowing is lost inside the
-  // onProgress closure below, which TypeScript reports as possibly undefined.
-  const creation = card.yxzCreation
 
   if (!YXZ_MODEL_CONFIRMATION_RE.test(userText))
     throw new Error('请先明确确认制作 3D 模型')
@@ -293,10 +291,9 @@ export async function createYXZCreationTools() {
           && message.yxzCreation?.kind === 'yxz-creation'
           && message.yxzCreation.status === 'preview'
           && message.yxzCreation.preview.index === imageIndex)
-        if (!card?.yxzCreation)
+        const creation = card?.yxzCreation
+        if (!creation)
           throw new Error('请先在当前对话生成并确认预览图')
-        // Capture the payload once so the onProgress closure keeps the narrowing.
-        const creation = card.yxzCreation
         const latestUser = [...messages].reverse().find(message => message.role === 'user')
         const userText = typeof latestUser?.content === 'string' ? latestUser.content : ''
         const cardCreatedAt = card.createdAt ?? 0
