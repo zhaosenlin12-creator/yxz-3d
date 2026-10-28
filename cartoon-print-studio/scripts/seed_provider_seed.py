@@ -90,13 +90,32 @@ def main() -> int:
                 "apiKey": deepseek,
                 "baseUrl": "https://api.deepseek.com",
             },
+            # The local voice pack (Voicebox / Qwen CustomVoice). The voice
+            # itself is not seeded: the frontend discovers the sound profiles
+            # from http://127.0.0.1:17493/profiles and keeps the one the user
+            # picked in settings/speech/voice.
+            "voicebox-local": {
+                "baseUrl": "http://127.0.0.1:17493",
+                "model": "qwen-custom-voice-1.7B",
+                "modelSize": "1.7B",
+                "instruct": "温暖、活泼、亲切，带一点可爱的卡通感，语速自然，像宜小智在和用户面对面交流。",
+            },
         },
         "activeProvider": "minimax",
         "activeModel": "MiniMax-M2.7",
         "speech": {
-            "provider": "minimax-audio-speech",
-            "model": "speech-2.5-hd",
-            "voice": "female-shaonv",
+            # The local voice pack goes first because it does not depend on a
+            # network round trip; MiniMax is the cloud backup for when the
+            # local service is not running.
+            "provider": "voicebox-local",
+            "model": "qwen-custom-voice-1.7B",
+            "fallbacks": [
+                {
+                    "providerId": "minimax-audio-speech",
+                    "model": "speech-2.5-hd",
+                    "voice": "female-shaonv",
+                }
+            ],
         },
     }
 

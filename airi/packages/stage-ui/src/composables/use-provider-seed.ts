@@ -25,6 +25,11 @@ export interface ProviderSeedFile {
     provider?: string
     model?: string
     voice?: string
+    /**
+     * Backup speech providers, tried in order when the primary one cannot
+     * produce audio.
+     */
+    fallbacks?: Array<{ providerId: string, model?: string, voice?: string }>
   }
 }
 
@@ -124,6 +129,22 @@ export function applyProviderSeed(seed: ProviderSeedFile): ProviderSeedResult {
     }
     else {
       skipped.push(`speech:${speechSeed.provider}`)
+    }
+  }
+
+  // The backup chain is separate from the primary provider: an operator may
+  // well want a local voice pack first and the cloud API behind it, while
+  // the primary provider itself stays the one the user picked.
+  if (speechSeed?.fallbacks?.length) {
+    const speechStore = useSpeechStore()
+    const hasChain = (speechStore.activeSpeechFallbacks ?? []).length > 0
+
+    if (!hasChain || seed.speechOverride) {
+      speechStore.activeSpeechFallbacks = speechSeed.fallbacks
+      applied.push(`speech:fallbacks(${speechSeed.fallbacks.length})`)
+    }
+    else {
+      skipped.push('speech:fallbacks')
     }
   }
 

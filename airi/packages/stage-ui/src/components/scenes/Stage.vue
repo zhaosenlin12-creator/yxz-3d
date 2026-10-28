@@ -316,109 +316,122 @@ async function speakWithBrowserTts(text: string): Promise<boolean> {
 let providerTtsOkCount = 0
 let providerTtsFailCount = 0
 
+// A speech provider that just failed is skipped for a while. The local voice
+// pack is the primary one, and on a machine where its service is not running
+// every single chunk would otherwise pay a connection attempt before the
+// cloud backup takes over.
+const PROVIDER_FAILURE_COOLDOWN_MS = 60_000
+const providerFailureUntil = new Map<string, number>()
+
+function isProviderCoolingDown(providerId: string) {
+  const until = providerFailureUntil.get(providerId)
+  if (!until)
+    return false
+  if (Date.now() >= until) {
+    providerFailureUntil.delete(providerId)
+    return false
+  }
+  return true
+}
+
 const speechPipeline = createSpeechPipeline<AudioBuffer>({
   tts: async (request, signal) => {
     if (signal.aborted)
       return null
 
-    if (activeSpeechProvider.value === 'speech-noop')
+    // The primary provider is the one the user picked; the backups take over
+    // when it cannot produce audio (local voice pack not running, cloud key
+    // throttled, ...). A local voice pack is the more stable of the two, so
+    // it usually goes first and the cloud API is the fallback.
+    const chain = speechStore.resolveSpeechChain()
+    if (!chain.length)
       return null
-
-    if (!activeSpeechProvider.value)
-      return null
-
-    const provider = await providersStore.getProviderInstance(activeSpeechProvider.value) as SpeechProviderWithExtraOptions<string, UnElevenLabsOptions>
-    if (!provider) {
-      console.error('Failed to initialize speech provider')
-      return null
-    }
 
     if (!request.text && !request.special)
       return null
 
-    const providerConfig = providersStore.getProviderConfig(activeSpeechProvider.value)
-
-    // For OpenAI Compatible providers, always use provider config for model and voice
-    // since these are manually configured in provider settings
-    let model = activeSpeechModel.value
-    let voice = activeSpeechVoice.value
-
-    if (activeSpeechProvider.value === 'openai-compatible-audio-speech') {
-      // Always prefer provider config for OpenAI Compatible (user configured it there)
-      if (providerConfig?.model) {
-        model = providerConfig.model as string
-      }
-      else {
-        // Fallback to default if not in provider config
-        model = 'tts-1'
-        console.warn('[Speech Pipeline] OpenAI Compatible: No model in provider config, using default', { providerConfig })
-      }
-
-      if (providerConfig?.voice) {
-        voice = {
-          id: providerConfig.voice as string,
-          name: providerConfig.voice as string,
-          description: providerConfig.voice as string,
-          previewURL: '',
-          languages: [{ code: 'en', title: 'English' }],
-          provider: activeSpeechProvider.value,
-          gender: 'neutral',
-        }
-      }
-      else {
-        // Fallback to default if not in provider config
-        voice = {
-          id: 'alloy',
-          name: 'alloy',
-          description: 'alloy',
-          previewURL: '',
-          languages: [{ code: 'en', title: 'English' }],
-          provider: activeSpeechProvider.value,
-          gender: 'neutral',
-        }
-        console.warn('[Speech Pipeline] OpenAI Compatible: No voice in provider config, using default', { providerConfig })
-      }
-    }
-
-    if (!model || !voice)
-      return null
-
-    const input = ssmlEnabled.value
-      ? speechStore.generateSSML(request.text, voice, { ...providerConfig, pitch: pitch.value })
-      : request.text
-
-    try {
-      console.info('[Stage] Generating speech', {
-        provider: activeSpeechProvider.value,
-        model,
-        voice: voice.id,
-        textLength: request.text.length,
-      })
-      const res = await generateSpeech({
-        ...provider.speech(model, providerConfig),
-        input,
-        voice: voice.id,
-      })
-
-      if (signal.aborted || !res || res.byteLength === 0)
+    for (const candidate of chain) {
+      if (signal.aborted)
         return null
 
-      const audioBuffer = await audioContext.decodeAudioData(res)
-      providerTtsOkCount += 1
-      return audioBuffer
+      const providerId = candidate.providerId
+      if (isProviderCoolingDown(providerId))
+        continue
+
+      const provider = await providersStore.getProviderInstance(providerId) as SpeechProviderWithExtraOptions<string, UnElevenLabsOptions>
+      if (!provider) {
+        console.error('Failed to initialize speech provider', { provider: providerId })
+        continue
+      }
+
+      const providerConfig = providersStore.getProviderConfig(providerId)
+      const knownVoices = speechStore.getVoicesForProvider(providerId)
+
+      // A voice id only means something for the provider it came from, so
+      // every candidate resolves its own voice.
+      let model = candidate.model
+      let voice = knownVoices.find(item => item.id === candidate.voice) ?? knownVoices[0]
+
+      if (providerId === 'openai-compatible-audio-speech') {
+        // Always prefer provider config for OpenAI Compatible (user configured it there)
+        model = (providerConfig?.model as string) || 'tts-1'
+        voice = {
+          id: (providerConfig?.voice as string) || 'alloy',
+          name: (providerConfig?.voice as string) || 'alloy',
+          description: (providerConfig?.voice as string) || 'alloy',
+          previewURL: '',
+          languages: [{ code: 'en', title: 'English' }],
+          provider: providerId,
+          gender: 'neutral',
+        }
+      }
+
+      if (!model || !voice)
+        continue
+
+      const input = ssmlEnabled.value
+        ? speechStore.generateSSML(request.text, voice, { ...providerConfig, pitch: pitch.value })
+        : request.text
+
+      try {
+        console.info('[Stage] Generating speech', {
+          provider: providerId,
+          model,
+          voice: voice.id,
+          textLength: request.text.length,
+        })
+        const res = await generateSpeech({
+          ...provider.speech(model, providerConfig),
+          input,
+          voice: voice.id,
+        })
+
+        if (signal.aborted)
+          return null
+
+        if (!res || res.byteLength === 0)
+          continue
+
+        const audioBuffer = await audioContext.decodeAudioData(res)
+        providerTtsOkCount += 1
+        return audioBuffer
+      }
+      catch (error) {
+        providerTtsFailCount += 1
+        providerFailureUntil.set(providerId, Date.now() + PROVIDER_FAILURE_COOLDOWN_MS)
+        // Put the reason into the message itself: the extra object is not
+        // visible when the console only prints the first argument, which used
+        // to hide the actual MiniMax error code from the operator.
+        console.error(`[Stage] Provider TTS failed: ${errorMessageFrom(error) ?? 'Unknown error'}`, {
+          provider: providerId,
+          model,
+          voice: voice.id,
+        })
+        // Try the next provider in the chain.
+      }
     }
-    catch (error) {
-      providerTtsFailCount += 1
-      // Put the reason into the message itself: the extra object is not
-      // visible when the console only prints the first argument, which used
-      // to hide the actual MiniMax error code from the operator.
-      console.error(`[Stage] Provider TTS failed: ${errorMessageFrom(error) ?? 'Unknown error'}`, {
-        provider: activeSpeechProvider.value,
-        model,
-        voice: voice.id,
-      })
-      return null
-    }
+
+    return null
   },
   playback: playbackManager,
 })
