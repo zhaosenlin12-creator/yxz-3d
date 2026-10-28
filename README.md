@@ -143,8 +143,11 @@ pwsh -File start-all.ps1 -BackendPort 8100
 
 1. **对话**：宜小智思考走真实 LLM（MiniMax→DeepSeek），语音 TTS 走 MiniMax speech
 2. **3D 摆件**：聊天创作面板 → 描述 → 生图预览（aixj）→ 画布编辑器（加字/个性化/批注）→ 应用到 3D → 生成 STL/GLB → 检测本机软件 → 打开 Bambu Studio
-3. **激光切割名片**：聊天输入区左下「+」→「激光切割名片」→ 选模板（背面固定活动蓝底图，正面可编辑）→ 生成切割文件（SVG mm 单位，含切割红线/雕刻绿线/定位十字）→ 预览 → 检测本机激光软件 → 打开 xTool Studio / LightBurn
-4. **预制模型**：「+」→「宜小智 3D 模型」→ 打开 `/yxz-vrm-preview` 直接看主项目同款 3D 形象
+3. **激光切割卡片**：聊天输入区左下「+」→「激光切割卡片」→ 打开「激光切割工作台」五步流程（对话确定作品 → 生成作品预览 → 创作面板产出 3D → 导出切割 SVG → xTool 切割）→ 工作台「开始对话引导」把作品需求直接发给宜小智，逐轮确认后由智能体产出预览 → 预览卡下方「打开创作面板」批注编辑并生成 3D 效果 → 回到工作台导出切割文件（SVG mm 单位，含切割红线/雕刻绿线/定位十字）→ 检测本机激光软件 → 打开 xTool Studio / LightBurn
+   - 卡片正面是**用户自己的作品图**，背面是**活动主视觉背景**，尺寸随背面模板（`activity_stage` 为 100 × 56.25 mm）
+   - 背面模板随仓库发布在 `cartoon-print-studio/backend/assets/laser/`，后端启动时自动补齐到 `data/laser/template/`，克隆即可用
+4. **3D 打印作品**：聊天输入区左下「+」→「3D 打印作品」→ 打开「3D 打印工作台」，与激光切割共用同一条「对话引导 → 预览 → 创作面板 → 3D → 导出 STL → 切片打印」链路
+5. **预制模型**：「+」→「宜小智 3D 模型」→ 打开 `/yxz-vrm-preview` 直接看主项目同款 3D 形象
 
 ---
 
@@ -166,6 +169,7 @@ pwsh -File start-all.ps1 -BackendPort 8100
 | 名片模板 | `cartoon-print-studio/data/laser/template/activity_blue.png` | 缺失时后端 `/api/laser_card` 会报错 |
 | 预制摆件模型 | `presets/models/<pose>/*` | 缺失时 `/api/presets/models` 返回空数组 |
 | SD 1.5 权重 | `cartoon-print-studio/ai/forge-webui/models/Stable-diffusion/` | `fetch-models.ps1` 下载 |
+| SD 1.5 diffusers 配置 | `cartoon-print-studio/ai/forge-webui/backend/huggingface/runwayml/stable-diffusion-v1-5/` | `fetch-models.ps1` 下载；缺 `feature_extractor/preprocessor_config.json` 时本地 SD 起不来 |
 | Hunyuan3D-2 mini | `~/.cache/huggingface/hub/models--tencent--Hunyuan3D-2mini/` | `fetch-models.ps1` 下载 |
 | TripoSR | `cartoon-print-studio/models/cache/models/AI-ModelScope--TripoSR/` | `fetch-models.ps1` 下载 |
 | 软件路径修正 | `cartoon-print-studio/data/software_paths.json` | 每台机器自动检测生成，不入库 |
@@ -219,9 +223,39 @@ copy cartoon-print-studio\keys.txt.example cartoon-print-studio\keys.txt
 | `minimax-key:` / `minimax-key-2:` | 对话 LLM、流式思考、口播文案、TTS | 回退 DeepSeek → 本地规则 |
 | `deepseek-key:` | 对话 LLM 备用 | 回退本地规则 |
 | `aixj-image-key:` | 生图（3D 摆件预览图）首选 | 回退 minimax → 本地 SD 1.5 |
+| `aixj-image-key-2:` | 生图备用（同一服务的第二把） | 同上 |
 | `minimax-image-key:` / `jojo-image-key:` | 生图备用 | 同上 |
 | `TRIPO:` | 云端高质量 3D 生成首选 | 回退混元 3D → 本地 Hunyuan3D / TripoSR |
 | `hunyuan3d-secret-id:` / `hunyuan3d-secret-key:` | 混元 3D 云端备用 | 同上 |
+
+3. 生图 key 多把出错（比如某一把返回 403，说明那个分组没开生图）时，
+   后端会自动换下一把——主备两把一起填更稳。MiniMax 生图只认 `sk-cp-` 开头的平台 key。
+
+### 前端对话也要 key（同一批 key，换个地方放）
+
+AIRI 舞台的对话是浏览器直连 provider，凭据存在浏览器里，手填一次很麻烦。
+仓库支持一个**本地种子文件**，放好就自动生效：
+
+```powershell
+copy airi\apps\stage-web\public\provider-seed.json.example airi\apps\stage-web\public\provider-seed.json
+```
+
+填上和后端同一批 key：
+
+```json
+{
+  "providers": {
+    "minimax":  { "apiKey": "<sk-cp- 开头>", "baseUrl": "https://api.minimaxi.com/v1/" },
+    "deepseek": { "apiKey": "<sk- 开头>",    "baseUrl": "https://api.deepseek.com/" }
+  },
+  "activeProvider": "minimax",
+  "activeModel": "MiniMax-M2.7"
+}
+```
+
+`provider-seed.json` 同样被 `.gitignore` 排除，不会进 GitHub。
+启动时应用会自动读取它：**只填空缺，不会覆盖你在设置界面里手填过的 key**；
+配好了 provider，首次引导弹窗也会自动跳过。
 
 3. 重启后端（`start-all.ps1`）即可生效。留空的项会被自动跳过，**不会报错**，只是走本地兜底。
 

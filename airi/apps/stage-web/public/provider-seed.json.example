@@ -1,0 +1,25 @@
+{
+  "//": "本地密钥模板。复制为 provider-seed.json 后填入自己的 key（该文件已被 .gitignore 排除）。override=true 表示本文件是唯一事实来源：浏览器里残留的旧 key 会被覆盖。",
+  "override": true,
+  "providers": {
+    "minimax": {
+      "apiKey": "",
+      "baseUrl": "https://api.minimaxi.com/v1/"
+    },
+    "minimax-audio-speech": {
+      "apiKey": "",
+      "baseUrl": "https://api.minimaxi.com/v1/"
+    },
+    "deepseek": {
+      "apiKey": "",
+      "baseUrl": "https://api.deepseek.com"
+    }
+  },
+  "activeProvider": "minimax",
+  "activeModel": "MiniMax-M2.7",
+  "speech": {
+    "provider": "minimax-audio-speech",
+    "model": "speech-2.5-hd",
+    "voice": "female-shaonv"
+  }
+}

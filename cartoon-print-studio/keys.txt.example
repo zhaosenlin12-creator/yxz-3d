@@ -15,7 +15,11 @@ deepseek-key:
 # ---- 生图（aixj 首选，minimax / jojo 备用）----
 # 生成 3D 摇件的预览图；全空则回退到本地 SD 1.5
 # 注意：生图 key 必须以 sk- 开头（后端按 sk- 前缀识别）
+# 同一服务可写多把：aixj-image-key 是主把，aixj-image-key-2 是备用把，
+# 后端会按顺序逐把重试（标签里同时含 aixj 和 image 即可）。
 aixj-image-key:
+aixj-image-key-2:
+# MiniMax 生图只认 sk-cp- 开头的平台 key；留空时后端也会自动识别 sk-cp- 的 key
 minimax-image-key:
 jojo-image-key:
 

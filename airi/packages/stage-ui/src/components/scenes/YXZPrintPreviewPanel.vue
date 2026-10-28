@@ -13,6 +13,7 @@ import {
   createYXZCartoonModel,
   createYXZPreview,
   detectYXZLocalSoftware,
+  getYXZPrintApiBase,
   openYXZExportInSoftware,
   previewImageSrc,
 } from '../../composables/use-yxz-print-preview'

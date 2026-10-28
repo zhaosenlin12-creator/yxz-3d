@@ -16,7 +16,7 @@ const props = withDefaults(defineProps<{
   stlUrl?: string
   sessionId?: string
   interactive?: boolean
-  status?: 'preview' | 'model-building' | 'model-ready'
+  status?: 'preview' | 'model-building' | 'model-ready' | 'adopted' | 'redescribe'
   progressMsg?: string
   previews?: YXZCardPreviewItem[]
 }>(), {
@@ -81,6 +81,10 @@ const badgeText = computed(() => {
     return '模型已完成'
   if (props.status === 'model-building')
     return '制作中…'
+  if (props.status === 'adopted')
+    return '已采纳'
+  if (props.status === 'redescribe')
+    return '待重新描述'
   return '可继续制作'
 })
 

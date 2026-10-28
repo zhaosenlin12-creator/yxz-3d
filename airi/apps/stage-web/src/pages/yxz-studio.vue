@@ -1,9 +1,12 @@
 <script setup lang="ts">
+import type { YXZLaserCardResponse, YXZModelProgress } from '../../../../packages/stage-ui/src/composables/use-yxz-print-preview'
+
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
 import YXZPreviewCanvasEditor from '../../../../packages/stage-ui/src/components/scenes/YXZPreviewCanvasEditor.vue'
-import { createYXZCartoonModel, getYXZPrintApiBase, type YXZModelProgress } from '../../../../packages/stage-ui/src/composables/use-yxz-print-preview'
+
+import { createYXZCartoonModel, createYXZLaserCard, detectYXZLocalSoftware, getYXZPrintApiBase, openYXZLaserCardInSoftware } from '../../../../packages/stage-ui/src/composables/use-yxz-print-preview'
 
 const route = useRoute()
 const sessionId = String(route.query.session ?? '')
@@ -30,6 +33,69 @@ const presetsLoading = ref(true)
 const presetsError = ref('')
 // '2d' = canvas editing, '3d' = model preview (scene switching like Tripo)
 const activeView = ref<'2d' | '3d'>('2d')
+
+// --- Laser-cut card export -------------------------------------------
+// The card is the physical end of the chain: its back is the fixed activity
+// artwork and its front is the visitor's own model preview.
+const laserForm = ref({ name: '', title: '', unit: '', contact: '' })
+const laserCard = ref<YXZLaserCardResponse | null>(null)
+const laserBusy = ref(false)
+const laserError = ref('')
+const laserSide = ref<'front' | 'back'>('front')
+const laserSoftwareMessage = ref('')
+const laserCardImage = computed(() => {
+  if (!laserCard.value)
+    return ''
+  return laserSide.value === 'front' ? laserCard.value.frontUrl : laserCard.value.backUrl
+})
+
+async function generateLaserCard() {
+  if (laserBusy.value)
+    return
+  if (!sessionId) {
+    laserError.value = '当前页面没有作品会话，请从对话里的预览卡片进入创作面板。'
+    return
+  }
+  laserBusy.value = true
+  laserError.value = ''
+  try {
+    laserCard.value = await createYXZLaserCard({
+      sessionId: `${sessionId}_card`,
+      artworkSessionId: sessionId,
+      artworkImageIndex: imageIndex,
+      name: laserForm.value.name,
+      title: laserForm.value.title,
+      unit: laserForm.value.unit,
+      contact: laserForm.value.contact,
+    })
+    laserSide.value = 'front'
+  }
+  catch (error) {
+    laserError.value = error instanceof Error ? error.message : '卡片生成失败，请稍后重试'
+  }
+  finally {
+    laserBusy.value = false
+  }
+}
+
+async function openLaserCardInSoftware() {
+  if (!laserCard.value)
+    return
+  laserSoftwareMessage.value = ''
+  try {
+    const tools = await detectYXZLocalSoftware()
+    const laser = tools.find(tool => tool.kind === 'laser' && tool.available)
+    if (!laser) {
+      laserSoftwareMessage.value = '未检测到可用的激光切割软件，可先下载 SVG 再手动导入 xTool。'
+      return
+    }
+    await openYXZLaserCardInSoftware(laser.id, laserCard.value.sessionId)
+    laserSoftwareMessage.value = `已在 ${laser.name} 中打开切割文件，请确认尺寸与切割参数。`
+  }
+  catch (error) {
+    laserSoftwareMessage.value = error instanceof Error ? error.message : '打开激光软件失败'
+  }
+}
 
 async function loadPresets() {
   presetsLoading.value = true
@@ -108,7 +174,7 @@ async function startModelBuild() {
       sessionId,
       imageIndex,
       ...(editedDataUrl.value ? { customImage: editedDataUrl.value } : {}),
-      onProgress: p => {
+      onProgress: (p) => {
         progress.value = p
       },
     })
@@ -188,7 +254,7 @@ function goBack() {
             rel="noopener noreferrer"
             :title="`打开 ${p.name} 3D 预览`"
           >
-            <img v-if="p.thumbUrl" :src="`${getYXZPrintApiBase()}${p.thumbUrl}`" :alt="p.name" loading="lazy" />
+            <img v-if="p.thumbUrl" :src="`${getYXZPrintApiBase()}${p.thumbUrl}`" :alt="p.name" loading="lazy">
             <span v-else class="yxz-studio-preset-ph">🧊</span>
             <span class="yxz-studio-preset-preview">点开 3D 预览 ↗</span>
           </a>
@@ -236,9 +302,13 @@ function goBack() {
           </div>
         </template>
         <div v-else class="yxz-studio-3d-empty">
-          <div class="yxz-studio-3d-empty-icon">🧊</div>
+          <div class="yxz-studio-3d-empty-icon">
+            🧊
+          </div>
           <p>先在 2D 画布完成编辑，再点击「生成 3D 模型」</p>
-          <button type="button" class="yxz-studio-build" @click="activeView = '2d'">返回 2D 编辑</button>
+          <button type="button" class="yxz-studio-build" @click="activeView = '2d'">
+            返回 2D 编辑
+          </button>
         </div>
       </section>
 
@@ -246,13 +316,19 @@ function goBack() {
       <aside class="yxz-studio-side">
         <div class="yxz-studio-card">
           <h3>当前方案</h3>
-          <p class="yxz-studio-caption">{{ caption }}</p>
-          <p v-if="editedDataUrl" class="yxz-studio-note">✓ 已应用你的批注编辑，将随模型一起生成</p>
+          <p class="yxz-studio-caption">
+            {{ caption }}
+          </p>
+          <p v-if="editedDataUrl" class="yxz-studio-note">
+            ✓ 已应用你的批注编辑，将随模型一起生成
+          </p>
         </div>
 
         <div class="yxz-studio-card">
           <h3>生成彩色 3D 模型</h3>
-          <p class="yxz-studio-note">引擎优先 Tripo3D 高清（PBR 彩色）→ 混元3D 云端 → 本地彩色，自动切换。</p>
+          <p class="yxz-studio-note">
+            引擎优先 Tripo3D 高清（PBR 彩色）→ 混元3D 云端 → 本地彩色，自动切换。
+          </p>
           <button
             class="yxz-studio-build"
             :disabled="building || !sessionId"
@@ -268,12 +344,62 @@ function goBack() {
             <p>{{ progress?.message || '正在制作 3D 模型，请耐心等待…' }}</p>
           </div>
 
-          <p v-if="errorMessage" class="yxz-studio-error">{{ errorMessage }}</p>
+          <p v-if="errorMessage" class="yxz-studio-error">
+            {{ errorMessage }}
+          </p>
 
           <div v-if="model" class="yxz-studio-done">
             <span>✓ 模型已完成</span>
-            <button type="button" class="yxz-studio-linkish" @click="switchView('3d')">切换到 3D 预览</button>
+            <button type="button" class="yxz-studio-linkish" @click="switchView('3d')">
+              切换到 3D 预览
+            </button>
             <a :href="`${model.stlUrl}${model.stlUrl.includes('?') ? '&' : '?'}download=1`" download rel="noreferrer">下载 STL（打印用）</a>
+          </div>
+        </div>
+
+        <div class="yxz-studio-card">
+          <h3>导出激光切割卡片</h3>
+          <p class="yxz-studio-note">
+            正面放你的作品预览图，背面是活动主视觉背景，尺寸固定 {{ laserCard?.sizeMm.width ?? 100 }} × {{ laserCard?.sizeMm.height ?? 56.25 }} mm。
+          </p>
+          <div class="yxz-studio-laser-fields">
+            <label>姓名 <input v-model="laserForm.name" maxlength="12" placeholder="张三"></label>
+            <label>身份 <input v-model="laserForm.title" maxlength="20" placeholder="学生"></label>
+            <label>学校 <input v-model="laserForm.unit" maxlength="30" placeholder="宜昌市实验中学"></label>
+            <label>联系方式 <input v-model="laserForm.contact" maxlength="60" placeholder="电话 / 微信"></label>
+          </div>
+          <button
+            class="yxz-studio-build"
+            :disabled="laserBusy || !sessionId"
+            @click="generateLaserCard"
+          >
+            {{ laserBusy ? '生成中…' : '生成切割卡片' }}
+          </button>
+
+          <p v-if="laserError" class="yxz-studio-error">
+            {{ laserError }}
+          </p>
+
+          <div v-if="laserCard" class="yxz-studio-laser">
+            <div class="yxz-studio-laser-tabs">
+              <button type="button" :class="{ active: laserSide === 'front' }" @click="laserSide = 'front'">
+                正面 · 作品
+              </button>
+              <button type="button" :class="{ active: laserSide === 'back' }" @click="laserSide = 'back'">
+                背面 · 活动背景
+              </button>
+            </div>
+            <img :src="laserCardImage" :alt="laserSide === 'front' ? '卡片正面' : '卡片背面'">
+            <div class="yxz-studio-laser-links">
+              <a :href="laserCard.svgUrl" download rel="noreferrer">下载切割 SVG</a>
+              <a :href="laserCard.pngUrl" target="_blank" rel="noopener noreferrer">打开整卡预览</a>
+              <button type="button" class="yxz-studio-linkish" @click="openLaserCardInSoftware">
+                用 xTool 打开切割
+              </button>
+            </div>
+            <p v-if="laserSoftwareMessage" class="yxz-studio-note">
+              {{ laserSoftwareMessage }}
+            </p>
           </div>
         </div>
       </aside>
@@ -718,6 +844,79 @@ function goBack() {
   text-align: left;
   padding: 0;
   cursor: pointer;
+  text-decoration: underline;
+}
+
+.yxz-studio-laser-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.yxz-studio-laser-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: #9fc4dd;
+  font-size: 11px;
+}
+
+.yxz-studio-laser-fields input {
+  border: 1px solid rgba(143, 212, 255, .28);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: rgba(10, 26, 44, .7);
+  color: #dff0ff;
+  font-size: 12px;
+}
+
+.yxz-studio-laser {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.yxz-studio-laser-tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.yxz-studio-laser-tabs button {
+  flex: 1;
+  border: 1px solid rgba(143, 212, 255, .28);
+  border-radius: 8px;
+  background: rgba(10, 26, 44, .7);
+  color: #9fc4dd;
+  padding: 5px 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.yxz-studio-laser-tabs button.active {
+  border-color: #4db8f0;
+  color: #dff0ff;
+}
+
+.yxz-studio-laser img {
+  display: block;
+  width: 100%;
+  border: 1px solid rgba(143, 212, 255, .25);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.yxz-studio-laser-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.yxz-studio-laser-links a {
+  color: #8fd4ff;
+  font-size: 12px;
   text-decoration: underline;
 }
 </style>

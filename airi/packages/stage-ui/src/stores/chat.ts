@@ -38,7 +38,9 @@ const YXZ_SYSTEM_GUIDANCE = `你是“宜小智AI智能创造系统”的宜小�
 2. 用户询问自我介绍、项目、展台、活动、宜昌、比赛等问题时，用上面知识专业、有特色地回答，不要只引导创作。
 3. 用户描述创作需求时，主动引导在约 5 分钟内确定产品、用途、受众、风格和数量，一次只问最关键的一个问题，记住已有回答，避免重复提问。
 4. 你有直接连接打印后台的工具 yxz_generatePreview 与 yxz_generate3DModel：信息足够时主动生成预览图并在对话展示，不要叫用户手动点击“开始创作”，也不要声称自己没有 3D 能力。
-5. 用户确认预览后再生成 3D 模型；未经用户确认不得自动打印、登录或承诺取件。`
+5. 用户确认预览后再生成 3D 模型；未经用户确认不得自动打印、登录或承诺取件。
+6. 激光切割卡片：用户想做卡片/名片/桌牌等平面切割物料时，先用 yxz_generatePreview 把他的作品做成预览图，再问清姓名、身份、学校和联系方式，最后调用 yxz_laserCard，并把 yxz_generatePreview 返回的 sessionId 作为 previewSessionId 传进去。卡片尺寸固定、背面是活动主视觉背景图、正面是他的作品预览图。生成后告诉他三条路：预览卡里下载切割 SVG、用 xTool 打开切割、或点「打开创作面板」继续编辑并产出 3D 效果。
+7. 3D 打印件与激光卡片是同一条链路：对话确定需求 → 生成预览图 → 3D 模型 → 下载 STL 交给切片软件。不要跳过预览直接给模型。`
 const YXZ_MODEL_CONFIRMATION_RE = /生成|制作|做成|开始|确认|同意|可以|继续|好/
 
 interface SendOptions {
@@ -172,15 +174,19 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       },
     })
 
+    const abortController = new AbortController()
+    activeSendControllers.set(sessionId, abortController)
+
     const isStaleGeneration = () => chatSession.getSessionGeneration(sessionId) !== generation
-    const shouldAbort = () => isStaleGeneration()
+    // A cancelled turn has to stop at its next checkpoint. `isStaleGeneration`
+    // only covers a session switch, so the abort flag has to be part of the
+    // check as well — otherwise a timed-out turn keeps running in the
+    // background and the chat stays stuck on "thinking" forever.
+    const shouldAbort = () => isStaleGeneration() || abortController.signal.aborted
     if (shouldAbort())
       return
 
     sending.value = true
-
-    const abortController = new AbortController()
-    activeSendControllers.set(sessionId, abortController)
 
     const isForegroundSession = () => sessionId === activeSessionId.value
 
@@ -476,13 +482,24 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       }
     }
     catch (error) {
-      console.error('Error sending message:', error)
+      // A cancelled turn is an expected outcome, not a fault: the send
+      // recovery aborts the stream on purpose and the UI already tells the
+      // visitor what happened.
+      if (!abortController.signal.aborted)
+        console.error('Error sending message:', error)
       throw error
     }
     finally {
       if (activeSendControllers.get(sessionId) === abortController)
         activeSendControllers.delete(sessionId)
       sending.value = false
+
+      // An aborted turn leaves an empty streaming message behind, and the
+      // history renders that as a permanent "宜小智 正在思考" placeholder.
+      // Clear it so the conversation reads as finished instead of stuck.
+      if (isForegroundSession() && abortController.signal.aborted) {
+        streamingMessage.value = { role: 'assistant', content: '', slices: [], tool_results: [] }
+      }
     }
   }
 

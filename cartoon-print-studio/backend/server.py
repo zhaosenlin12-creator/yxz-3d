@@ -1542,6 +1542,34 @@ def software_detect():
     return {"tools": software_integrations.detect_software()}
 
 
+def _resolve_laser_artwork(artwork_session_id: Optional[str], artwork_image_index: int) -> str:
+    """Locate the visitor's own artwork (their model preview) for the card front.
+
+    The laser card is the last step of the 创作 -> 3D -> 切割 chain, so its
+    front carries the very preview the visitor designed.  An edited image
+    wins over the generated one, because the 创作面板 writes it there.
+    """
+    sid = (artwork_session_id or "").strip()
+    if not sid or not SESSION_ID_RE.fullmatch(sid):
+        return ""
+
+    try:
+        index = max(0, min(9, int(artwork_image_index or 0)))
+    except (TypeError, ValueError):
+        index = 0
+
+    previews = os.path.join(session_dir(sid), "previews")
+    edited = os.path.join(previews, "custom_edit.png")
+    if os.path.isfile(edited):
+        return edited
+
+    for ext in (".png", ".jpg", ".jpeg", ".webp"):
+        candidate = os.path.join(previews, f"img_{index}{ext}")
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
 class LaserCardReq(BaseModel):
     """User-editable fields for the front side; the back is a fixed template."""
     name: str = ""
@@ -1553,15 +1581,18 @@ class LaserCardReq(BaseModel):
     accent: str = "#F5A623"
     bg_style: str = "gradient"
     note: str = ""
-    back_template: str = "activity_blue"
-    back_caption: str = ""
+    back_template: str = "activity_stage"
+    back_caption: str = "宜昌市第四届中小学生数理文化活动"
     session_id: Optional[str] = None
+    artwork_session_id: Optional[str] = None
+    artwork_image_index: int = 0
 
 
 @app.get("/api/laser/templates")
 def laser_templates():
     """List available fixed back-side templates."""
-    return {"templates": laser_card.list_templates(os.path.join(DATA, "laser", "template"))}
+    root = laser_card.ensure_templates(DATA)
+    return {"templates": laser_card.list_templates(root)}
 
 
 class LaserDesignReq(BaseModel):
@@ -1668,6 +1699,9 @@ def laser_card_generate(req: LaserCardReq):
     and produce the cut SVG + PNG previews. Fully offline and deterministic."""
     try:
         spec = req.model_dump()
+        artwork_path = _resolve_laser_artwork(req.artwork_session_id, req.artwork_image_index)
+        if artwork_path:
+            spec["artwork_path"] = artwork_path
         result = laser_card.generate(spec, DATA)
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -1684,6 +1718,7 @@ def laser_card_generate(req: LaserCardReq):
         "back_url": f"/api/data/laser/{sid}/card_back.png",
         "size_mm": result["size_mm"],
         "back_template": result["back_template"],
+        "has_artwork": bool(result.get("has_artwork")),
         "message": "名片已生成，可打开 SVG/PNG 交给激光软件切割",
     }
 
@@ -2056,6 +2091,13 @@ def serve_preset_file(name: str, rest: str):
     return FileResponse(p, media_type=mt)
 @app.on_event("startup")
 def _startup():
+    # Mirror the packaged laser-card back templates into the runtime data dir
+    # so a fresh clone can cut a card right away.
+    try:
+        laser_card.ensure_templates(DATA)
+    except Exception:
+        traceback.print_exc()
+
     def warm():
         try:
             if sd_client.is_available():
