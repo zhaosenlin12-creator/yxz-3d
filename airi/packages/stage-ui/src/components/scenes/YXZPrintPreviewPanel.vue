@@ -13,6 +13,7 @@ import {
   createYXZCartoonModel,
   createYXZPreview,
   detectYXZLocalSoftware,
+  getYXZPrintApiBase,
   openYXZExportInSoftware,
   previewImageSrc,
 } from '../../composables/use-yxz-print-preview'
@@ -178,7 +179,7 @@ async function handleRefine(dataUrl: string) {
     const item = items?.[0]
     if (!item || (!item.b64 && !item.path))
       throw new Error('后台没有返回修改结果，请稍后重试')
-    const src = previewImageSrc(item)
+    const src = previewImageSrc({ index: item.index ?? 0, b64: item.b64, path: item.path })
     const newIndex = (previews.value.reduce((max, preview) => Math.max(max, preview.index), -1) + 1)
     previews.value = [...previews.value, { index: newIndex, src, caption: '按批注修改 · 新版' }]
     editedPreviewSrc.value = undefined
@@ -387,10 +388,18 @@ onUnmounted(() => controller.value?.abort())
       </header>
 
       <ol class="yxz-print-steps" aria-label="创作步骤">
-        <li class="active"><span>1</span>描述想法</li>
-        <li :class="{ active: previews.length }"><span>2</span>确认预览</li>
-        <li :class="{ active: editedPreviewSrc }"><span>3</span>画布个性化</li>
-        <li :class="{ active: model }"><span>4</span>生成 3D</li>
+        <li class="active">
+          <span>1</span>描述想法
+        </li>
+        <li :class="{ active: previews.length }">
+          <span>2</span>确认预览
+        </li>
+        <li :class="{ active: editedPreviewSrc }">
+          <span>3</span>画布个性化
+        </li>
+        <li :class="{ active: model }">
+          <span>4</span>生成 3D
+        </li>
       </ol>
 
       <label class="yxz-print-field-label" for="yxz-product-description">产品想法</label>

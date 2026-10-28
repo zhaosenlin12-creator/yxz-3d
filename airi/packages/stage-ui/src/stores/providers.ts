@@ -48,6 +48,7 @@ import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { getProviderValidationIntervalMs, listProviders as listDefinedProviders, ProviderValidationCheck } from '../libs/providers'
+import { createMinimaxKeyRotatingFetch, splitApiKeys } from '../utils/minimax-key-rotation'
 import { buildMinimaxTtsBody } from '../utils/minimax-tts'
 import { buildVoiceboxTtsBody } from '../utils/voicebox-tts'
 import { getKokoroWorker } from '../workers/kokoro'
@@ -1393,8 +1394,13 @@ export const useProvidersStore = defineStore('providers', () => {
       }),
       createProvider: async (config) => {
         const baseUrl = typeof config.baseUrl === 'string' && config.baseUrl.trim() ? config.baseUrl.trim() : 'https://api.minimaxi.com/v1/'
-        const apiKey = typeof config.apiKey === 'string' ? config.apiKey.trim() : ''
+        const apiKeys = splitApiKeys(config.apiKey)
+        const apiKey = apiKeys[0] ?? ''
         const speechBaseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
+        // A MiniMax key that ran out of Token Plan is answered with HTTP 200
+        // and an error body, so the request is retried with the next key
+        // instead of failing the whole utterance.
+        const rotatingFetch = createMinimaxKeyRotatingFetch(apiKeys)
 
         function hexToBytes(hex: string): Uint8Array {
           const normalizedHex = hex.trim().replace(HEX_PREFIX_RE, '')
@@ -1426,7 +1432,7 @@ export const useProvidersStore = defineStore('providers', () => {
                 : undefined
               const minimaxBody = JSON.stringify(buildMinimaxTtsBody(rawBody))
 
-              const response = await fetch(`${speechBaseUrl}t2a_v2`, {
+              const response = await rotatingFetch(`${speechBaseUrl}t2a_v2`, {
                 method: 'POST',
                 headers: {
                   'content-type': 'application/json',
@@ -1441,7 +1447,10 @@ export const useProvidersStore = defineStore('providers', () => {
                 throw new Error(json?.base_resp?.status_msg || json?.message || `MiniMax TTS failed: ${response.status} ${response.statusText}`)
               }
               if (!hexAudio || typeof hexAudio !== 'string') {
-                throw new Error('MiniMax TTS returned no audio data')
+                // MiniMax reports a rejected key (exhausted quota, wrong
+                // credentials) as HTTP 200 without any audio: surface the real
+                // reason instead of a misleading "no audio data" message.
+                throw new Error(json?.base_resp?.status_msg || json?.message || 'MiniMax TTS returned no audio data')
               }
 
               const bytes = hexToBytes(hexAudio)

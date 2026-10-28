@@ -154,18 +154,29 @@ async function extractWithHtml2Canvas(element: HTMLElement, options: ColorFromEl
   const captureWidth = region.width ?? element.offsetWidth
   const captureHeight = region.height ?? element.offsetHeight
 
-  const canvas = await html2canvas(element, {
-    allowTaint: options?.allowTaint ?? true,
-    useCORS: options?.useCORS ?? true,
-    backgroundColor: options?.backgroundColor ?? null,
-    scale: options?.scale ?? 0.5,
-    logging: options?.logging ?? false,
-    width: captureWidth,
-    height: captureHeight,
-    x: region.x,
-    y: region.y,
-    onclone: options?.onclone,
-  })
+  let canvas: HTMLCanvasElement
+  try {
+    canvas = await html2canvas(element, {
+      allowTaint: options?.allowTaint ?? true,
+      useCORS: options?.useCORS ?? true,
+      backgroundColor: options?.backgroundColor ?? null,
+      scale: options?.scale ?? 0.5,
+      logging: options?.logging ?? false,
+      width: captureWidth,
+      height: captureHeight,
+      x: region.x,
+      y: region.y,
+      onclone: options?.onclone,
+    })
+  }
+  catch (error) {
+    // html2canvas 1.4 cannot parse the modern colour functions the theme
+    // uses (`color()`, `oklch()`, `color-mix()`) and rejects the whole clone.
+    // Sampling the background is a cosmetic extra: when it fails the caller
+    // keeps the current theme instead of crashing the mounted hook.
+    console.warn('[theme] html2canvas background sampling skipped:', error)
+    return { average: undefined }
+  }
 
   const ctx = canvas.getContext('2d')
   if (!ctx) {

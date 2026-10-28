@@ -134,7 +134,11 @@ function drawOperation(ctx: CanvasRenderingContext2D, operation: Operation) {
     ctx.ellipse(
       (operation.start.x + operation.end.x) / 2,
       (operation.start.y + operation.end.y) / 2,
-      Math.max(1, rx), Math.max(1, ry), 0, 0, Math.PI * 2,
+      Math.max(1, rx),
+      Math.max(1, ry),
+      0,
+      0,
+      Math.PI * 2,
     )
     ctx.stroke()
   }
@@ -147,7 +151,7 @@ function drawOperation(ctx: CanvasRenderingContext2D, operation: Operation) {
       Math.abs(operation.end.y - operation.start.y),
     )
   }
-  else {
+  else if (operation.kind === 'text') {
     ctx.font = `bold ${operation.size * 6}px "Microsoft YaHei", sans-serif`
     ctx.shadowColor = 'rgba(255,255,255,.85)'
     ctx.shadowBlur = 5
@@ -215,7 +219,7 @@ function placeTextAt(point: Point) {
   if (placingText.value)
     return
   placingText.value = true
-  const text = window.prompt('请输入要标注的文字（点在哪，字就加在哪）', textValue.value || '')
+  const text = textValue.value || ''
   placingText.value = false
   if (!text)
     return
@@ -302,6 +306,11 @@ watch(() => props.imageSrc, loadImage)
       </div>
 
       <div class="yxz-canvas-toolbar-divider" />
+
+      <label v-if="activeTool === 'text'" class="yxz-canvas-text" title="标注文字">
+        <span>文字</span>
+        <input v-model="textValue" type="text" maxlength="24" placeholder="输入后点画布" aria-label="批注文字">
+      </label>
 
       <label class="yxz-canvas-color" title="标注颜色">
         <span>颜色</span>
@@ -433,6 +442,7 @@ watch(() => props.imageSrc, loadImage)
   background: rgba(160, 205, 255, .18);
 }
 
+.yxz-canvas-text,
 .yxz-canvas-color,
 .yxz-canvas-size {
   display: flex;
@@ -441,6 +451,17 @@ watch(() => props.imageSrc, loadImage)
   gap: .25rem;
   font-size: .62rem;
   color: #9fc6e6;
+}
+
+.yxz-canvas-text input[type='text'] {
+  width: 5.4rem;
+  padding: .2rem .3rem;
+  border: 1px solid rgba(160, 205, 255, .3);
+  border-radius: .35rem;
+  background: rgba(8, 26, 45, .8);
+  color: #e8f4ff;
+  font-size: .7rem;
+  text-align: center;
 }
 
 .yxz-canvas-color input[type='color'] {

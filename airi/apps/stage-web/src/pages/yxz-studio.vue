@@ -118,7 +118,10 @@ function presetPreviewUrl(p: YXZPresetModel) {
 }
 
 function presetStlDownload(p: YXZPresetModel) {
-  return p.stlUrl ? `${getYXZPrintApiBase()}${p.stlUrl}` : ''
+  if (!p.stlUrl)
+    return ''
+  const url = `${getYXZPrintApiBase()}${p.stlUrl}`
+  return `${url}${url.includes('?') ? '&' : '?'}download=1`
 }
 
 function onSave(dataUrl: string) {
@@ -233,7 +236,7 @@ function goBack() {
               <a
                 v-if="p.stlUrl"
                 class="yxz-studio-preset-link"
-                :href="`${getYXZPrintApiBase()}${p.stlUrl}?download=1`"
+                :href="presetStlDownload(p)"
                 download
                 rel="noreferrer"
               >下载 STL</a>

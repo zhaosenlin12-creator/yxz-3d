@@ -1,11 +1,38 @@
+import type { ChatProvider, ModelProvider } from '@xsai-ext/providers/utils'
+
 import type { ModelInfo } from '../../types'
 
 import { createMinimax, createMinimaxCn } from '@xsai-ext/providers/create'
 import { z } from 'zod'
 
+import { createMinimaxKeyRotatingFetch, splitApiKeys } from '../../../../utils/minimax-key-rotation'
 import { ProviderValidationCheck } from '../../types'
 import { createOpenAICompatibleValidators } from '../../validators'
 import { defineProvider } from '../registry'
+
+/**
+ * Wrap a MiniMax provider so a request is retried with the next configured
+ * key when the current one is rejected.
+ *
+ * MiniMax answers an exhausted Token Plan with HTTP 200 plus an error body
+ * instead of a 4xx, so the rotation has to happen inside the fetch: the first
+ * chunk of the answer is inspected before it reaches the caller.
+ */
+function withMinimaxKeyRotation(
+  provider: ChatProvider & ModelProvider,
+  rawApiKey: unknown,
+): ChatProvider & ModelProvider {
+  const keys = splitApiKeys(rawApiKey)
+  if (keys.length <= 1)
+    return provider
+
+  const rotatingFetch = createMinimaxKeyRotatingFetch(keys)
+
+  return {
+    ...provider,
+    chat: model => ({ ...provider.chat(model), fetch: rotatingFetch }),
+  }
+}
 
 const minimaxCnConfigSchema = z.object({
   apiKey: z
@@ -104,7 +131,7 @@ export const providerMinimax = defineProvider<MinimaxCnConfig>({
     }),
   }),
   createProvider(config) {
-    return createMinimaxCn(config.apiKey, config.baseUrl)
+    return withMinimaxKeyRotation(createMinimaxCn(config.apiKey, config.baseUrl), config.apiKey)
   },
 
   extraMethods: {
@@ -144,7 +171,7 @@ export const providerMinimaxGlobal = defineProvider<MinimaxGlobalConfig>({
     }),
   }),
   createProvider(config) {
-    return createMinimax(config.apiKey, config.baseUrl)
+    return withMinimaxKeyRotation(createMinimax(config.apiKey, config.baseUrl), config.apiKey)
   },
 
   extraMethods: {

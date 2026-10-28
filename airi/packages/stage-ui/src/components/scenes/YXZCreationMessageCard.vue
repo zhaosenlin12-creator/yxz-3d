@@ -16,7 +16,7 @@ const props = withDefaults(defineProps<{
   stlUrl?: string
   sessionId?: string
   interactive?: boolean
-  status?: 'preview' | 'model-building' | 'model-ready'
+  status?: 'preview' | 'model-building' | 'model-ready' | 'adopted' | 'redescribe'
   progressMsg?: string
   previews?: YXZCardPreviewItem[]
 }>(), {
@@ -81,6 +81,10 @@ const badgeText = computed(() => {
     return '模型已完成'
   if (props.status === 'model-building')
     return '制作中…'
+  if (props.status === 'adopted')
+    return '已采用'
+  if (props.status === 'redescribe')
+    return '已重新描述'
   return '可继续制作'
 })
 
@@ -110,7 +114,9 @@ async function copyPreviewAddress() {
     <div v-if="status === 'model-building'" class="yxz-creation-card-building">
       <span class="yxz-creation-card-building-dot" />
       <span>{{ progressMsg || '正在制作 3D 模型，请耐心等待…' }}</span>
-      <div class="yxz-creation-card-building-track"><div class="yxz-creation-card-building-bar" /></div>
+      <div class="yxz-creation-card-building-track">
+        <div class="yxz-creation-card-building-bar" />
+      </div>
     </div>
     <img
       :src="previewSrc"
@@ -123,15 +129,25 @@ async function copyPreviewAddress() {
       @keydown.enter="openLightbox(0)"
     >
     <div class="yxz-creation-card-zoom-hint">
-      <button type="button" @click="openLightbox(0)">点击放大预览</button>
+      <button type="button" @click="openLightbox(0)">
+        点击放大预览
+      </button>
       <a :href="previewSrc" target="_blank" rel="noopener noreferrer">在新页面打开</a>
-      <button v-if="sessionId && status !== 'model-building'" type="button" class="yxz-creation-card-studio" @click="openStudio">打开创作面板</button>
+      <button v-if="sessionId && status !== 'model-building'" type="button" class="yxz-creation-card-studio" @click="openStudio">
+        打开创作面板
+      </button>
       <span v-if="gallery.length > 1">共 {{ gallery.length }} 张</span>
     </div>
-    <p v-if="description" class="yxz-creation-card-description">{{ description }}</p>
+    <p v-if="description" class="yxz-creation-card-description">
+      {{ description }}
+    </p>
     <div v-if="interactive && status !== 'model-building'" class="yxz-creation-card-actions">
-      <button type="button" class="yxz-creation-card-primary" @click="emit('adopt')">采用这个方案</button>
-      <button type="button" class="yxz-creation-card-secondary" @click="emit('redescribe')">重新描述</button>
+      <button type="button" class="yxz-creation-card-primary" @click="emit('adopt')">
+        采用这个方案
+      </button>
+      <button type="button" class="yxz-creation-card-secondary" @click="emit('redescribe')">
+        重新描述
+      </button>
     </div>
     <div v-if="modelUrl || stlUrl" class="yxz-creation-card-links">
       <a v-if="modelUrl" :href="modelPreviewUrl" target="_blank" rel="noopener noreferrer">打开 3D 预览</a>
@@ -139,7 +155,9 @@ async function copyPreviewAddress() {
     </div>
     <div v-if="modelUrl" class="yxz-creation-card-address">
       <span>预览地址：{{ modelPreviewUrl }}</span>
-      <button type="button" @click="copyPreviewAddress">{{ copied ? '已复制' : '复制地址' }}</button>
+      <button type="button" @click="copyPreviewAddress">
+        {{ copied ? '已复制' : '复制地址' }}
+      </button>
     </div>
 
     <Teleport to="body">
@@ -147,14 +165,22 @@ async function copyPreviewAddress() {
         <div class="yxz-lightbox-topbar">
           <span>{{ gallery[lightboxIndex]?.caption || '' }}</span>
           <div class="yxz-lightbox-topbar-actions">
-            <button type="button" @click="openLightboxInNewTab">新页面打开</button>
-            <button type="button" @click="closeLightbox">关闭 ✕</button>
+            <button type="button" @click="openLightboxInNewTab">
+              新页面打开
+            </button>
+            <button type="button" @click="closeLightbox">
+              关闭 ✕
+            </button>
           </div>
         </div>
         <div class="yxz-lightbox-stage">
-          <button v-if="gallery.length > 1" type="button" class="yxz-lightbox-nav is-prev" aria-label="上一张" @click="stepLightbox(-1)">‹</button>
+          <button v-if="gallery.length > 1" type="button" class="yxz-lightbox-nav is-prev" aria-label="上一张" @click="stepLightbox(-1)">
+            ‹
+          </button>
           <img :src="gallery[lightboxIndex]?.src" :alt="gallery[lightboxIndex]?.caption || '预览'" class="yxz-lightbox-image">
-          <button v-if="gallery.length > 1" type="button" class="yxz-lightbox-nav is-next" aria-label="下一张" @click="stepLightbox(1)">›</button>
+          <button v-if="gallery.length > 1" type="button" class="yxz-lightbox-nav is-next" aria-label="下一张" @click="stepLightbox(1)">
+            ›
+          </button>
         </div>
         <div v-if="gallery.length > 1" class="yxz-lightbox-thumbs">
           <button

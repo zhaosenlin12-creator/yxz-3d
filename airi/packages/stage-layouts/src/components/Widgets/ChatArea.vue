@@ -4,6 +4,7 @@ import type { ChatProvider } from '@xsai-ext/providers/utils'
 import { isStageTamagotchi } from '@proj-airi/stage-shared'
 import { YXZCreationWorkbench } from '@proj-airi/stage-ui/components/scenes'
 import { useAudioAnalyzer } from '@proj-airi/stage-ui/composables'
+import { getYXZPrintApiBase } from '@proj-airi/stage-ui/composables/use-yxz-print-preview'
 import { useAudioContext } from '@proj-airi/stage-ui/stores/audio'
 import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
 import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
@@ -19,6 +20,7 @@ import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 
+import CameraCapture from './CameraCapture.vue'
 import IndicatorMicVolume from './IndicatorMicVolume.vue'
 
 import { ChatSendTimeoutError, notifyYXZChatRecovery, withChatSendTimeout } from './chat-send-recovery'
@@ -352,7 +354,7 @@ function handleWorkbenchStatus(status: string) {
 }
 
 // Camera capture: handle photo taken from camera
-async function handleCameraImage(imageDataUrl: string, blob: Blob) {
+async function handleCameraImage(_imageDataUrl: string, blob: Blob) {
   try {
     // Create form data for upload
     const formData = new FormData()
@@ -363,7 +365,7 @@ async function handleCameraImage(imageDataUrl: string, blob: Blob) {
     const uploadingToast = toast.loading('正在上传照片...')
 
     // Upload to backend
-    const response = await fetch('http://localhost:8000/api/upload-image', {
+    const response = await fetch(`${getYXZPrintApiBase()}/api/upload-image`, {
       method: 'POST',
       body: formData,
     })
@@ -764,6 +766,28 @@ watch(sendMode, () => {
         </span>
       </div>
 
+      <!-- Uploaded photo chip: the camera capture result that the agent can use -->
+      <div
+        v-if="uploadedImagePath"
+        class="flex items-center gap-2 border-b border-primary-200/30 px-3 py-2"
+      >
+        <img
+          :src="`${getYXZPrintApiBase()}${uploadedImagePath}`"
+          alt="已上传的照片"
+          class="h-10 w-10 shrink-0 border border-primary-200/60 rounded-lg object-cover"
+        >
+        <span class="min-w-0 flex-1 truncate text-xs text-neutral-500 dark:text-neutral-400">
+          照片已上传，可以补充你的创作想法
+        </span>
+        <button
+          type="button"
+          class="shrink-0 rounded-md px-2 py-1 text-xs text-neutral-400 transition hover:bg-neutral-100 dark:hover:bg-neutral-800"
+          @click="uploadedImagePath = undefined"
+        >
+          移除
+        </button>
+      </div>
+
       <BasicTextarea
         v-model="messageInput"
         :submit-on-enter="false"
@@ -833,6 +857,14 @@ watch(sendMode, () => {
                 <div class="i-ph:hammer-bold h-4 w-4 text-primary-600 dark:text-primary-300" />
                 <span>创作工作室</span>
                 <small class="text-neutral-400">2D 批注编辑 · 产出 3D</small>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                class="w-full flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-xs outline-none transition-colors hover:bg-primary-100/60 dark:hover:bg-primary-900/40"
+                @select="cameraModalOpen = true"
+              >
+                <div class="i-ph:camera-bold h-4 w-4 text-primary-600 dark:text-primary-300" />
+                <span>拍照创作</span>
+                <small class="text-neutral-400">摄像头拍摄 · AI 识图 · 引导创作</small>
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenuPortal>
@@ -956,5 +988,31 @@ watch(sendMode, () => {
       :mode="workbenchMode"
       @status="handleWorkbenchStatus"
     />
+
+    <!-- Camera capture modal: shoot a photo, then let the agent guide the creation -->
+    <div
+      v-if="cameraModalOpen"
+      class="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      @click.self="cameraModalOpen = false"
+    >
+      <div class="max-h-[90vh] max-w-2xl w-full overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl dark:bg-neutral-900">
+        <div class="mb-4 flex items-center justify-between">
+          <h3 class="text-sm text-neutral-800 font-medium dark:text-neutral-100">
+            拍照创作
+          </h3>
+          <button
+            type="button"
+            class="rounded-md px-2 py-1 text-xs text-neutral-400 transition hover:bg-neutral-100 dark:hover:bg-neutral-800"
+            @click="cameraModalOpen = false"
+          >
+            关闭
+          </button>
+        </div>
+        <CameraCapture
+          @confirm="handleCameraImage"
+          @cancel="cameraModalOpen = false"
+        />
+      </div>
+    </div>
   </div>
 </template>

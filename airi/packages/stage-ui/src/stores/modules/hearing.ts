@@ -12,9 +12,9 @@ import { computed, ref, shallowRef, watch } from 'vue'
 import vadWorkletUrl from '../../workers/vad/process.worklet?worker&url'
 
 import { useProvidersStore } from '../providers'
-import { useSettingsStageModel } from '../settings/stage-model'
 import { streamAliyunTranscription } from '../providers/aliyun/stream-transcription'
 import { streamWebSpeechAPITranscription } from '../providers/web-speech-api'
+import { useSettingsStageModel } from '../settings/stage-model'
 
 function errorMessage(err: unknown): string {
   const msg = errorMessageFrom(err) ?? String(err)
@@ -492,6 +492,9 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
     idleTimeoutMs?: number
     onSentenceEnd?: (delta: string) => void
     onSpeechEnd?: (text: string) => void
+    // 实时中间结果（还没成句的识别文本）。不声明也不透传的话，
+    // 语音输入的「实时上屏」会静默失效。
+    onInterim?: (text: string) => void
   }) {
     console.info('[Hearing Pipeline] transcribeForMediaStream called', {
       supportsStreamInput: supportsStreamInput.value,
@@ -616,6 +619,9 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
           onSpeechEnd: (text) => {
             // Call the options callback
             options?.onSpeechEnd?.(text)
+          },
+          onInterim: (text) => {
+            options?.onInterim?.(text)
           },
         })
 

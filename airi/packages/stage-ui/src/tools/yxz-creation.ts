@@ -132,7 +132,8 @@ export async function generateYXZModelFromConfirmation(sessionId: string, userTe
   const card = [...messages].reverse().find((message): message is ChatAssistantMessage & { createdAt?: number } => message.role === 'assistant'
     && message.yxzCreation?.kind === 'yxz-creation'
     && message.yxzCreation.status === 'preview')
-  if (!card?.yxzCreation)
+  const creation = card?.yxzCreation
+  if (!creation)
     throw new Error('请先在当前对话生成预览图')
 
   if (!YXZ_MODEL_CONFIRMATION_RE.test(userText))
@@ -140,33 +141,33 @@ export async function generateYXZModelFromConfirmation(sessionId: string, userTe
   // The caller normally supplies the active chat-session id. A tool caller
   // may instead pass the preview backend session id, so accept either while
   // always using the id stored on the validated preview card for generation.
-  if (!card.yxzCreation.sessionId || (sessionId !== activeSessionId && sessionId !== card.yxzCreation.sessionId))
+  if (!creation.sessionId || (sessionId !== activeSessionId && sessionId !== creation.sessionId))
     throw new Error('预览会话已失效，请重新生成预览')
 
   appendCreationCard({
-    sessionId: card.yxzCreation.sessionId,
-    description: card.yxzCreation.description,
-    options: card.yxzCreation.options,
-    preview: card.yxzCreation.preview,
+    sessionId: creation.sessionId,
+    description: creation.description,
+    options: creation.options,
+    preview: creation.preview,
     status: 'model-building',
   })
   const result = await createYXZCartoonModel({
-    sessionId: card.yxzCreation.sessionId,
-    imageIndex: card.yxzCreation.preview.index,
+    sessionId: creation.sessionId,
+    imageIndex: creation.preview.index,
     onProgress: progress => appendCreationCard({
-      sessionId: card.yxzCreation.sessionId,
-      description: card.yxzCreation.description,
-      options: card.yxzCreation.options,
-      preview: card.yxzCreation.preview,
+      sessionId: creation.sessionId,
+      description: creation.description,
+      options: creation.options,
+      preview: creation.preview,
       status: 'model-building',
       progressMsg: progress.message,
     }),
   })
   appendCreationCard({
-    sessionId: card.yxzCreation.sessionId,
-    description: card.yxzCreation.description,
-    options: card.yxzCreation.options,
-    preview: card.yxzCreation.preview,
+    sessionId: creation.sessionId,
+    description: creation.description,
+    options: creation.options,
+    preview: creation.preview,
     model: result,
     status: 'model-ready',
   })
@@ -282,7 +283,8 @@ export async function createYXZCreationTools() {
           && message.yxzCreation?.kind === 'yxz-creation'
           && message.yxzCreation.status === 'preview'
           && message.yxzCreation.preview.index === imageIndex)
-        if (!card?.yxzCreation)
+        const creation = card?.yxzCreation
+        if (!creation)
           throw new Error('请先在当前对话生成并确认预览图')
         const latestUser = [...messages].reverse().find(message => message.role === 'user')
         const userText = typeof latestUser?.content === 'string' ? latestUser.content : ''
@@ -291,32 +293,32 @@ export async function createYXZCreationTools() {
           throw new Error('请先查看预览，再回复是否制作 3D 模型')
         if (!YXZ_MODEL_CONFIRMATION_RE.test(userText))
           throw new Error('请先让用户明确确认制作 3D 模型')
-        if (!card.yxzCreation.sessionId || card.yxzCreation.sessionId !== sessionId)
+        if (!creation.sessionId || creation.sessionId !== sessionId)
           throw new Error('预览会话已失效，请重新生成预览')
         appendCreationCard({
-          sessionId: card.yxzCreation.sessionId,
-          description: card.yxzCreation.description,
-          options: card.yxzCreation.options,
-          preview: card.yxzCreation.preview,
+          sessionId: creation.sessionId,
+          description: creation.description,
+          options: creation.options,
+          preview: creation.preview,
           status: 'model-building',
         })
         const result = await createYXZCartoonModel({
-          sessionId: card.yxzCreation.sessionId,
+          sessionId: creation.sessionId,
           imageIndex,
           onProgress: progress => appendCreationCard({
-            sessionId: card.yxzCreation.sessionId,
-            description: card.yxzCreation.description,
-            options: card.yxzCreation.options,
-            preview: card.yxzCreation.preview,
+            sessionId: creation.sessionId,
+            description: creation.description,
+            options: creation.options,
+            preview: creation.preview,
             status: 'model-building',
             progressMsg: progress.message,
           }),
         })
         appendCreationCard({
-          sessionId: card.yxzCreation.sessionId,
-          description: card.yxzCreation.description,
-          options: card.yxzCreation.options,
-          preview: card.yxzCreation.preview,
+          sessionId: creation.sessionId,
+          description: creation.description,
+          options: creation.options,
+          preview: creation.preview,
           model: result,
           status: 'model-ready',
         })
