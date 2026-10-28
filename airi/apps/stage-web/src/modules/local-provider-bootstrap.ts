@@ -100,6 +100,24 @@ function setPrimitiveStorage(key: string, value: Primitive | undefined) {
   localStorage.setItem(key, String(value))
 }
 
+/**
+ * Fill a storage slot only when it is still empty.
+ *
+ * The speech provider and the voice are picked by hand in the settings, and
+ * a key rotation must not drag them back to the bootstrap default: the
+ * bootstrap exists to hand out credentials, not to undo a voice choice.
+ */
+function fillPrimitiveStorage(key: string, value: Primitive | undefined) {
+  if (value === undefined)
+    return
+
+  const current = localStorage.getItem(key)
+  if (current !== null && current !== '' && current !== 'speech-noop')
+    return
+
+  localStorage.setItem(key, String(value))
+}
+
 function normalizeFallbackCandidates(candidates: FallbackCandidateSelection[] | undefined) {
   if (!candidates?.length)
     return []
@@ -282,10 +300,10 @@ export function applyLocalProviderBootstrap() {
     setPrimitiveStorage(STORAGE_KEYS.hearingAutoSendDelay, hearing?.autoSendDelay)
 
     const speech = config.modules?.speech
-    setPrimitiveStorage(STORAGE_KEYS.speechActiveProvider, speech?.activeProvider)
-    setPrimitiveStorage(STORAGE_KEYS.speechActiveModel, speech?.activeModel)
-    setPrimitiveStorage(STORAGE_KEYS.speechVoice, speech?.voice)
-    setPrimitiveStorage(STORAGE_KEYS.speechLanguage, speech?.language)
+    fillPrimitiveStorage(STORAGE_KEYS.speechActiveProvider, speech?.activeProvider)
+    fillPrimitiveStorage(STORAGE_KEYS.speechActiveModel, speech?.activeModel)
+    fillPrimitiveStorage(STORAGE_KEYS.speechVoice, speech?.voice)
+    fillPrimitiveStorage(STORAGE_KEYS.speechLanguage, speech?.language)
   }
 
   if (shouldApplyFallback && hasFallbackConfig(fallbackConfig)) {

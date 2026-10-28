@@ -64,6 +64,11 @@ def main() -> int:
 
     seed = {
         "override": True,
+        # `override` only replaces stale *credentials* in the browser with the
+        # current keys. The speech provider and the voice are picked by hand
+        # in the settings, so they must survive a reload: only a seed that
+        # really wants to move the voice sets this flag.
+        "speechOverride": False,
         "providers": {
             "minimax": {
                 "apiKey": minimax,
