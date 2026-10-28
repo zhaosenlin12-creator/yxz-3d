@@ -554,7 +554,7 @@ def demo_model():
                 mesh_postprocess.export_view_glb(cleaned, model_path)
                 cleaned.export(os.path.join(model_dir, "mesh.obj"))
                 cleaned.export(os.path.join(model_dir, "mesh.stl"))
-            elif len(legacy_mesh.split(only_watertight=False)) > 1:
+            elif mesh_postprocess.component_count(legacy_mesh) > 1:
                 # Keep old bundled demos compatible with the explode-view UI.
                 mesh_postprocess.export_view_glb(legacy_mesh, model_path)
         if not already_prepared:

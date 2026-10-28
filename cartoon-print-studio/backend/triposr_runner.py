@@ -156,6 +156,16 @@ def generate_3d(image_paths, output_dir, *, mc_res=128, threshold=15.0, max_view
     """
     if isinstance(image_paths, str):
         image_paths = [image_paths]
+    # The heavy deps (torch / TripoSR / RMBG) are loaded lazily. Without this
+    # guard a machine that has no torch crashed with
+    # "AttributeError: 'NoneType' object has no attribute 'open'" instead of
+    # reporting that the local engine is unavailable, which took the whole
+    # backend down mid-chain.
+    if not _ensure_packages():
+        raise RuntimeError(
+            "本地 TripoSR 引擎不可用（缺少 torch / TripoSR / RMBG 依赖）"
+            f"：{_HEAVY_ERR or 'unknown'}"
+        )
     # Cap views: TripoSR produces one scene code per view, averaging >2 views
     # tends to blur features and the VRAM cost grows linearly.
     if len(image_paths) > max_views:

@@ -434,6 +434,12 @@ export async function createYXZCartoonModel(request: YXZModelRequest, fetcher: t
           request.onProgress?.({ percent: 0, message: '3D 生成超过 10 分钟仍未完成，请稍后重试', step: 'failed' })
           throw new Error('3D 生成超过 10 分钟仍未完成，请稍后重试')
         }
+        // The caller cancelled the turn (the chat send recovery aborts a
+        // stalled turn). Stop the engine chain here: trying the next engine
+        // would keep the request alive and keep the chat queued behind it.
+        if (linked.signal.aborted) {
+          throw new Error('3D 生成已取消')
+        }
         lastError = error instanceof Error ? error : new Error(String(error))
         request.onProgress?.({ percent: 5, message: `${engine.label} 引擎失败，尝试下一个引擎…`, step: 'building' })
       }
