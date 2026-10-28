@@ -79,12 +79,29 @@ foreach ($providerId in @('minimax-audio-speech', 'minimax', 'openai-compatible'
     }
 }
 
+# 本地语音包（Voicebox / Qwen CustomVoice）。音色不是写死的：前端启动后
+# 从 http://127.0.0.1:17493/profiles 拉取声音档案，用户在设置页选中的那一个
+# 会记在 settings/speech/voice 里。这里只登记服务商本身。
+$providers['voicebox-local'] = @{
+    baseUrl   = 'http://127.0.0.1:17493'
+    model     = 'qwen-custom-voice-1.7B'
+    modelSize = '1.7B'
+    instruct  = '温暖、活泼、亲切，带一点可爱的卡通感，语速自然，像宜小智在和用户面对面交流。'
+}
+
 $modules = @{
     speech = @{
-        activeProvider = 'minimax-audio-speech'
-        activeModel    = 'speech-2.5-hd-preview'
-        voice          = 'female-shaonv'
+        # 本地语音包优先：本地服务不走网络，最稳；MiniMax 作为云端备份。
+        activeProvider = 'voicebox-local'
+        activeModel    = 'qwen-custom-voice-1.7B'
         language       = 'zh-CN'
+        fallbacks      = @(
+            @{
+                providerId = 'minimax-audio-speech'
+                model      = 'speech-2.5-hd'
+                voice      = 'female-shaonv'
+            }
+        )
     }
 }
 if ($providers.ContainsKey('deepseek')) {

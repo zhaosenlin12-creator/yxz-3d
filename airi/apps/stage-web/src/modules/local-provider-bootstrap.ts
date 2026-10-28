@@ -21,6 +21,8 @@ interface ModuleSelection {
   language?: string
   autoSendEnabled?: boolean
   autoSendDelay?: number
+  /** Backup speech providers, tried in order when the primary one fails. */
+  fallbacks?: Array<{ providerId: string, model?: string, voice?: string }>
 }
 
 interface FallbackCandidateSelection {
@@ -73,6 +75,7 @@ const STORAGE_KEYS = {
   speechActiveModel: 'settings/speech/active-model',
   speechVoice: 'settings/speech/voice',
   speechLanguage: 'settings/speech/language',
+  speechFallbacks: 'settings/speech/fallbacks',
 } as const
 
 const DEFAULT_FALLBACK_COOLDOWN_MS = 5 * 60 * 1000
@@ -304,6 +307,14 @@ export function applyLocalProviderBootstrap() {
     fillPrimitiveStorage(STORAGE_KEYS.speechActiveModel, speech?.activeModel)
     fillPrimitiveStorage(STORAGE_KEYS.speechVoice, speech?.voice)
     fillPrimitiveStorage(STORAGE_KEYS.speechLanguage, speech?.language)
+
+    if (speech?.fallbacks?.length) {
+      // Only seed the backup chain when there is none: an operator may have
+      // tuned the order, and a key rotation must not undo that.
+      const current = localStorage.getItem(STORAGE_KEYS.speechFallbacks)
+      if (!current || current === '[]')
+        localStorage.setItem(STORAGE_KEYS.speechFallbacks, JSON.stringify(speech.fallbacks))
+    }
   }
 
   if (shouldApplyFallback && hasFallbackConfig(fallbackConfig)) {

@@ -20,6 +20,15 @@ export function toSignedPercent(value: number): string {
   return '0%'
 }
 
+export interface SpeechFallbackCandidate {
+  /** Provider id, e.g. `minimax-audio-speech`. */
+  providerId: string
+  /** Model to use; falls back to the provider's first model. */
+  model?: string
+  /** Voice id to use; falls back to the provider's first known voice. */
+  voice?: string
+}
+
 export const useSpeechStore = defineStore('speech', () => {
   const providersStore = useProvidersStore()
   const { allAudioSpeechProvidersMetadata } = storeToRefs(providersStore)
@@ -29,6 +38,15 @@ export const useSpeechStore = defineStore('speech', () => {
   const activeSpeechModel = useLocalStorageManualReset<string>('settings/speech/active-model', '')
   const activeSpeechVoiceId = useLocalStorageManualReset<string>('settings/speech/voice', '')
   const activeSpeechVoice = refManualReset<VoiceInfo | undefined>(undefined)
+  /**
+   * Backup speech providers, tried in order when the primary one cannot
+   * produce audio.
+   *
+   * A local voice pack (Voicebox) does not depend on a network round trip,
+   * so it is the more stable choice and usually goes first. MiniMax is the
+   * cloud backup for when the local service is not running.
+   */
+  const activeSpeechFallbacks = useLocalStorageManualReset<SpeechFallbackCandidate[]>('settings/speech/fallbacks', [])
 
   const pitch = useLocalStorageManualReset<number>('settings/speech/pitch', 0)
   const rate = useLocalStorageManualReset<number>('settings/speech/rate', 1)
@@ -38,6 +56,13 @@ export const useSpeechStore = defineStore('speech', () => {
   const availableVoices = refManualReset<Record<string, VoiceInfo[]>>(() => ({}))
   const selectedLanguage = useLocalStorageManualReset<string>('settings/speech/language', 'en-US')
   const modelSearchQuery = refManualReset<string>('')
+
+  // A local voice pack that is not running must not spam the console on
+  // every reload: remember the unreachable provider for a while and say so
+  // only once.
+  const VOICE_LIST_FAILURE_COOLDOWN_MS = 60_000
+  const voiceListFailureUntil = new Map<string, number>()
+  const voiceListWarned = new Set<string>()
 
   // Computed properties
   const availableSpeechProvidersMetadata = computed(() => allAudioSpeechProvidersMetadata.value)
@@ -86,6 +111,10 @@ export const useSpeechStore = defineStore('speech', () => {
       return []
     }
 
+    const coolingDown = voiceListFailureUntil.get(provider)
+    if (coolingDown && Date.now() < coolingDown)
+      return availableVoices.value[provider] ?? []
+
     isLoadingSpeechProviderVoices.value = true
     speechProviderError.value = null
 
@@ -99,7 +128,19 @@ export const useSpeechStore = defineStore('speech', () => {
       return voices
     }
     catch (error) {
-      console.error(`Error fetching voices for ${provider}:`, error)
+      const message = error instanceof Error ? error.message : String(error)
+      const unreachable = /Failed to fetch|NetworkError|ECONNREFUSED|load failed/i.test(message)
+
+      if (unreachable) {
+        voiceListFailureUntil.set(provider, Date.now() + VOICE_LIST_FAILURE_COOLDOWN_MS)
+        if (!voiceListWarned.has(provider)) {
+          voiceListWarned.add(provider)
+          console.warn(`[Speech] 语音服务暂时不可用，已跳过（${provider}）：${message}`)
+        }
+      }
+      else {
+        console.error(`Error fetching voices for ${provider}:`, error)
+      }
       speechProviderError.value = error instanceof Error ? error.message : 'Unknown error'
       if (provider === 'microsoft-speech') {
         const fallbackVoiceId = activeSpeechVoiceId.value || 'zh-CN-XiaoxiaoNeural'
@@ -129,6 +170,40 @@ export const useSpeechStore = defineStore('speech', () => {
     return availableVoices.value[provider] || []
   }
 
+  /**
+   * The speech providers to try, in order.
+   *
+   * The first entry is the provider the user picked in the settings; the
+   * rest are the configured backups. Every entry carries the model and the
+   * voice that belong to *that* provider, because a voice id is only
+   * meaningful for the provider it came from.
+   */
+  function resolveSpeechChain(): SpeechFallbackCandidate[] {
+    const chain: SpeechFallbackCandidate[] = []
+
+    if (activeSpeechProvider.value && activeSpeechProvider.value !== 'speech-noop') {
+      chain.push({
+        providerId: activeSpeechProvider.value,
+        model: activeSpeechModel.value,
+        voice: activeSpeechVoice.value?.id || activeSpeechVoiceId.value || undefined,
+      })
+    }
+
+    for (const candidate of activeSpeechFallbacks.value ?? []) {
+      if (!candidate?.providerId)
+        continue
+      if (chain.some(entry => entry.providerId === candidate.providerId))
+        continue
+      chain.push({
+        providerId: candidate.providerId,
+        model: candidate.model,
+        voice: candidate.voice,
+      })
+    }
+
+    return chain
+  }
+
   // Watch for provider changes and load voices
   watch(activeSpeechProvider, async (newProvider) => {
     if (newProvider) {
@@ -139,6 +214,23 @@ export const useSpeechStore = defineStore('speech', () => {
     // REVIEW: should we always load voices on init? What will happen when network is not available?
     immediate: true,
   })
+
+  // The backup providers need their voice list as well: a voice id is only
+  // meaningful for the provider it came from, so the chain cannot reuse the
+  // primary provider's voice.
+  watch(
+    () => (activeSpeechFallbacks.value ?? []).map(candidate => candidate?.providerId).filter(Boolean),
+    async (providerIds) => {
+      for (const providerId of providerIds) {
+        if (providerId === activeSpeechProvider.value)
+          continue
+        if (availableVoices.value[providerId]?.length)
+          continue
+        await loadVoicesForProvider(providerId)
+      }
+    },
+    { immediate: true, deep: true },
+  )
 
   if (!activeSpeechProvider.value) {
     activeSpeechProvider.value = 'speech-noop'
@@ -321,6 +413,7 @@ export const useSpeechStore = defineStore('speech', () => {
     activeSpeechModel,
     activeSpeechVoice,
     activeSpeechVoiceId,
+    activeSpeechFallbacks,
     pitch,
     rate,
     ssmlEnabled,
@@ -343,6 +436,7 @@ export const useSpeechStore = defineStore('speech', () => {
     speech,
     loadVoicesForProvider,
     getVoicesForProvider,
+    resolveSpeechChain,
     generateSSML,
     resetState,
   }

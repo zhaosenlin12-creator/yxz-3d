@@ -44,13 +44,18 @@ def read_keys(path: str) -> dict[str, str]:
     return keys
 
 
-def join_keys(keys: dict[str, str], *labels: str) -> str:
-    """Resolve the given key labels and join them into one provider field.
+def provider_entry(keys: dict[str, str], *labels: str) -> dict[str, object]:
+    """Build a provider config that carries every key of a family.
 
-    The frontend accepts a comma separated key list and tries them one after
-    another, so a key that ran out of quota does not take the app down.
+    ``apiKey`` holds the first key only: the provider validators send that
+    field as-is, and a comma separated list would be rejected as an invalid
+    credential. The remaining keys go into ``apiKeys``, where the frontend
+    picks them up to rotate when one of them runs out of quota.
     """
-    return ",".join(keys[label] for label in labels if keys.get(label))
+    found = [keys[label].strip() for label in labels if keys.get(label)]
+    if not found:
+        return {}
+    return {"apiKey": found[0], "apiKeys": found}
 
 
 def main() -> int:
@@ -59,7 +64,10 @@ def main() -> int:
         print(f"[seed] no keys found in {KEYFILE}", file=sys.stderr)
         return 1
 
-    minimax = join_keys(keys, "minimax-key-2", "minimax-key")
+    # Same order as gen-provider-bootstrap.ps1: the primary key first, the
+    # spare one behind it. A rate limited primary is picked up by the
+    # frontend's key rotation, but the validators use the primary directly.
+    minimax = provider_entry(keys, "minimax-key", "minimax-key-2")
     deepseek = keys.get("deepseek-key", "")
 
     seed = {
@@ -71,24 +79,43 @@ def main() -> int:
         "speechOverride": False,
         "providers": {
             "minimax": {
-                "apiKey": minimax,
+                **minimax,
                 "baseUrl": "https://api.minimaxi.com/v1/",
             },
             "minimax-audio-speech": {
-                "apiKey": minimax,
+                **minimax,
                 "baseUrl": "https://api.minimaxi.com/v1/",
             },
             "deepseek": {
                 "apiKey": deepseek,
                 "baseUrl": "https://api.deepseek.com",
             },
+            # The local voice pack (Voicebox / Qwen CustomVoice). The voice
+            # itself is not seeded: the frontend discovers the sound profiles
+            # from http://127.0.0.1:17493/profiles and keeps the one the user
+            # picked in settings/speech/voice.
+            "voicebox-local": {
+                "baseUrl": "http://127.0.0.1:17493",
+                "model": "qwen-custom-voice-1.7B",
+                "modelSize": "1.7B",
+                "instruct": "温暖、活泼、亲切，带一点可爱的卡通感，语速自然，像宜小智在和用户面对面交流。",
+            },
         },
         "activeProvider": "minimax",
         "activeModel": "MiniMax-M2.7",
         "speech": {
-            "provider": "minimax-audio-speech",
-            "model": "speech-2.5-hd",
-            "voice": "female-shaonv",
+            # The local voice pack goes first because it does not depend on a
+            # network round trip; MiniMax is the cloud backup for when the
+            # local service is not running.
+            "provider": "voicebox-local",
+            "model": "qwen-custom-voice-1.7B",
+            "fallbacks": [
+                {
+                    "providerId": "minimax-audio-speech",
+                    "model": "speech-2.5-hd",
+                    "voice": "female-shaonv",
+                }
+            ],
         },
     }
 
@@ -98,7 +125,7 @@ def main() -> int:
         handle.write("\n")
 
     print(f"[seed] wrote {SEED}")
-    print("[seed] minimax chat keys:", ", ".join(l for l in ("minimax-key-2", "minimax-key") if keys.get(l)))
+    print("[seed] minimax chat keys:", ", ".join(l for l in ("minimax-key", "minimax-key-2") if keys.get(l)))
     print("[seed] deepseek key:", "present" if deepseek else "missing")
     return 0
 
