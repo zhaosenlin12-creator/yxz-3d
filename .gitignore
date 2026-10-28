@@ -178,3 +178,6 @@ cartoon-print-studio/data/software_paths.json
 cartoon-print-studio/ai/forge-webui/models/
 cartoon-print-studio/ai/forge-webui/backend/huggingface/
 cartoon-print-studio/models/
+
+# Local verification scratch (playwright screenshots, measurements)
+tmp_verify/

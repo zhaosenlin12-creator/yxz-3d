@@ -13,6 +13,11 @@ import mouthTalkAUrl from '../../assets/yxz/layers/mouth_talk_a.png'
 import mouthTalkBUrl from '../../assets/yxz/layers/mouth_talk_b.png'
 import mouthTalkCUrl from '../../assets/yxz/layers/mouth_talk_c.png'
 import mouthWideUrl from '../../assets/yxz/layers/mouth_wide.png'
+import type { YXZPetStatus } from '../../composables/use-yxz-pet-motion'
+
+import { createYXZPetMotion } from '../../composables/use-yxz-pet-motion'
+
+export type { YXZPetStatus }
 
 const props = withDefaults(defineProps<{
   status?: YXZPetStatus
@@ -38,14 +43,6 @@ const emit = defineEmits<{
 }>()
 
 const WHITESPACE_RE = /\s+/g
-
-export type YXZPetStatus
-  = | 'idle'
-    | 'listening'
-    | 'thinking'
-    | 'speaking'
-    | 'processing'
-    | 'success'
 
 // The artwork the character is cut from.  Every layer is placed in this
 // space, so the numbers come from the cut itself and cannot drift away
@@ -116,6 +113,9 @@ const sources: Record<string, string> = {
 }
 
 const images = new Map<string, HTMLImageElement>()
+// The action layer.  The channels it owns are added on top of the
+// breathing pose in every frame.
+const motion = createYXZPetMotion()
 let frame = 0
 let running = true
 let clock = 0
@@ -221,18 +221,36 @@ function draw() {
   const originX = width / 2 + offsetX - (ART_W * size) / 2
   const originY = height * 0.98 + offsetY - ART_H * size
 
+  const channels = motion.channels
+
   // --- the figure --------------------------------------------------------
   const breath = Math.sin(clock * 1.85)
   const sway = Math.sin(clock * 0.61)
   const bob = Math.sin(clock * 0.9) * 3
   const entranceScale = entrance < 1 ? 0.86 + 0.14 * entrance : 1
+  // The mouth drives the body: while the character is speaking it rides
+  // its own voice a little.
+  const mouthOpen = props.status === 'speaking'
+    ? Math.min(1, Math.max(0, props.speakingLevel))
+    : 0
+  // While the character talks the body keeps time with its own voice: a
+  // small bounce on every syllable is what makes it read as speaking
+  // rather than as a still picture with a moving mouth.
+  const talkBounce = props.status === 'speaking'
+    ? Math.sin(clock * 6.4) * 2.6 * mouthOpen
+    : 0
+  // A fine tremor while work is running.
+  const shakeX = channels.shake > 0 ? (Math.random() - 0.5) * channels.shake : 0
 
   context.save()
-  context.translate(originX + PIVOT_X * size, originY + PIVOT_Y * size + bob)
-  context.rotate(sway * 0.011)
+  context.translate(
+    originX + PIVOT_X * size + (channels.lean + shakeX) * size,
+    originY + PIVOT_Y * size + (bob + channels.lift + mouthOpen * 4 + talkBounce) * size,
+  )
+  context.rotate(sway * 0.011 + channels.bodyRot)
   context.scale(
-    size * entranceScale * (1 - breath * 0.006),
-    size * entranceScale * (1 + breath * 0.011),
+    size * entranceScale * (1 - breath * 0.006) * channels.squashX,
+    size * entranceScale * (1 + breath * 0.011) * channels.squashY,
   )
   context.translate(-PIVOT_X, -PIVOT_Y)
 
@@ -249,7 +267,7 @@ function draw() {
     const haloGlow = 0.5 + 0.5 * Math.sin(clock * 1.55)
     context.save()
     context.globalCompositeOperation = 'lighter'
-    context.globalAlpha = 0.28 + 0.62 * haloGlow
+    context.globalAlpha = Math.max(0, Math.min(1, 0.28 + 0.62 * haloGlow + channels.glow * 0.5))
     context.drawImage(glow, GLOW.x, GLOW.y, GLOW.w, GLOW.h)
     context.restore()
   }
@@ -257,7 +275,7 @@ function draw() {
   // The face rides a little further than the body does, which is what
   // gives the head its own, slower answer to the pointer.
   const face = faceFor(props.status)
-  const eyeScale = face.eye * blinkDepth
+  const eyeScale = face.eye * blinkDepth * channels.eyeOpen
   const talkFrame = TALK_FRAMES[Math.floor(clock * 9) % TALK_FRAMES.length]
   const mouthName = props.status === 'speaking'
     ? (props.speakingLevel > 0.05 ? talkFrame : 'mouth_smile')
@@ -267,8 +285,8 @@ function draw() {
     const image = images.get(eye.file)
     if (!image)
       continue
-    const dx = gaze.x * GAZE_X + head.x * 7
-    const dy = gaze.y * GAZE_Y + head.y * 5
+    const dx = gaze.x * GAZE_X + head.x * 7 + channels.gazeBiasX * GAZE_X + channels.faceOffsetX
+    const dy = gaze.y * GAZE_Y + head.y * 5 + channels.gazeBiasY * GAZE_Y + channels.faceOffsetY
     context.save()
     context.translate(eye.cx + dx, eye.cy + dy)
     context.scale(1, Math.max(0.04, eyeScale))
@@ -278,8 +296,8 @@ function draw() {
 
   const mouthImage = images.get(mouthName)
   if (mouthImage) {
-    const dx = gaze.x * GAZE_X * 0.35 + head.x * 4
-    const dy = gaze.y * GAZE_Y * 0.35 + head.y * 3
+    const dx = gaze.x * GAZE_X * 0.35 + head.x * 4 + channels.gazeBiasX * GAZE_X * 0.35 + channels.faceOffsetX
+    const dy = gaze.y * GAZE_Y * 0.35 + head.y * 3 + channels.gazeBiasY * GAZE_Y * 0.35 + channels.faceOffsetY + mouthOpen * 3
     context.save()
     context.translate(MOUTH.cx + dx, MOUTH.cy + dy)
     context.drawImage(mouthImage, -MOUTH.w / 2, -MOUTH.h / 2, MOUTH.w, MOUTH.h)
@@ -385,6 +403,7 @@ onMounted(async () => {
     return
   }
   componentState.value = 'mounted'
+  motion.setStatus(props.status)
   observer = new ResizeObserver(() => draw())
   if (canvasContainer.value)
     observer.observe(canvasContainer.value)
@@ -395,11 +414,20 @@ onUnmounted(() => {
   running = false
   cancelAnimationFrame(frame)
   observer?.disconnect()
+  motion.destroy()
 })
 
-watch(() => props.status, () => {
+watch(() => props.status, (status) => {
   lastPointerAt = -10
+  motion.setStatus(status)
 })
+
+watch(() => props.paused, (paused) => {
+  if (paused)
+    motion.pause()
+  else
+    motion.resume()
+}, { immediate: true })
 </script>
 
 <template>
