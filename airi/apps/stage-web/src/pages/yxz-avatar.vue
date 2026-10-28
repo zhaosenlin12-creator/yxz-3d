@@ -49,8 +49,7 @@ function cycleStatus() {
 }
 
 const ACTIONS: { name: YXZPetFlourish, label: string }[] = [
-  { name: 'wave', label: '挥手' },
-  { name: 'wave-hand', label: '摆手' },
+  { name: 'sparkle', label: '星光' },
   { name: 'celebrate', label: '庆祝' },
   { name: 'nod', label: '点头' },
   { name: 'tilt', label: '歪头' },

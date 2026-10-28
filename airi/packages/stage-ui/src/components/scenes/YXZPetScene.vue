@@ -3,7 +3,6 @@ import type { YXZPetFlourish, YXZPetStatus } from '../../composables/use-yxz-pet
 
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
-import armUrl from '../../assets/yxz/layers/arm.png'
 import bodyUrl from '../../assets/yxz/layers/body.png'
 import eyeLUrl from '../../assets/yxz/layers/eye_l.png'
 import eyeRUrl from '../../assets/yxz/layers/eye_r.png'
@@ -16,7 +15,6 @@ import mouthTalkAUrl from '../../assets/yxz/layers/mouth_talk_a.png'
 import mouthTalkBUrl from '../../assets/yxz/layers/mouth_talk_b.png'
 import mouthTalkCUrl from '../../assets/yxz/layers/mouth_talk_c.png'
 import mouthWideUrl from '../../assets/yxz/layers/mouth_wide.png'
-import socketUrl from '../../assets/yxz/layers/socket.png'
 
 import { createYXZPetMotion } from '../../composables/use-yxz-pet-motion'
 
@@ -58,7 +56,7 @@ const WHITESPACE_RE = /\s+/g
 // space, so the numbers come from the cut itself and cannot drift away
 // from the pictures they belong to.
 interface LayerBox { file: string, x: number, y: number, w: number, h: number, cx: number, cy: number }
-interface ArmBox { file: string, x: number, y: number, w: number, h: number, pivotX: number, pivotY: number, handX: number, handY: number }
+interface PointBox { x: number, y: number }
 interface RectBox { file: string, x: number, y: number, w: number, h: number }
 
 const cut = manifest as unknown as {
@@ -68,7 +66,7 @@ const cut = manifest as unknown as {
     eyes: LayerBox[]
     mouths: LayerBox[]
     glow: RectBox
-    arm: ArmBox
+    hand: PointBox
   }
 }
 
@@ -77,11 +75,11 @@ const ART_H = cut.height
 const EYES = cut.layers.eyes
 const MOUTH = cut.layers.mouths[0]
 const GLOW = cut.layers.glow
-// The raised arm is a picture of its own so that it can be turned around
-// the shoulder.  The pivot is the hinge the arm turns on, and the hand
-// anchor is the middle of the palm, which is where the sparkles of a
-// wave come from.
-const ARM = cut.layers.arm
+// The middle of the palm, which is where the sparkles come from.  The
+// arm is part of the body picture and is never cut out: a piece that is
+// turned around a joint opens a seam at that joint, however carefully
+// the cut was made.
+const HAND = cut.layers.hand
 // Where the feet are, which is what the figure stands on and what the
 // breathing and the sway turn about.
 const PIVOT_X = ART_W / 2
@@ -117,8 +115,6 @@ const canvas = ref<HTMLCanvasElement>()
 
 const sources: Record<string, string> = {
   body: bodyUrl,
-  arm: armUrl,
-  socket: socketUrl,
   glow: glowUrl,
   [EYES[0].file]: eyeLUrl,
   [EYES[1].file]: eyeRUrl,
@@ -157,12 +153,7 @@ let blinkPhase = 0
 let blinkDepth = 1
 let lastPointerAt = -10
 
-// The arm trails the twist of the body: when the figure turns, the arm
-// catches up a moment later.  That lag is what gives the picture weight,
-// and it costs one spring.
-const armFollow = { angle: 0, velocity: 0 }
-
-// The sparkles a waving hand throws off.
+// The sparkles the hand throws off.
 interface Sparkle { x: number, y: number, vx: number, vy: number, life: number, size: number }
 const sparkles: Sparkle[] = []
 
@@ -216,23 +207,9 @@ function buildSparkleArt() {
   sparkleStar = star
 }
 
-/**
- * How far the arm is turned at this moment.
- *
- * Three things add up: the pose the status asks for, the lag that
- * follows the body, and a small sway so the arm is never quite still.
- */
-function armAngle() {
-  return channels.armRot + armFollow.angle + Math.sin(clock * 0.73) * 0.018
-}
-
-/** Where the middle of the palm is once the arm has turned. */
-function handPosition(angle: number) {
-  const cos = Math.cos(angle)
-  const sin = Math.sin(angle)
-  const hx = ARM.handX - ARM.pivotX
-  const hy = ARM.handY - ARM.pivotY
-  return { x: ARM.pivotX + hx * cos - hy * sin, y: ARM.pivotY + hx * sin + hy * cos }
+/** Where the middle of the palm is. */
+function handPosition() {
+  return { x: HAND.x, y: HAND.y }
 }
 
 function clamp(value: number, low: number, high: number) {
@@ -383,24 +360,10 @@ function draw() {
 
   context.drawImage(body, 0, 0, ART_W, ART_H)
 
-  // --- the raised arm ----------------------------------------------------
-  // The arm turns on the hinge in the shoulder.  It is drawn over the
-  // body and under the cap that rides with it, and the cap is cut from
-  // the same pixels as the arm, so the joint can never open up.
-  const armImage = images.get('arm')
-  if (armImage) {
-    const angle = armAngle()
-    context.save()
-    context.translate(ARM.pivotX, ARM.pivotY)
-    context.rotate(angle)
-    context.translate(-ARM.pivotX, -ARM.pivotY)
-    context.drawImage(armImage, ARM.x, ARM.y, ARM.w, ARM.h)
-    const socketImage = images.get('socket')
-    if (socketImage)
-      context.drawImage(socketImage, ARM.x, ARM.y, ARM.w, ARM.h)
-    context.restore()
-    drawSparkles(context)
-  }
+  // --- the light on the hand ---------------------------------------------
+  // The hand is the only part of the figure that gives off light of its
+  // own.  Everything else is the painted picture, moved as one piece.
+  drawSparkles(context)
 
   // --- the halo ----------------------------------------------------------
   // The ring is welded into the body layer: the helmet is one whole
@@ -462,22 +425,10 @@ function tick(at: number) {
     if (entrance < 1)
       entrance = Math.min(1, entrance + dt * 1.6)
 
-    // The arm trails the body.
-    //
-    // The picture of the arm is drawn inside the body's own rotation,
-    // so the lag has to be *subtracted*: the spring is pulled towards
-    // a part of the body's turn and only catches up a beat later.  A
-    // limb that turned with the body would look welded down; a limb
-    // that lags looks like it has weight of its own.
-    const bodyTurn = channels.bodyRot + Math.sin(clock * 0.61) * 0.011
-    const armTarget = -bodyTurn * 0.6
-    armFollow.velocity += ((armTarget - armFollow.angle) * 62 - armFollow.velocity * 11) * dt
-    armFollow.angle += armFollow.velocity * dt
-
-    // The sparkles a waving hand throws off.  They are born at the
-    // palm, drift outwards, and fall away under their own weight.
+    // The sparkles the hand throws off.  They are born at the palm,
+    // drift outwards, and fall away under their own weight.
     if (channels.handSpark > 0.04 && Math.random() < channels.handSpark * 0.32) {
-      const hand = handPosition(armAngle())
+      const hand = handPosition()
       const spread = (Math.random() - 0.5) * 40
       // The burst leans away from the body, so the sparkles clear the
       // glove instead of sitting on top of it.

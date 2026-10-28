@@ -665,8 +665,8 @@ async function speakYXZWelcome() {
 
   welcomeSpeechBusy.value = true
   setYXZInteractionStatus('speaking')
-  // The character waves while it says hello.
-  playYXZAction('wave')
+  // The character's hand lights up while it says hello.
+  playYXZAction('sparkle')
   playbackManager.stopAll('new-welcome')
 
   try {

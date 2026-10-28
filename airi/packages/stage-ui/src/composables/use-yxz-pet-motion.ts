@@ -64,14 +64,6 @@ export interface YXZPetChannels {
   gazeBiasY: number
   /** High frequency jitter, used while work is running. */
   shake: number
-  /**
-   * Turn of the raised arm around the shoulder, in radians.
-   *
-   * The arm is a picture of its own, so it is the one part of the
-   * character that can move on its own.  Positive swings the hand out
-   * towards the visitor, negative tucks it back in towards the helmet.
-   */
-  armRot: number
   /** Brightness of the sparkles that come off the waving hand. */
   handSpark: number
 }
@@ -90,7 +82,6 @@ function makeChannels(): YXZPetChannels {
     gazeBiasX: 0,
     gazeBiasY: 0,
     shake: 0,
-    armRot: 0,
     handSpark: 0,
   }
 }
@@ -107,7 +98,6 @@ const POSES: Record<YXZPetStatus, YXZPetChannels> = {
     squashY: 1.018,
     glow: 0.18,
     eyeOpen: 1.1,
-    armRot: 0.05,
   },
   // The weight shifts and the eyes turn away: the character is working
   // something out.
@@ -122,7 +112,6 @@ const POSES: Record<YXZPetStatus, YXZPetChannels> = {
     eyeOpen: 0.74,
     gazeBiasX: -0.42,
     gazeBiasY: -0.34,
-    armRot: -0.03,
   },
   // Up and forward, the way a body leans into its own sentence.
   speaking: {
@@ -132,7 +121,6 @@ const POSES: Record<YXZPetStatus, YXZPetChannels> = {
     squashY: 1.012,
     glow: 0.22,
     eyeOpen: 1.06,
-    armRot: 0.08,
   },
   // Weight shifted, a fine tremor, the halo running hot.
   processing: {
@@ -142,31 +130,18 @@ const POSES: Record<YXZPetStatus, YXZPetChannels> = {
     eyeOpen: 0.9,
     gazeBiasY: 0.24,
     shake: 1.1,
-    armRot: 0.04,
   },
   // Brighter than usual, eyes wide open.
   success: {
     ...makeChannels(),
     glow: 0.5,
     eyeOpen: 1.14,
-    armRot: 0.12,
   },
 }
 
 /** How long the character waits before the next idle flourish. */
 const FLOURISH_MIN_MS = 4200
 const FLOURISH_MAX_MS = 9600
-
-/**
- * How far the hand swings.
- *
- * The arm only ever goes *out* towards the visitor: the picture shows the
- * hand already lifted next to the helmet, and a hand that swung far in
- * would push through the helmet.  So the wave is one wide beat out and a
- * small beat back.
- */
-const ARM_OUT = 0.27
-const ARM_IN = -0.05
 
 export interface YXZPetMotion {
   /** The live channels.  Read them every frame; never replace the object. */
@@ -185,7 +160,7 @@ export interface YXZPetMotion {
 
 /** The one-off actions the character can play on its own. */
 export type YXZPetFlourish
-  = | 'wave'
+  = | 'sparkle'
     | 'tilt'
     | 'hop'
     | 'look-around'
@@ -194,11 +169,10 @@ export type YXZPetFlourish
     | 'peek'
     | 'bounce'
     | 'shrug'
-    | 'wave-hand'
     | 'celebrate'
 
 const FLOURISHES: YXZPetFlourish[] = [
-  'wave',
+  'sparkle',
   'tilt',
   'hop',
   'look-around',
@@ -207,7 +181,6 @@ const FLOURISHES: YXZPetFlourish[] = [
   'peek',
   'bounce',
   'shrug',
-  'wave-hand',
 ]
 
 export function createYXZPetMotion(): YXZPetMotion {
@@ -277,85 +250,26 @@ export function createYXZPetMotion(): YXZPetMotion {
   }
 
   /**
-   * The greeting: the arm goes up, the hand waves, and the body rocks with
-   * it.  The arm, the shoulders and the head all answer at slightly
-   * different times, which is what makes it read as a character and not
-   * as a picture being turned.
+   * The greeting: the hand lights up and a burst of stars comes off the
+   * glove while the halo answers a little brighter.
+   *
+   * The arm does not move.  It is one piece with the body, and a piece
+   * that is cut out and turned around a joint opens a seam at that
+   * joint; the light on the hand is what carries the greeting instead.
    */
-  function wave() {
-    const rest = channels.armRot
+  function sparkle() {
     track(createTimeline()
       .add(channels, {
-        bodyRot: [channels.bodyRot, 0.09],
-        faceOffsetX: [channels.faceOffsetX, 4],
-        armRot: [rest, ARM_OUT * 0.55],
-        handSpark: [channels.handSpark, 0.9],
-        duration: 200,
+        handSpark: [channels.handSpark, 1],
+        glow: [channels.glow, 0.62],
+        duration: 180,
         ease: 'outQuad',
       })
       .add(channels, {
-        armRot: ARM_OUT * 0.55,
-        duration: 150,
-        ease: 'inOutSine',
-      })
-      .add(channels, {
-        armRot: ARM_IN,
-        duration: 230,
-        ease: 'inOutSine',
-      })
-      .add(channels, {
-        armRot: ARM_OUT,
-        duration: 230,
-        ease: 'inOutSine',
-      })
-      .add(channels, {
-        armRot: ARM_IN,
-        duration: 230,
-        ease: 'inOutSine',
-      })
-      .add(channels, {
-        armRot: ARM_OUT * 0.5,
-        bodyRot: [0.09, 0],
-        faceOffsetX: [4, 0],
-        duration: 260,
-        ease: 'outQuad',
-      })
-      .add(channels, {
-        armRot: [ARM_OUT * 0.5, rest],
-        handSpark: [0.9, 0],
-        duration: 520,
+        handSpark: [1, 0],
+        glow: [0.62, channels.glow],
+        duration: 620,
         ease: 'outElastic(1, .5)',
-      }))
-  }
-
-  /**
-   * A short wave of the hand on its own, for the moments when the body
-   * should stay where it is.
-   */
-  function waveHand() {
-    const rest = channels.armRot
-    track(createTimeline()
-      .add(channels, {
-        armRot: [rest, ARM_OUT * 0.7],
-        handSpark: [channels.handSpark, 0.75],
-        duration: 190,
-        ease: 'outQuad',
-      })
-      .add(channels, {
-        armRot: ARM_IN,
-        duration: 210,
-        ease: 'inOutSine',
-      })
-      .add(channels, {
-        armRot: ARM_OUT * 0.85,
-        duration: 210,
-        ease: 'inOutSine',
-      })
-      .add(channels, {
-        armRot: [ARM_OUT * 0.85, rest],
-        handSpark: [0.75, 0],
-        duration: 480,
-        ease: 'outElastic(1, .55)',
       }))
   }
 
@@ -519,7 +433,6 @@ export function createYXZPetMotion(): YXZPetMotion {
 
   /** The big finish: a jump with the halo flaring on the take off. */
   function celebrate() {
-    const restArm = channels.armRot
     track(createTimeline()
       .add(channels, {
         glow: [channels.glow, 1],
@@ -533,9 +446,8 @@ export function createYXZPetMotion(): YXZPetMotion {
         squashX: [1.16, 0.86],
         lift: [0, -64],
         bodyRot: [0, -0.12],
-        // The hand goes up with the jump and comes back down waving,
-        // so the finish reads as a greeting rather than as a hop.
-        armRot: [restArm, ARM_OUT * 0.8],
+        // The hand throws off its stars on the way up, so the finish
+        // reads as a greeting rather than as a hop.
         handSpark: [channels.handSpark, 0.85],
         duration: 280,
         ease: 'outQuad',
@@ -543,7 +455,6 @@ export function createYXZPetMotion(): YXZPetMotion {
       .add(channels, {
         lift: [-64, 0],
         bodyRot: [-0.12, 0.1],
-        armRot: [ARM_OUT * 0.8, ARM_IN],
         duration: 320,
         ease: 'inQuad',
       })
@@ -551,7 +462,6 @@ export function createYXZPetMotion(): YXZPetMotion {
         bodyRot: [0.1, 0],
         squashY: [1.22, 0.8],
         squashX: [0.86, 1.18],
-        armRot: [ARM_IN, ARM_OUT * 0.45],
         duration: 110,
         ease: 'outQuad',
       })
@@ -559,7 +469,6 @@ export function createYXZPetMotion(): YXZPetMotion {
         squashY: [0.8, 1],
         squashX: [1.18, 1],
         glow: [1, 0],
-        armRot: [ARM_OUT * 0.45, restArm],
         handSpark: [0.85, 0],
         duration: 620,
         ease: 'outElastic(1, .45)',
@@ -570,8 +479,8 @@ export function createYXZPetMotion(): YXZPetMotion {
     if (paused)
       return
     switch (action) {
-      case 'wave':
-        wave()
+      case 'sparkle':
+        sparkle()
         break
       case 'tilt':
         tilt()
@@ -596,9 +505,6 @@ export function createYXZPetMotion(): YXZPetMotion {
         break
       case 'shrug':
         shrug()
-        break
-      case 'wave-hand':
-        waveHand()
         break
       case 'celebrate':
         celebrate()
@@ -626,7 +532,6 @@ export function createYXZPetMotion(): YXZPetMotion {
     channels.gazeBiasX = pose.gazeBiasX
     channels.gazeBiasY = pose.gazeBiasY
     channels.shake = pose.shake
-    channels.armRot = pose.armRot
     channels.handSpark = 0
 
     if (paused)
@@ -646,7 +551,6 @@ export function createYXZPetMotion(): YXZPetMotion {
       gazeBiasX: pose.gazeBiasX,
       gazeBiasY: pose.gazeBiasY,
       shake: pose.shake,
-      armRot: pose.armRot,
       handSpark: 0,
       duration: 460,
       ease: 'outElastic(1, .8)',
