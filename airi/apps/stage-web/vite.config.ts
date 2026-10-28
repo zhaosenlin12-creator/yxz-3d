@@ -211,8 +211,12 @@ export default defineConfig({
           registerType: 'prompt',
           includeAssets: ['favicon.svg', 'apple-touch-icon.png'],
           manifest: {
-            name: 'AIRI',
-            short_name: 'AIRI',
+            name: '宜小智 AI 智能创造系统',
+            short_name: '宜小智',
+            description: '宜小智 AI 智能创造系统：对话生成 2D 预览、3D 模型、激光切割卡片与 3D 打印。',
+            lang: 'zh-CN',
+            theme_color: '#0b4a7a',
+            background_color: '#0b4a7a',
             icons: [
               {
                 src: '/web-app-manifest-192x192.png',

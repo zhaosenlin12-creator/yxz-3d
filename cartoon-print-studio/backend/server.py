@@ -92,6 +92,7 @@ import progress
 import project_store
 import laser_card
 import edge_tts_api
+import asr_api
 SCENE_STORE = scene_jobs.SceneJobStore(DATA)
 PROJECT_STORE = project_store.ProjectStore(DATA)
 app = FastAPI(title="Cartoon Print Studio API")
@@ -653,6 +654,47 @@ async def edge_tts_speak(req: EdgeTtsReq):
     except Exception as exc:
         raise HTTPException(503, f"Edge 语音包合成失败：{exc}")
     return Response(content=audio, media_type="audio/mpeg")
+
+
+@app.get("/api/asr/status")
+async def asr_status():
+    """Whether the local speech recognition engine is ready to be used."""
+    return asr_api.status()
+
+
+@app.post("/api/asr/transcribe")
+async def asr_transcribe(request: Request):
+    """Turn a recorded clip into text, on this machine, with no API key.
+
+    The body is the raw audio the browser recorded (webm/opus, mp4/aac or
+    wav).  A multipart upload with a ``file`` field is accepted too, so
+    the endpoint is easy to try by hand.
+    """
+    content_type = (request.headers.get("content-type") or "").lower()
+    data = b""
+    language = request.query_params.get("language") or None
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            raise HTTPException(400, "缺少音频文件（字段名 file）")
+        data = await upload.read()
+        language = form.get("language") or language
+    else:
+        data = await request.body()
+
+    if not data:
+        raise HTTPException(400, "没有收到音频数据")
+
+    from starlette.concurrency import run_in_threadpool
+
+    try:
+        result = await run_in_threadpool(asr_api.transcribe, data, language=language)
+    except Exception as exc:
+        raise HTTPException(503, f"本地语音识别失败：{exc}")
+    return result
+
 
 @app.get("/api/demo")
 def demo_model():
@@ -2722,6 +2764,15 @@ def _startup():
     # so a fresh clone can cut a card right away.
     try:
         laser_card.ensure_templates(DATA)
+    except Exception:
+        traceback.print_exc()
+
+    # The local speech recognition model is loaded in the background: it
+    # takes a few seconds to read the weights off the disk, and doing that
+    # while the first student is already talking makes the button feel
+    # broken.
+    try:
+        asr_api.warm_up()
     except Exception:
         traceback.print_exc()
 

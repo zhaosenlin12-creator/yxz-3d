@@ -1,20 +1,18 @@
 <script setup lang="ts">
 import type { ChatProvider } from '@xsai-ext/providers/utils'
 
-import { isStageTamagotchi } from '@proj-airi/stage-shared'
 import { YXZCreationWorkbench } from '@proj-airi/stage-ui/components/scenes'
-import { useAudioAnalyzer } from '@proj-airi/stage-ui/composables'
 import { getYXZPrintApiBase } from '@proj-airi/stage-ui/composables/use-yxz-print-preview'
-import { useAudioContext } from '@proj-airi/stage-ui/stores/audio'
+import { useYXZVoiceInput } from '@proj-airi/stage-ui/composables/use-yxz-voice-input'
 import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
 import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
 import { useChatStreamStore } from '@proj-airi/stage-ui/stores/chat/stream-store'
 import { useConsciousnessStore } from '@proj-airi/stage-ui/stores/modules/consciousness'
-import { useHearingSpeechInputPipeline, useHearingStore } from '@proj-airi/stage-ui/stores/modules/hearing'
+import { useHearingStore } from '@proj-airi/stage-ui/stores/modules/hearing'
 import { useProvidersStore } from '@proj-airi/stage-ui/stores/providers'
 import { useSettings, useSettingsAudioDevice } from '@proj-airi/stage-ui/stores/settings'
 import { BasicTextarea, FieldCombobox } from '@proj-airi/ui'
-import { until, useLocalStorage } from '@vueuse/core'
+import { useLocalStorage } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
 import { DropdownMenuContent, DropdownMenuItem, DropdownMenuPortal, DropdownMenuRoot, DropdownMenuTrigger, PopoverContent, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
@@ -22,14 +20,12 @@ import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 
 import CameraCapture from './CameraCapture.vue'
-import IndicatorMicVolume from './IndicatorMicVolume.vue'
 
 import { ChatSendTimeoutError, notifyYXZChatRecovery, withChatSendTimeout } from './chat-send-recovery'
 
 const messageInput = ref('')
 const hearingPopoverOpen = ref(false)
 const isComposing = ref(false)
-const isListening = ref(false) // Transcription listening state (separate from microphone enabled)
 const workbenchOpen = ref(false)
 const workbenchMode = ref<'laser' | 'print'>('laser')
 const cameraModalOpen = ref(false)
@@ -52,8 +48,8 @@ const quickStartPrompts = [
   '帮我把一个环保创意做成 3D 作品',
 ] as const
 
-const { askPermission, startStream } = useSettingsAudioDevice()
-const { enabled, selectedAudioInput, stream, audioInputs } = storeToRefs(useSettingsAudioDevice())
+const { askPermission } = useSettingsAudioDevice()
+const { selectedAudioInput, audioInputs } = storeToRefs(useSettingsAudioDevice())
 const chatOrchestrator = useChatOrchestratorStore()
 const chatSession = useChatSessionStore()
 const chatStream = useChatStreamStore()
@@ -61,7 +57,6 @@ const { cancelPendingSends, ingest, onAfterMessageComposed } = chatOrchestrator
 // A turn is in flight: a second tap must not queue another identical turn.
 const sendInFlight = ref(false)
 const { messages } = storeToRefs(chatSession)
-const { audioContext } = useAudioContext()
 const { t } = useI18n()
 const sendModeLabels = computed<Record<SendMode, string>>(() => ({
   'enter': t('stage.send-mode.enter'),
@@ -69,13 +64,9 @@ const sendModeLabels = computed<Record<SendMode, string>>(() => ({
   'double-enter': t('stage.send-mode.double-enter'),
 }))
 
-// Transcription pipeline
+// Speech input pipeline
 const hearingStore = useHearingStore()
-const hearingPipeline = useHearingSpeechInputPipeline()
-const { transcribeForMediaStream, stopStreamingTranscription } = hearingPipeline
-const { supportsStreamInput } = storeToRefs(hearingPipeline)
-const { configured: hearingConfigured, autoSendEnabled, autoSendDelay } = storeToRefs(hearingStore)
-const shouldUseStreamInput = computed(() => supportsStreamInput.value && !!stream.value)
+const { autoSendEnabled, autoSendDelay } = storeToRefs(hearingStore)
 
 // Auto-send logic
 let autoSendTimeout: ReturnType<typeof setTimeout> | undefined
@@ -112,60 +103,6 @@ function insertTranscriptAtCaret(text: string) {
   }
   const trimmed = current.trim()
   messageInput.value = trimmed ? `${trimmed} ${text}` : text
-}
-
-// --- Live interim transcription ---
-// While the user is still speaking, interim text is shown at the caret right
-// away. When the sentence is finalised it replaces the placeholder instead of
-// being appended again, so the box never duplicates or lags.
-const interimPlaceholder = ref<{ anchor: number, length: number } | null>(null)
-
-function insertInterimAtCaret(text: string) {
-  const current = messageInput.value
-  const el = document.activeElement as HTMLTextAreaElement | null
-  const editable = el && el.tagName === 'TEXTAREA' && typeof el.selectionStart === 'number'
-  if (!editable) {
-    // No focused textarea: append plainly (no placeholder tracking).
-    const trimmed = current.trim()
-    messageInput.value = trimmed ? `${trimmed} ${text}` : text
-    return
-  }
-  if (interimPlaceholder.value) {
-    const { anchor, length } = interimPlaceholder.value
-    messageInput.value = current.slice(0, anchor) + text + current.slice(anchor + length)
-    interimPlaceholder.value = { anchor, length: text.length }
-  }
-  else {
-    const start = el.selectionStart
-    const end = el.selectionEnd
-    const replacement = start === end ? text : text
-    messageInput.value = current.slice(0, start) + replacement + current.slice(end)
-    interimPlaceholder.value = { anchor: start, length: replacement.length }
-  }
-  nextTick(() => {
-    if (!interimPlaceholder.value)
-      return
-    const caret = interimPlaceholder.value.anchor + interimPlaceholder.value.length
-    el.focus()
-    el.setSelectionRange(caret, caret)
-  })
-}
-
-function commitInterimAsFinal(text: string) {
-  const el = document.activeElement as HTMLTextAreaElement | null
-  if (interimPlaceholder.value && el && el.tagName === 'TEXTAREA') {
-    const { anchor, length } = interimPlaceholder.value
-    const current = messageInput.value
-    messageInput.value = current.slice(0, anchor) + text + current.slice(anchor + length)
-    nextTick(() => {
-      el.focus()
-      el.setSelectionRange(anchor + text.length, anchor + text.length)
-    })
-    interimPlaceholder.value = null
-    return
-  }
-  interimPlaceholder.value = null
-  insertTranscriptAtCaret(text)
 }
 
 function scheduleAutoSend() {
@@ -205,17 +142,6 @@ async function runAutoSend() {
     pendingAutoSendText.value = [textToSend, pendingAutoSendText.value.trim()].filter(Boolean).join(' ')
     recoverFromSendError(err)
   }
-}
-
-function debouncedAutoSend(text: string) {
-  if (!autoSendEnabled.value) {
-    clearPendingAutoSend()
-    return
-  }
-
-  pendingAutoSendText.value = pendingAutoSendText.value ? `${pendingAutoSendText.value} ${text}` : text
-
-  scheduleAutoSend()
 }
 
 // A turn can legitimately take minutes: four preview images plus a 3D model.
@@ -488,40 +414,7 @@ watch(hearingPopoverOpen, async (value) => {
 onAfterMessageComposed(async () => {
 })
 
-const { startAnalyzer, stopAnalyzer, volumeLevel } = useAudioAnalyzer()
-const normalizedVolume = computed(() => Math.min(1, Math.max(0, (volumeLevel.value ?? 0) / 100)))
-let analyzerSource: MediaStreamAudioSourceNode | undefined
-
-function teardownAnalyzer() {
-  try {
-    analyzerSource?.disconnect()
-  }
-  catch {}
-  analyzerSource = undefined
-  stopAnalyzer()
-}
-
-async function setupAnalyzer() {
-  teardownAnalyzer()
-  if (!hearingPopoverOpen.value || !enabled.value || !stream.value)
-    return
-  if (audioContext.state === 'suspended')
-    await audioContext.resume()
-  const analyser = startAnalyzer(audioContext)
-  if (!analyser)
-    return
-  analyzerSource = audioContext.createMediaStreamSource(stream.value)
-  analyzerSource.connect(analyser)
-}
-
-watch([hearingPopoverOpen, enabled, stream], () => {
-  setupAnalyzer()
-}, { immediate: true })
-
 onUnmounted(() => {
-  teardownAnalyzer()
-  stopListening()
-
   // Clear auto-send timeout on unmount
   if (autoSendTimeout) {
     clearTimeout(autoSendTimeout)
@@ -529,225 +422,42 @@ onUnmounted(() => {
   }
 })
 
-// Transcription listening functions
-async function startListening() {
-  // Allow calling this even if already listening - transcribeForMediaStream will handle session reuse/restart
-  try {
-    console.info('[ChatArea] Starting listening...', {
-      enabled: enabled.value,
-      hasStream: !!stream.value,
-      supportsStreamInput: supportsStreamInput.value,
-      hearingConfigured: hearingConfigured.value,
-    })
-
-    // Auto-configure Web Speech API as default if no provider is configured
-    if (!hearingConfigured.value) {
-      // Check if Web Speech API is available in the browser
-      // Web Speech API is NOT available in Electron (stage-tamagotchi) - it requires Google's embedded API keys
-      // which are not available in Electron, causing it to fail at runtime
-      const isWebSpeechAvailable = typeof window !== 'undefined'
-        && !isStageTamagotchi() // Explicitly exclude Electron
-        && ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)
-
-      if (isWebSpeechAvailable) {
-        console.info('[ChatArea] No transcription provider configured. Auto-configuring Web Speech API as default...')
-
-        // Initialize the provider in the providers store first
-        try {
-          providersStore.initializeProvider('browser-web-speech-api')
-        }
-        catch (err) {
-          console.warn('[ChatArea] Error initializing Web Speech API provider:', err)
-        }
-
-        // Set as active provider
-        hearingStore.activeTranscriptionProvider = 'browser-web-speech-api'
-
-        // Wait for reactivity to update
-        await nextTick()
-
-        // Verify the provider was set correctly
-        if (hearingStore.activeTranscriptionProvider === 'browser-web-speech-api') {
-          console.info('[ChatArea] Web Speech API configured as default provider')
-          // Continue with transcription - Web Speech API is ready
-        }
-        else {
-          console.error('[ChatArea] Failed to set Web Speech API as default provider')
-          isListening.value = false
-          return
-        }
-      }
-      else {
-        console.error('[ChatArea] Web Speech API not available. No transcription provider configured and Web Speech API is not available in this browser. Please go to Settings > Modules > Hearing to configure a transcription provider. Browser support:', {
-          hasWindow: typeof window !== 'undefined',
-          hasWebkitSpeechRecognition: typeof window !== 'undefined' && 'webkitSpeechRecognition' in window,
-          hasSpeechRecognition: typeof window !== 'undefined' && 'SpeechRecognition' in window,
-        })
-        isListening.value = false
-        toast.error('语音输入不可用', {
-          description: '当前浏览器不支持语音识别，请使用 Chrome 或 Edge 浏览器（或检查浏览器设置中的麦克风权限）。',
-        })
-        return
-      }
+// --- Voice input -------------------------------------------------------
+// The browser only records the clip; the recognition itself runs on the
+// machine that serves 宜小智 (see useYXZVoiceInput).  No API key, no
+// network, and the same answer on every computer in the room.
+const voice = useYXZVoiceInput({
+  deviceId: () => selectedAudioInput.value || undefined,
+  onText: (text) => {
+    // Fill the recognised speech into the input box at the caret.
+    insertTranscriptAtCaret(text)
+    if (autoSendEnabled.value) {
+      pendingAutoSendText.value = text
+      scheduleAutoSend()
     }
-
-    // Request microphone permission if needed (microphone should already be enabled by the user)
-    if (!stream.value) {
-      console.info('[ChatArea] Requesting microphone permission...')
-      await askPermission()
-
-      // If still no stream, try starting it manually
-      if (!stream.value && enabled.value) {
-        console.info('[ChatArea] Attempting to start stream manually...')
-        startStream()
-        // Wait for the stream to become available with a timeout.
-        try {
-          await until(stream).toBeTruthy({ timeout: 3000, throwOnTimeout: true })
-        }
-        catch {
-          console.error('[ChatArea] Timed out waiting for audio stream.')
-          isListening.value = false
-          toast.error('麦克风启动超时', {
-            description: '请在浏览器地址栏左侧允许麦克风权限后重试。',
-          })
-          return
-        }
-      }
+    else {
+      clearPendingAutoSend()
     }
+  },
+  onError: (description) => {
+    toast.error('语音输入失败', { description })
+  },
+})
 
-    if (!stream.value) {
-      const errorMsg = 'Failed to get audio stream for transcription. Please check microphone permissions and ensure a device is selected.'
-      console.error('[ChatArea]', errorMsg)
-      isListening.value = false
-      toast.error('无法使用麦克风', {
-        description: '请点击浏览器地址栏的麦克风图标，允许本页使用麦克风，再重试。',
-      })
-      return
-    }
+const isVoiceRecording = computed(() => voice.state.value === 'recording')
+const voiceState = voice.state
+const voiceLevel = voice.level
+const voiceElapsed = voice.elapsed
 
-    // Check if streaming input is supported
-    if (!shouldUseStreamInput.value) {
-      const errorMsg = 'Streaming input not supported by the selected transcription provider. Please select a provider that supports streaming (e.g., Web Speech API).'
-      console.warn('[ChatArea]', errorMsg)
-      // Clean up any existing sessions from other pages (e.g., test page) that might interfere
-      await stopStreamingTranscription(true)
-      isListening.value = false
-      toast.error('语音识别服务未就绪', {
-        description: '请尝试刷新页面后重试；仍不行时在 Chrome/Edge 浏览器中使用。',
-      })
-      return
-    }
-
-    console.info('[ChatArea] Starting streaming transcription with stream:', stream.value.id)
-
-    // Call transcribeForMediaStream - it's async so we await it
-    // Set listening state AFTER successful call
-    try {
-      await transcribeForMediaStream(stream.value, {
-        onInterim: (text: string) => {
-          if (text && text.trim()) {
-            insertInterimAtCaret(text)
-          }
-        },
-        onSentenceEnd: (delta) => {
-          if (delta && delta.trim()) {
-            // Insert recognized speech at the caret position (fill into the
-            // input box), never auto-send unless the user enabled auto-send.
-            commitInterimAsFinal(delta)
-            console.info('[ChatArea] Received transcription delta:', delta)
-
-            // Auto-send if enabled - check the current value (not captured in closure)
-            // This ensures we always respect the current setting, even if callbacks are reused
-            if (autoSendEnabled.value) {
-              debouncedAutoSend(delta)
-            }
-            else {
-              // If auto-send is disabled, clear any pending auto-send text to prevent accidental sends
-              clearPendingAutoSend()
-            }
-          }
-        },
-        // Omit onSpeechEnd to avoid re-adding user-deleted text; use sentence deltas only.
-      })
-
-      // Only set listening to true if transcription started successfully
-      // (transcribeForMediaStream might return early if session already exists)
-      isListening.value = true
-      console.info('[ChatArea] Streaming transcription initiated successfully')
-    }
-    catch (err) {
-      console.error('[ChatArea] Transcription error:', err)
-      isListening.value = false
-      throw err // Re-throw to be caught by outer catch
-    }
-  }
-  catch (err) {
-    console.error('[ChatArea] Failed to start transcription:', err)
-    isListening.value = false
-    toast.error('语音识别启动失败', {
-      description: '请检查麦克风权限与设备选择后重试。',
-    })
-  }
-}
-
-async function stopListening() {
-  if (!isListening.value)
+async function toggleVoiceRecording() {
+  if (voice.state.value === 'recording') {
+    await voice.stop()
     return
-
-  try {
-    console.info('[ChatArea] Stopping transcription...')
-
-    // Clear auto-send timeout
-    clearPendingAutoSend()
-
-    // Send any pending text immediately if auto-send is enabled
-    if (autoSendEnabled.value && pendingAutoSendText.value.trim()) {
-      const textToSend = pendingAutoSendText.value.trim()
-      pendingAutoSendText.value = ''
-      try {
-        await sendMessage(textToSend)
-        messageInput.value = ''
-      }
-      catch (err) {
-        console.error('[ChatArea] Auto-send error on stop:', err)
-        messageInput.value = [textToSend, messageInput.value.trim()].filter(Boolean).join(' ')
-        recoverFromSendError(err)
-      }
-    }
-
-    await stopStreamingTranscription(true)
-    isListening.value = false
-    console.info('[ChatArea] Transcription stopped')
   }
-  catch (err) {
-    console.error('[ChatArea] Error stopping transcription:', err)
-    isListening.value = false
-  }
+  if (voice.state.value === 'transcribing')
+    return
+  await voice.start()
 }
-
-// Start listening when microphone is enabled and stream is available
-watch(enabled, async (val) => {
-  if (val && stream.value) {
-    // Microphone was just enabled and we have a stream, start transcription
-    await startListening()
-  }
-  else if (!val && isListening.value) {
-    // Microphone was disabled, stop transcription
-    await stopListening()
-  }
-})
-
-// Start listening when stream becomes available (if microphone is enabled)
-watch(stream, async (val) => {
-  if (val && enabled.value && !isListening.value) {
-    // Stream became available and microphone is enabled, start transcription
-    await startListening()
-  }
-  else if (!val && isListening.value) {
-    // Stream was lost, stop transcription
-    await stopListening()
-  }
-})
 
 // Watch for auto-send setting changes and clear pending sends if disabled
 watch(autoSendEnabled, (enabled) => {
@@ -942,7 +652,33 @@ watch(sendMode, () => {
           </DropdownMenuPortal>
         </DropdownMenuRoot>
 
-        <!-- Microphone icon button -->
+        <!-- Voice input: one click to record, one click to send it off -->
+        <button
+          :class="[
+            'h-8 w-8 flex items-center justify-center rounded-md outline-none',
+            'transition-all duration-200 active:scale-95',
+            isVoiceRecording ? 'text-rose-500 dark:text-rose-400' : 'text-neutral-500 dark:text-neutral-400',
+          ]"
+          :title="isVoiceRecording ? `正在录音 ${voiceElapsed.toFixed(0)} 秒，点击结束` : '语音输入'"
+          :aria-label="isVoiceRecording ? '结束录音' : '开始录音'"
+          :disabled="voiceState === 'transcribing'"
+          @click="void toggleVoiceRecording()"
+        >
+          <span
+            v-if="isVoiceRecording"
+            class="relative grid h-5 w-5 place-items-center"
+          >
+            <span
+              class="absolute inset-0 rounded-full bg-rose-500/25"
+              :style="{ transform: `scale(${1 + voiceLevel * 0.6})`, opacity: String(0.35 + voiceLevel * 0.5) }"
+            />
+            <span class="h-2.5 w-2.5 rounded-[3px] bg-rose-500" />
+          </span>
+          <div v-else-if="voiceState === 'transcribing'" class="i-solar:loading-animation-linear h-5 w-5" />
+          <div v-else class="i-ph:microphone h-5 w-5" />
+        </button>
+
+        <!-- Microphone picker -->
         <PopoverRoot v-model:open="hearingPopoverOpen">
           <PopoverTrigger as-child>
             <button
@@ -951,12 +687,10 @@ watch(sendMode, () => {
                 'transition-all duration-200 active:scale-95',
               ]"
               text="lg neutral-500 dark:neutral-400"
-              :title="t('settings.pages.modules.hearing.title')"
+              title="选择麦克风"
+              aria-label="选择麦克风"
             >
-              <Transition name="fade" mode="out-in">
-                <IndicatorMicVolume v-if="enabled" class="h-5 w-5" />
-                <div v-else class="i-ph:microphone-slash h-5 w-5" />
-              </Transition>
+              <div class="i-ph:sliders-horizontal h-5 w-5" />
             </button>
           </PopoverTrigger>
           <PopoverContent
@@ -968,38 +702,6 @@ watch(sendMode, () => {
               'flex flex-col gap-3',
             ]"
           >
-            <div class="flex flex-col items-center justify-center">
-              <div class="relative h-28 w-28 select-none">
-                <div
-                  class="absolute left-1/2 top-1/2 h-20 w-20 rounded-full transition-all duration-150 -translate-x-1/2 -translate-y-1/2"
-                  :style="{ transform: `translate(-50%, -50%) scale(${1 + normalizedVolume * 0.35})`, opacity: String(0.25 + normalizedVolume * 0.25) }"
-                  :class="enabled ? 'bg-primary-500/15 dark:bg-primary-600/20' : 'bg-neutral-300/20 dark:bg-neutral-700/20'"
-                />
-                <div
-                  class="absolute left-1/2 top-1/2 h-24 w-24 rounded-full transition-all duration-200 -translate-x-1/2 -translate-y-1/2"
-                  :style="{ transform: `translate(-50%, -50%) scale(${1.2 + normalizedVolume * 0.55})`, opacity: String(0.15 + normalizedVolume * 0.2) }"
-                  :class="enabled ? 'bg-primary-500/10 dark:bg-primary-600/15' : 'bg-neutral-300/10 dark:bg-neutral-700/10'"
-                />
-                <div
-                  class="absolute left-1/2 top-1/2 h-28 w-28 rounded-full transition-all duration-300 -translate-x-1/2 -translate-y-1/2"
-                  :style="{ transform: `translate(-50%, -50%) scale(${1.5 + normalizedVolume * 0.8})`, opacity: String(0.08 + normalizedVolume * 0.15) }"
-                  :class="enabled ? 'bg-primary-500/5 dark:bg-primary-600/10' : 'bg-neutral-300/5 dark:bg-neutral-700/5'"
-                />
-                <button
-                  class="absolute left-1/2 top-1/2 grid h-16 w-16 place-items-center rounded-full shadow-md outline-none transition-all duration-200 -translate-x-1/2 -translate-y-1/2"
-                  :class="enabled
-                    ? 'bg-primary-500 text-white hover:bg-primary-600 active:scale-95'
-                    : 'bg-neutral-200 text-neutral-600 hover:bg-neutral-300 active:scale-95 dark:bg-neutral-700 dark:text-neutral-200'"
-                  @click="enabled = !enabled"
-                >
-                  <div :class="enabled ? 'i-ph:microphone' : 'i-ph:microphone-slash'" class="h-6 w-6" />
-                </button>
-              </div>
-              <p class="mt-3 text-xs text-neutral-500 dark:text-neutral-400">
-                {{ enabled ? 'Microphone enabled' : 'Microphone disabled' }}
-              </p>
-            </div>
-
             <FieldCombobox
               v-model="selectedAudioInput"
               label="Input device"
@@ -1008,6 +710,9 @@ watch(sendMode, () => {
               layout="vertical"
               placeholder="Select microphone"
             />
+            <p class="text-xs text-neutral-500 dark:text-neutral-400">
+              语音识别在本机完成，无需联网，也不会消耗任何额度。
+            </p>
           </PopoverContent>
         </PopoverRoot>
       </div>

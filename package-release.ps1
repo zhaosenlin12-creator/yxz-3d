@@ -58,14 +58,14 @@ if (Test-Path -LiteralPath $OutDir) {
 }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-Write-Host "[2/6] 拷贝前端 airi ..." -ForegroundColor Cyan
+Write-Host "[2/7] 拷贝前端 airi ..." -ForegroundColor Cyan
 Copy-Clean -Src (Join-Path $SourceRoot 'airi') -Dst (Join-Path $OutDir 'airi') `
     -ExcludeDirs @('node_modules', '.git', '.turbo', '.cache', 'dist', 'logs', 'tmp',
                    '__pycache__', 'coverage', '.output', '.vite', 'test-results') `
     -ExcludeFiles @('*.log', '.eslintcache', '.dev.err.log', '.parts.log', '.chain.log')
 Ok "airi"
 
-Write-Host "[3/6] 拷贝后端 cartoon-print-studio ..." -ForegroundColor Cyan
+Write-Host "[3/7] 拷贝后端 cartoon-print-studio ..." -ForegroundColor Cyan
 Copy-Clean -Src (Join-Path $SourceRoot 'cartoon-print-studio') -Dst (Join-Path $OutDir 'cartoon-print-studio') `
     -ExcludeDirs @('venv', '.venv', 'models', 'logs', 'dist', 'release', 'build',
                    '__pycache__', '.run', '.pytest_cache', 'data', '.git') `
@@ -78,7 +78,7 @@ Ok "cartoon-print-studio"
 #   yxz_character_tripo_jpg 宜小智角色模型（高清版）
 #   34e5c9f0a0b0           混元 3D 云端生成的一次成品交付
 $keepData = @('laser', 'yxz_character_tripo', 'yxz_character_tripo_jpg', '34e5c9f0a0b0')
-Write-Host "[4/6] 补回现场素材 ..." -ForegroundColor Cyan
+Write-Host "[4/7] 补回现场素材 ..." -ForegroundColor Cyan
 foreach ($name in $keepData) {
     $src = Join-Path $SourceRoot ("cartoon-print-studio\data\{0}" -f $name)
     if (Test-Path -LiteralPath $src) {
@@ -90,18 +90,32 @@ foreach ($name in $keepData) {
 
 # 预制 3D 模型（4 个宜小智姿态）：模型文件太大没有进 git，只能随包走，
 # 否则换电脑后"宜小智预制 3D 模型示例"整块是空的。
-Write-Host "[5/6] 拷贝预制模型 presets ..." -ForegroundColor Cyan
+Write-Host "[5/7] 拷贝预制模型 presets ..." -ForegroundColor Cyan
 Copy-Clean -Src (Join-Path $SourceRoot 'presets') -Dst (Join-Path $OutDir 'presets') `
     -ExcludeDirs @() -ExcludeFiles @()
 Ok "presets"
 
-Write-Host "[6/6] 拷贝根目录交付脚本 ..." -ForegroundColor Cyan
+Write-Host "[6/7] 拷贝根目录交付脚本 ..." -ForegroundColor Cyan
 Get-ChildItem -LiteralPath $SourceRoot -File | Where-Object {
     $_.Name -ne '.gitignore'
 } | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $OutDir $_.Name) -Force
 }
 Ok "根目录文件"
+
+# 本地语音识别模型（faster-whisper）随包带走：换一台电脑、或者现场没有
+# 网络，语音输入照样能用。模型有几百兆，所以不提交 GitHub，只随交付包走。
+Write-Host "[7/7] 拷贝本地语音识别模型 ..." -ForegroundColor Cyan
+$asrModel = Join-Path $SourceRoot 'cartoon-print-studio\models\asr'
+if (Test-Path -LiteralPath $asrModel) {
+    Copy-Clean -Src $asrModel -Dst (Join-Path $OutDir 'cartoon-print-studio\models\asr') `
+        -ExcludeDirs @() `
+        -ExcludeFiles @('*.metadata', '*.lock', '*.incomplete', '.gitignore', 'CACHEDIR.TAG')
+    Info "models\asr"
+}
+else {
+    Warn "未找到本地语音识别模型（首次启动时会自动下载）"
+}
 
 # keys.txt 必须随包走（不提交 GitHub，但转移电脑必需）。
 $keySrc = Join-Path $SourceRoot 'cartoon-print-studio\keys.txt'

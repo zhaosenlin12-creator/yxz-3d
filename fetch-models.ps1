@@ -15,7 +15,7 @@
 # =====================================================================
 param(
     [string]$Mirror = 'https://hf-mirror.com',
-    [ValidateSet('all','sd','hunyuan','triposr')][string]$Only = 'all',
+    [ValidateSet('all','sd','hunyuan','triposr','asr')][string]$Only = 'all',
     [switch]$Force
 )
 
@@ -106,6 +106,22 @@ if (Want 'triposr') {
           -OutFile (Join-Path $dir 'model.ckpt') -MinSize 1500000000 -Label 'TripoSR 权重'
     Fetch -Repo 'stabilityai/TripoSR' -File 'config.yaml' `
           -OutFile (Join-Path $dir 'config.yaml') -MinSize 100 -Label 'TripoSR 配置'
+}
+
+# ---------- 4. faster-whisper small（本地语音识别）---------------------
+# 语音输入靠它在本机转写，不联网、不消耗额度。缺了它，语音按钮会提示
+# 模型未安装（后端第一次使用时会自己尝试下载）。
+if (Want 'asr') {
+    $dir = Join-Path $root 'cartoon-print-studio\models\asr\faster-whisper-small'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    Fetch -Repo 'Systran/faster-whisper-small' -File 'model.bin' `
+          -OutFile (Join-Path $dir 'model.bin') -MinSize 400000000 -Label '语音识别模型 (faster-whisper small)'
+    Fetch -Repo 'Systran/faster-whisper-small' -File 'config.json' `
+          -OutFile (Join-Path $dir 'config.json') -MinSize 1000 -Label '语音识别配置'
+    Fetch -Repo 'Systran/faster-whisper-small' -File 'tokenizer.json' `
+          -OutFile (Join-Path $dir 'tokenizer.json') -MinSize 100000 -Label '语音识别词表'
+    Fetch -Repo 'Systran/faster-whisper-small' -File 'vocabulary.txt' `
+          -OutFile (Join-Path $dir 'vocabulary.txt') -MinSize 10000 -Label '语音识别词表'
 }
 
 Write-Host ""
