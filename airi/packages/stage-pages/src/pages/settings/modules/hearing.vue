@@ -3,6 +3,7 @@ import workletUrl from '@proj-airi/stage-ui/workers/vad/process.worklet?worker&u
 
 import { Alert, ErrorContainer, LevelMeter, RadioCardManySelect, RadioCardSimple, TestDummyMarker, ThresholdMeter, TimeSeriesChart } from '@proj-airi/stage-ui/components'
 import { useAnalytics, useAudioAnalyzer, useAudioRecorder } from '@proj-airi/stage-ui/composables'
+import { getYXZPrintApiBase } from '@proj-airi/stage-ui/composables/use-yxz-print-preview'
 import { useVAD } from '@proj-airi/stage-ui/stores/ai/models/vad'
 import { useAudioContext } from '@proj-airi/stage-ui/stores/audio'
 import { CONFIDENCE_THRESHOLD_DISABLED, useHearingSpeechInputPipeline, useHearingStore } from '@proj-airi/stage-ui/stores/modules/hearing'
@@ -55,6 +56,29 @@ const animationFrame = ref<number>()
 
 const error = ref<string>('')
 const isMonitoring = ref(false)
+
+// The voice input of 宜小智 runs on this machine (faster-whisper): no key,
+// no network, no quota.  The status is shown here so an operator can see
+// at a glance whether the local model is ready.
+const localAsr = ref<{ ready: boolean, model: string, loading: boolean, error: string } | null>(null)
+
+async function loadLocalAsrStatus() {
+  try {
+    const response = await fetch(`${getYXZPrintApiBase()}/api/asr/status`)
+    if (!response.ok)
+      return
+    const payload = await response.json()
+    localAsr.value = {
+      ready: !!payload?.loaded,
+      model: String(payload?.model ?? ''),
+      loading: !!payload?.loading,
+      error: String(payload?.error ?? ''),
+    }
+  }
+  catch {
+    localAsr.value = null
+  }
+}
 
 const transcriptions = ref<string[]>([])
 const audios = ref<Blob[]>([])
@@ -472,6 +496,7 @@ watch(activeTranscriptionProvider, async (provider) => {
 onMounted(async () => {
   // Audio devices are loaded on demand when user requests them
   syncOpenAICompatibleSettings()
+  void loadLocalAsrStatus()
 })
 
 onUnmounted(() => {
@@ -494,6 +519,15 @@ onUnmounted(() => {
 <template>
   <div flex="~ col md:row gap-6">
     <div bg="neutral-100 dark:[rgba(0,0,0,0.3)]" rounded-xl p-4 flex="~ col gap-4" class="h-fit w-full md:w-[40%]">
+      <!-- The voice input itself runs on this machine; the provider list
+           below is only used by the test panel. -->
+      <div class="border border-primary-200/60 rounded-lg bg-primary-50/60 px-3 py-2 text-xs text-neutral-600 dark:border-primary-500/30 dark:bg-primary-900/20 dark:text-neutral-300">
+        <span class="font-medium">本机语音识别</span>
+        <span v-if="!localAsr" class="ml-1">：状态未知（后端未响应）</span>
+        <span v-else-if="localAsr.loading" class="ml-1">：模型加载中…</span>
+        <span v-else-if="localAsr.ready" class="ml-1">：已就绪（{{ localAsr.model }}，本机识别，不联网）</span>
+        <span v-else class="ml-1">：{{ localAsr.error || '模型未安装' }}</span>
+      </div>
       <div flex="~ col gap-4">
         <!-- Audio Input Selection -->
         <div>
