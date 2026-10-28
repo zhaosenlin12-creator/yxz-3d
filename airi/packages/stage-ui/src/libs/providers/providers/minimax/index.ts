@@ -17,12 +17,17 @@ import { defineProvider } from '../registry'
  * MiniMax answers an exhausted Token Plan with HTTP 200 plus an error body
  * instead of a 4xx, so the rotation has to happen inside the fetch: the first
  * chunk of the answer is inspected before it reaches the caller.
+ *
+ * The keys may arrive either as a comma separated `apiKey` field or as a
+ * separate `apiKeys` list. The list form keeps `apiKey` a single valid
+ * credential, which matters because the provider validators send that field
+ * as-is.
  */
 function withMinimaxKeyRotation(
   provider: ChatProvider & ModelProvider,
-  rawApiKey: unknown,
+  config: { apiKey?: unknown, apiKeys?: unknown },
 ): ChatProvider & ModelProvider {
-  const keys = splitApiKeys(rawApiKey)
+  const keys = collectMinimaxKeys(config)
   if (keys.length <= 1)
     return provider
 
@@ -32,6 +37,25 @@ function withMinimaxKeyRotation(
     ...provider,
     chat: model => ({ ...provider.chat(model), fetch: rotatingFetch }),
   }
+}
+
+/**
+ * Every MiniMax key that is configured, in priority order.
+ *
+ * `apiKey` may hold a comma separated list, and `apiKeys` may hold the same
+ * keys as a list. Both forms end up here so the rotation and the validators
+ * see the same set of credentials.
+ */
+export function collectMinimaxKeys(config: { apiKey?: unknown, apiKeys?: unknown }): string[] {
+  const fromList = Array.isArray(config.apiKeys)
+    ? config.apiKeys
+        .filter((key): key is string => typeof key === 'string')
+        .map(key => key.trim())
+        .filter(Boolean)
+    : []
+
+  return [...splitApiKeys(config.apiKey), ...fromList]
+    .filter((key, index, all) => key.length > 0 && all.indexOf(key) === index)
 }
 
 const minimaxCnConfigSchema = z.object({
@@ -131,7 +155,7 @@ export const providerMinimax = defineProvider<MinimaxCnConfig>({
     }),
   }),
   createProvider(config) {
-    return withMinimaxKeyRotation(createMinimaxCn(config.apiKey, config.baseUrl), config.apiKey)
+    return withMinimaxKeyRotation(createMinimaxCn(config.apiKey, config.baseUrl), config)
   },
 
   extraMethods: {
@@ -171,7 +195,7 @@ export const providerMinimaxGlobal = defineProvider<MinimaxGlobalConfig>({
     }),
   }),
   createProvider(config) {
-    return withMinimaxKeyRotation(createMinimax(config.apiKey, config.baseUrl), config.apiKey)
+    return withMinimaxKeyRotation(createMinimax(config.apiKey, config.baseUrl), config)
   },
 
   extraMethods: {
