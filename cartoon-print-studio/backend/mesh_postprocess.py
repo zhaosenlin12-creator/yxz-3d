@@ -104,6 +104,51 @@ def _rotate_y_up_to_z_up(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     return mesh
 
 
+def align_up_axis(mesh: trimesh.Trimesh, *, source_up: str = "y") -> trimesh.Trimesh:
+    """Rotate a source mesh into the Z-up convention the slicers expect.
+
+    Hunyuan3D hands its model back standing along Y, the cloud preview
+    models along Z.  Everything downstream - the print bed, the height
+    scaling, the viewer - works on Z, so the conversion happens once, here,
+    at the edge of the pipeline.
+    """
+    if mesh is None or len(mesh.vertices) < 8:
+        return mesh
+    if source_up.lower() == "y":
+        return _rotate_y_up_to_z_up(mesh)
+    if source_up.lower() != "z":
+        raise ValueError("source_up must be 'y' or 'z'")
+    return mesh
+
+
+def transfer_texture(source: trimesh.Trimesh, target: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Copy the texture mapping of a model onto a mesh of the same shape.
+
+    The printable body is rebuilt from the model's own volume, so it has no
+    UV coordinates of its own.  Every vertex of the new body sits on the
+    surface of the old one, which is enough to look up the colour that
+    belongs to it.
+    """
+    if source is None or target is None:
+        return target
+    visual = getattr(source, "visual", None)
+    uv = getattr(visual, "uv", None)
+    material = getattr(visual, "material", None)
+    if uv is None or material is None:
+        return target
+    try:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(np.asarray(source.vertices))
+        _, nearest = tree.query(np.asarray(target.vertices), k=1)
+        target.visual = trimesh.visual.TextureVisuals(
+            uv=np.asarray(uv)[nearest],
+            material=material,
+        )
+    except Exception as exc:
+        print(f"[mesh] texture transfer skipped: {exc}", flush=True)
+    return target
+
+
 def _is_legacy_y_up_base(part: trimesh.Trimesh) -> bool:
     """Recognise the old XY base plate produced before coordinate alignment."""
     if len(part.faces) > 24:
@@ -266,6 +311,104 @@ def _largest_component(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     return _select_faces(mesh, groups[0])
 
 
+def keep_significant_shells(mesh: trimesh.Trimesh,
+                            *, min_diam_mm: float = MAX_DEBRIS_DIAMETER_MM) -> trimesh.Trimesh:
+    """Drop the floating specks but keep every real body of the model.
+
+    The cloud generators hand a figurine back as a couple of hundred closed
+    shells - one per material region, plus a pile of loose fragments.  The
+    fragments have to go, the shells have to stay: an earlier version of this
+    file kept only the shell with the most triangles, and for the Hunyuan
+    robot that shell was the helmet, so the whole body ended up missing.
+    """
+    groups = _face_groups(mesh)
+    if len(groups) <= 1:
+        return mesh
+    keep = []
+    for group in groups:
+        verts = mesh.vertices[np.unique(mesh.faces[group])]
+        diameter = float(np.linalg.norm(verts.max(axis=0) - verts.min(axis=0)))
+        if diameter >= min_diam_mm:
+            keep.append(group)
+    if not keep:
+        return _largest_component(mesh)
+    if len(keep) == len(groups):
+        return mesh
+    print(f"[mesh] kept {len(keep)} of {len(groups)} bodies "
+          f"(dropped {len(groups) - len(keep)} fragments)", flush=True)
+    return _select_faces(mesh, np.concatenate(keep))
+
+
+def _drop_small_components(mesh: trimesh.Trimesh,
+                           *, min_diam_mm: float = 1.2) -> trimesh.Trimesh:
+    """Remove blobs that are too small to be a real part of the model."""
+    groups = _face_groups(mesh)
+    if len(groups) <= 1:
+        return mesh
+    keep = []
+    for group in groups:
+        verts = mesh.vertices[np.unique(mesh.faces[group])]
+        diameter = float(np.linalg.norm(verts.max(axis=0) - verts.min(axis=0)))
+        if diameter >= min_diam_mm:
+            keep.append(group)
+    if not keep:
+        return _largest_component(mesh)
+    if len(keep) == len(groups):
+        return mesh
+    print(f"[mesh] dropped {len(groups) - len(keep)} small blobs", flush=True)
+    return _select_faces(mesh, np.concatenate(keep))
+
+
+def solidify_mesh(mesh: trimesh.Trimesh, *,
+                  pitch_mm: float = 0.5,
+                  min_component_mm: float = 1.2,
+                  seal_voxels: int = 2) -> trimesh.Trimesh:
+    """Join the separate shells of a model into one closed, printable body.
+
+    The shells of a generated figurine overlap each other and are not
+    watertight on their own, so a slicer would either refuse them or cut the
+    model as if it were hollow.  Voxelising the whole model turns the stack
+    of shells into a single occupancy volume - the overlap is resolved by
+    the volume itself - and marching cubes turns that volume back into one
+    watertight surface.
+
+    The shells are open where the cloud engine split the surface, so the
+    interior would leak out of a plain fill.  Swelling the surface by a
+    voxel or two closes those gaps, the fill then reaches the middle of the
+    body, and shrinking it back gives the original size again.
+    """
+    if mesh is None or len(mesh.faces) == 0:
+        return mesh
+    try:
+        from trimesh.voxel.ops import matrix_to_marching_cubes
+    except Exception as exc:  # pragma: no cover - scikit-image missing
+        print(f"[mesh] voxel solid skipped: {exc}", flush=True)
+        return mesh
+    try:
+        volume = mesh.voxelized(pitch=pitch_mm)
+        mask = volume.matrix
+        try:
+            from scipy.ndimage import binary_dilation, binary_erosion, binary_fill_holes
+            structure = np.ones((3, 3, 3), dtype=bool)
+            sealed = binary_dilation(mask, structure=structure, iterations=seal_voxels)
+            body = binary_fill_holes(sealed)
+            mask = binary_erosion(body, structure=structure,
+                                  iterations=seal_voxels, border_value=1)
+        except Exception as exc:
+            print(f"[mesh] volume seal skipped: {exc}", flush=True)
+            mask = volume.fill().matrix
+        solid = matrix_to_marching_cubes(mask, pitch=pitch_mm)
+    except Exception as exc:
+        print(f"[mesh] voxel solid failed: {exc}", flush=True)
+        return mesh
+    if solid is None or len(solid.faces) == 0:
+        print("[mesh] voxel solid came back empty, keeping the original shells", flush=True)
+        return mesh
+    solid = _drop_small_components(solid, min_diam_mm=min_component_mm)
+    print(f"[mesh] solid body: {len(solid.faces)} faces, watertight={solid.is_watertight}", flush=True)
+    return solid
+
+
 def _drop_tiny_debris(mesh: trimesh.Trimesh, max_diam_mm: float = MAX_DEBRIS_DIAMETER_MM) -> trimesh.Trimesh:
     groups = _face_groups(mesh)
     if len(groups) <= 1:
@@ -315,7 +458,10 @@ def _seal_for_print(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     try:
         from trimesh import repair
         if not mesh.is_watertight:
-            repair.fill_holes(mesh, use_fan=True)
+            # A fan over a wide opening makes up a flat cap that cuts the
+            # body in half, so it is only safe on a single closed body.
+            # A model made of many shells keeps its own seams.
+            repair.fill_holes(mesh, use_fan=len(_face_groups(mesh)) <= 1)
     except Exception as _e:
         print(f"[mesh] hole fill skipped: {_e}", flush=True)
     try:
@@ -364,7 +510,6 @@ def clean_for_print(mesh: trimesh.Trimesh, *,
         if 1e-4 < scale < 1e4:
             mesh.apply_scale(scale)
     mesh = _drop_tiny_debris(mesh, drop_min_diam_mm)
-    mesh = _largest_component(mesh)
     if len(mesh.vertices) < 8:
         return mesh
     mesh = _seal_for_print(mesh)

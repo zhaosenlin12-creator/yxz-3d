@@ -1428,6 +1428,16 @@ def to_3d_tripo(req: ThreeDTripoReq):
     credits = None
     if isinstance(bal, dict) and bal.get("ok"):
         credits = int(bal.get("balance", 0))
+    elif bal is None:
+        # The cache was cold, so no balance is known yet. Asking now costs a
+        # few hundred milliseconds and saves uploading the picture for a
+        # provider that has no credit left.
+        try:
+            fresh = tripo_api.get_balance(timeout=6.0, retries=0)
+        except Exception:
+            fresh = None
+        if isinstance(fresh, dict) and fresh.get("ok"):
+            credits = int(fresh.get("balance", 0))
     if credits is not None and credits < 30:
         pg.fail("生成额度暂时用完了，请稍后再试一次")
         raise HTTPException(402, "3D 生成额度暂时用完了，请稍后再试一次")
@@ -2119,7 +2129,12 @@ def session_parts(sid: str):
     import trimesh
 
     sd = session_dir(sid)
-    mesh_path = os.path.join(sd, "model", "mesh.glb")
+    # The printable body is what the visitor can actually print, so the
+    # parts are split from it.  The viewer GLB keeps the paint and the
+    # original shells, and would report a few hundred loose pieces.
+    mesh_path = os.path.join(sd, "model", "mesh.stl")
+    if not os.path.isfile(mesh_path):
+        mesh_path = os.path.join(sd, "model", "mesh.glb")
     if not os.path.isfile(mesh_path):
         raise HTTPException(404, "模型还没有生成，暂时无法拆分零件")
 

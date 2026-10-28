@@ -202,18 +202,40 @@ def _download(url: str, out_path: str, timeout: float = 120.0) -> int:
 
 
 def process_glb(glb_path: str, out_dir: str, *, target_height_mm: float = 70.0) -> Dict[str, Any]:
-    """Clean, orient (Y-up -> Z-up for slicers), scale and export print files."""
+    """Turn the cloud model into a viewer GLB and a printable body.
+
+    The cloud engines hand the figurine back as a couple of hundred closed
+    shells - a helmet, a torso, an arm, a base - plus a pile of loose
+    fragments.  They overlap each other and none of them is watertight on
+    its own, so:
+
+    - the viewer gets the shells with their texture, decimation applied, so
+      the robot shows up whole in the browser;
+    - the printer gets one solid body, rebuilt from the volume of those
+      shells, because a slicer cannot cut a pile of overlapping shells.
+    """
     import trimesh
     import mesh_postprocess
     mesh = trimesh.load(glb_path, force="mesh")
     # Hunyuan3D outputs Y-up; convert to Z-up with a flat bottom for slicing.
-    mesh = mesh_postprocess.clean_for_print(mesh, add_base=False, source_up="y")
-    mesh.apply_translation(-mesh.centroid)
+    mesh = mesh_postprocess.align_up_axis(mesh, source_up="y")
+    largest = float(max(mesh.extents))
+    if largest > 0:
+        mesh.apply_scale(mesh_postprocess.PRINT_LENGTH_MM / largest)
+    # Keep every real body of the figurine, drop the loose fragments.
+    mesh = mesh_postprocess.keep_significant_shells(mesh)
+
+    # --- the model the browser shows: the painted shells themselves, so the
+    # robot keeps every detail the cloud engine gave us
+    viewer = mesh_postprocess.optimize_for_web(mesh, target_faces=120000, texture_size=2048)
+
+    # --- the body the printer cuts
+    solid = mesh_postprocess.solidify_mesh(mesh, pitch_mm=0.5)
     # The requested size is the standing height. After the Y-up -> Z-up
     # conversion the height is the Z extent, which is the same rule the
     # Tripo path uses. Scaling by the longest side instead ignored the
     # parameter completely and always produced a 100mm model.
-    extents = mesh.extents
+    extents = solid.extents
     height = float(extents[2]) if len(extents) >= 3 else 0.0
     target = float(target_height_mm or 0)
     if target > 0 and height > 0:
@@ -223,30 +245,38 @@ def process_glb(glb_path: str, out_dir: str, *, target_height_mm: float = 70.0) 
     else:
         scale = 1.0
     if scale > 0:
-        mesh.apply_scale(scale)
+        solid.apply_scale(scale)
+        # The preview shows the same model, so it has to end up at the same
+        # size as the file that goes to the printer.
+        viewer.apply_scale(scale)
     # The debris filter runs on the 100 mm scale that clean_for_print uses.
     # Scaling down afterwards can leave a speck of a few triangles behind,
     # and a stray loose triangle is enough to make a slicer report the model
     # as not watertight. Drop those once more, now that the mesh has its
     # final size.
-    mesh = _drop_print_debris(mesh)
+    solid = _drop_print_debris(solid)
     # Lower to z=0 for a stable print bed
-    bbox = mesh.bounds
+    bbox = solid.bounds
     if bbox[0][2] < 0:
-        mesh.apply_translation([0, 0, -bbox[0][2]])
+        solid.apply_translation([0, 0, -bbox[0][2]])
+    viewer_bbox = viewer.bounds
+    if viewer_bbox[0][2] < 0:
+        viewer.apply_translation([0, 0, -viewer_bbox[0][2]])
     glb_out = os.path.join(out_dir, "mesh.glb")
+    viewer.export(glb_out)
     obj_out = os.path.join(out_dir, "mesh.obj")
     stl_out = os.path.join(out_dir, "mesh.stl")
-    mesh.export(glb_out)
-    mesh.export(obj_out)
-    mesh.export(stl_out)
+    solid.export(obj_out)
+    solid.export(stl_out)
     return {
         "glb": glb_out,
         "obj": obj_out,
         "stl": stl_out,
-        "vertices": len(mesh.vertices),
-        "faces": len(mesh.faces),
-        "extents_mm": mesh.extents.tolist(),
+        "vertices": len(solid.vertices),
+        "faces": len(solid.faces),
+        "extents_mm": solid.extents.tolist(),
+        "viewer_faces": len(viewer.faces),
+        "watertight": bool(solid.is_watertight),
     }
 
 

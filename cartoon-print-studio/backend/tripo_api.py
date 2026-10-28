@@ -151,9 +151,17 @@ def _request(method: str, path: str, *, body: Optional[bytes] = None,
         h.update(headers)
     last_err = None
     attempt = 0
-    rotations = 0
+    # Every configured key gets one turn.  The order is worked out here and
+    # not taken from the shared "active key" index: the background balance
+    # probe rotates that index too, and a request that rotated into the key
+    # another thread had just parked would keep using the dead one.
+    candidates = [_current_key()]
+    for key in API_KEYS:
+        if key not in candidates:
+            candidates.append(key)
+    tried = 0
     while attempt <= retries:
-        h["Authorization"] = "Bearer " + _current_key()
+        h["Authorization"] = "Bearer " + candidates[min(tried, len(candidates) - 1)]
         req = urllib.request.Request(url, data=body, method=method, headers=h)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -171,9 +179,9 @@ def _request(method: str, path: str, *, body: Optional[bytes] = None,
             # An invalid or expired key is recoverable: fall back to the next
             # configured Tripo key and try the same call again. Switching keys
             # must not consume one of the caller's retry attempts.
-            if e.code == 401 and len(API_KEYS) > 1 and rotations < len(API_KEYS) - 1:
-                _rotate_key()
-                rotations += 1
+            if e.code == 401 and tried + 1 < len(candidates):
+                tried += 1
+                print(f"[tripo] key rejected, trying {candidates[tried][:14]}...", flush=True)
                 continue
             if 400 <= e.code < 500:
                 raise RuntimeError(f"Tripo HTTP {e.code} on {method} {path}: {err[:400]}")
@@ -466,10 +474,12 @@ def _scale_to_print_size(mesh, target_height_mm: float = 70.0) -> Any:
     """Scale mesh so the longest vertical extent equals target_height_mm."""
     import trimesh
     ext = mesh.extents
-    if ext[1] <= 0:
+    # The body is Z-up by the time it reaches the print bed, so the height
+    # is the Z extent. The old code measured Y, which was the height of the
+    # raw cloud model and no longer the height of the rotated one.
+    if ext[2] <= 0:
         return mesh
-    # y-up: assume model is upright; use Y extent (height) as reference
-    scale = target_height_mm / ext[1]
+    scale = target_height_mm / ext[2]
     mesh.apply_scale(scale)
     # Re-center on print bed: bottom touches z=0
     bounds = mesh.bounds
@@ -477,22 +487,24 @@ def _scale_to_print_size(mesh, target_height_mm: float = 70.0) -> Any:
     return mesh
 
 
-def _clean_for_print(mesh, target_height_mm: float = 70.0) -> Any:
-    """Drop disconnected fragments, fill obvious holes, scale to print size."""
+def _prepare_body(mesh, target_height_mm: float = 70.0) -> Any:
+    """Turn the cloud model into one body that stands on the print bed.
+
+    Tripo hands the model back standing along Y and, like the other cloud
+    engines, as a set of separate shells.  The old cleanup kept the shell
+    with the most triangles and dropped everything else, so a figure that
+    came back as head, body, arms and a base ended up as one of them.
+    """
     import trimesh
-    # Detach the visual first: trimesh's split() copies the whole texture
-    # atlas for every component it produces, which exhausts memory on a PBR
-    # model with several parts. The printable STL/OBJ carry no texture, and
-    # the textured GLB is exported separately from the untouched mesh.
-    try:
-        mesh.visual = trimesh.visual.TextureVisuals()
-    except Exception as _e:
-        print(f"[tripo] visual detach skipped: {_e}", flush=True)
-    # drop debris
-    components = mesh.split(only_watertight=False)
-    if len(components) > 1:
-        components.sort(key=lambda c: len(c.faces), reverse=True)
-        mesh = components[0]
+    import mesh_postprocess
+    # Tripo's model stands along Y; the print bed wants Z.
+    mesh = mesh_postprocess.align_up_axis(mesh, source_up="y")
+    # Drop the loose fragments, keep every real body of the figurine.
+    mesh = mesh_postprocess.keep_significant_shells(mesh)
+    if mesh_postprocess.component_count(mesh) > 1:
+        # Separate shells overlap each other and none of them is watertight,
+        # so they are rebuilt into one solid body.
+        mesh = mesh_postprocess.solidify_mesh(mesh, pitch_mm=0.5)
     # try to fill holes for nicer slicing
     try:
         mesh.fill_holes()
@@ -505,6 +517,18 @@ def _clean_for_print(mesh, target_height_mm: float = 70.0) -> Any:
     # scale to print size and place on plate
     mesh = _scale_to_print_size(mesh, target_height_mm)
     return mesh
+
+
+def _prepare_viewer(mesh, target_height_mm: float = 70.0) -> Any:
+    """The same body as _prepare_body, but still painted for the browser."""
+    import mesh_postprocess
+    mesh = mesh_postprocess.align_up_axis(mesh, source_up="y")
+    mesh = mesh_postprocess.keep_significant_shells(mesh)
+    if mesh_postprocess.component_count(mesh) > 1:
+        solid = mesh_postprocess.solidify_mesh(mesh, pitch_mm=0.5)
+        if len(solid.faces):
+            mesh = mesh_postprocess.transfer_texture(mesh, solid)
+    return _scale_to_print_size(mesh, target_height_mm)
 
 
 def process_for_print(pbr_glb_path: str, out_dir: str, *,
@@ -520,15 +544,19 @@ def process_for_print(pbr_glb_path: str, out_dir: str, *,
     import trimesh
     os.makedirs(out_dir, exist_ok=True)
     mesh = trimesh.load(pbr_glb_path, force="mesh", process=False)
-    # Build the printable copy from geometry only. Copying the mesh first
-    # would duplicate the PBR texture atlas in memory for no reason: the
-    # textured GLB below is exported from the untouched mesh.
+    # The browser model and the print model are the same body, so the
+    # preview can never show something different from what gets printed.
+    viewer = _prepare_viewer(mesh, target_height_mm=target_height_mm)
+    # The printable copy carries geometry only: the STL/OBJ formats have no
+    # room for a texture anyway.
     printable = trimesh.Trimesh(
-        vertices=np.asarray(mesh.vertices, dtype=np.float64),
-        faces=np.asarray(mesh.faces, dtype=np.int64),
+        vertices=np.asarray(viewer.vertices, dtype=np.float64),
+        faces=np.asarray(viewer.faces, dtype=np.int64),
         process=False,
     )
-    printable = _clean_for_print(printable, target_height_mm=target_height_mm)
+    printable.merge_vertices()
+    printable.update_faces(printable.unique_faces())
+    printable.remove_unreferenced_vertices()
 
     paths: Dict[str, str] = {}
     stl_path = os.path.join(out_dir, "mesh.stl")
@@ -541,16 +569,8 @@ def process_for_print(pbr_glb_path: str, out_dir: str, *,
     # GLB keeps visual (PBR textures) — viewers in the browser use this
     if keep_visual:
         glb_path = os.path.join(out_dir, "mesh.glb")
-        # Apply same transform to the visual mesh so they line up
-        visual = mesh.copy()
-        ext = visual.extents
-        if ext[1] > 0:
-            scale = target_height_mm / ext[1]
-            visual.apply_scale(scale)
-            bounds = visual.bounds
-            visual.apply_translation([0, 0, -bounds[0][2]])
         try:
-            visual.export(glb_path)
+            viewer.export(glb_path)
             paths["glb"] = glb_path
         except Exception as e:
             print(f"[tripo] glb export failed: {e}", flush=True)
