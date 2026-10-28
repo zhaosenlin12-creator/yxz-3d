@@ -47,10 +47,16 @@ function Write-StartupLauncher {
     param([string]$Path, [string]$Title, [string]$ScriptPath, [string[]]$ScriptArgs)
     $argLine = ''
     foreach ($a in $ScriptArgs) { $argLine += " `"$a`"" }
+    # NOTE: build the command line in its own variable first.  Inside an
+    # array literal the comma operator binds tighter than "+", so
+    # `'a' + $x + 'b' + $y, ''` is parsed as `'a' + $x + ('b' + ($y, ''))`
+    # and the whole thing explodes into an array -- the path ends up split
+    # across several lines and the launcher is broken.
+    $cmdLine = 'start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $ScriptPath + '"' + $argLine
     $lines = @(
         '@echo off',
         "rem $Title",
-        'start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $ScriptPath + '"' + $argLine,
+        $cmdLine,
         ''
     )
     [System.IO.File]::WriteAllText($Path, ($lines -join "`r`n"), (New-Object System.Text.UTF8Encoding($true)))
@@ -114,17 +120,26 @@ Write-Host ""
 
 $registered = $false
 try {
+    # NOTE: Register-ScheduledTask without admin rights fails with a
+    # NON-terminating "Access is denied".  Without -ErrorAction Stop the
+    # catch never runs and the script happily claims the task was created.
     $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($existing) {
-        Set-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings | Out-Null
+        Set-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -ErrorAction Stop | Out-Null
         Ok "计划任务已更新：$TaskName"
     }
     else {
         Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
-            -Settings $settings -Description '宜小智工作台开机自动启动' | Out-Null
+            -Settings $settings -Description '宜小智工作台开机自动启动' -ErrorAction Stop | Out-Null
         Ok "计划任务已创建：$TaskName"
     }
-    $registered = $true
+    # 只有真的登记上了才算成功 —— 权限不足时这里会走启动文件夹。
+    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+        $registered = $true
+    }
+    else {
+        Warn "计划任务登记后查不到，改用启动文件夹方式"
+    }
 }
 catch {
     Warn "登记计划任务失败：$($_.Exception.Message)"
@@ -159,13 +174,18 @@ if ($registered -and (Test-Path -LiteralPath $watchdogScript)) {
             -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
         $wdExisting = Get-ScheduledTask -TaskName $WatchdogTaskName -ErrorAction SilentlyContinue
         if ($wdExisting) {
-            Set-ScheduledTask -TaskName $WatchdogTaskName -Action $wdAction -Trigger $wdTrigger -Settings $wdSettings | Out-Null
+            Set-ScheduledTask -TaskName $WatchdogTaskName -Action $wdAction -Trigger $wdTrigger -Settings $wdSettings -ErrorAction Stop | Out-Null
         }
         else {
             Register-ScheduledTask -TaskName $WatchdogTaskName -Action $wdAction -Trigger $wdTrigger `
-                -Settings $wdSettings -Description '宜小智工作台看门狗（守护进程被杀了就拉起来）' | Out-Null
+                -Settings $wdSettings -Description '宜小智工作台看门狗（守护进程被杀了就拉起来）' -ErrorAction Stop | Out-Null
         }
-        Ok "看门狗任务已登记：$WatchdogTaskName（每 5 分钟检查一次）"
+        if (Get-ScheduledTask -TaskName $WatchdogTaskName -ErrorAction SilentlyContinue) {
+            Ok "看门狗任务已登记：$WatchdogTaskName（每 5 分钟检查一次）"
+        }
+        else {
+            Warn "看门狗任务登记后查不到"
+        }
     }
     catch {
         Warn "看门狗任务登记失败：$($_.Exception.Message)"

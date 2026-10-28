@@ -138,7 +138,18 @@ Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
 
 foreach ($svc in $services) {
     # 已经健康的实例直接接管，不再重复拉起。
-    if ((Test-Port $svc.Port) -and (& $svc.ReadyTest $svc.Port)) {
+    #
+    # 端口刚被别人交出去时，服务往往还在热身（前端要冷编译、语音包要
+    # 加载模型），一次 3 秒超时就判成"不健康"，然后把好好的服务重启
+    # 一遍 —— 正好赶上这一下的访客就白屏一下。所以多给几次机会再判定。
+    $adopted = $false
+    if (Test-Port $svc.Port) {
+        for ($i = 0; $i -lt 5; $i++) {
+            try { if (& $svc.ReadyTest $svc.Port) { $adopted = $true; break } } catch { }
+            Start-Sleep -Seconds 2
+        }
+    }
+    if ($adopted) {
         $svc.Ready = $true
         $svc.StartedAt = Get-Date
         Write-SupervisorLog "$($svc.Label) 已在运行（端口 $($svc.Port)），接管"
@@ -167,6 +178,18 @@ while ($true) {
             }
 
             if (-not $svc.Proc) {
+                # 接管来的服务没有进程句柄，但它可能活得很好。端口还通
+                # 就不要动它 —— 之前这里无条件重启，把刚接管的服务又杀
+                # 一遍，访客正好赶上就是白屏一下。
+                $stillAlive = $false
+                try { $stillAlive = [bool](& $svc.ReadyTest $svc.Port) } catch { $stillAlive = $false }
+                if ($stillAlive) {
+                    if (-not $svc.Ready) {
+                        Write-SupervisorLog "$($svc.Label) 仍在运行（端口 $($svc.Port)）"
+                        $svc.Ready = $true
+                    }
+                    continue
+                }
                 # 崩溃太频繁时降频，别把机器拖死。
                 $recent = @($svc.Restarts | Where-Object { ($now - $_).TotalMinutes -lt 5 })
                 $svc.Restarts = $recent
