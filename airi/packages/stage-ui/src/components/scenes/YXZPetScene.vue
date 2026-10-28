@@ -1,6 +1,9 @@
 <script setup lang="ts">
+import type { YXZPetFlourish, YXZPetStatus } from '../../composables/use-yxz-pet-motion'
+
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
+import armUrl from '../../assets/yxz/layers/arm.png'
 import bodyUrl from '../../assets/yxz/layers/body.png'
 import eyeLUrl from '../../assets/yxz/layers/eye_l.png'
 import eyeRUrl from '../../assets/yxz/layers/eye_r.png'
@@ -13,7 +16,7 @@ import mouthTalkAUrl from '../../assets/yxz/layers/mouth_talk_a.png'
 import mouthTalkBUrl from '../../assets/yxz/layers/mouth_talk_b.png'
 import mouthTalkCUrl from '../../assets/yxz/layers/mouth_talk_c.png'
 import mouthWideUrl from '../../assets/yxz/layers/mouth_wide.png'
-import type { YXZPetStatus } from '../../composables/use-yxz-pet-motion'
+import socketUrl from '../../assets/yxz/layers/socket.png'
 
 import { createYXZPetMotion } from '../../composables/use-yxz-pet-motion'
 
@@ -21,6 +24,12 @@ export type { YXZPetStatus }
 
 const props = withDefaults(defineProps<{
   status?: YXZPetStatus
+  /**
+   * A one-off action to play.  Change the value to fire it: the same
+   * action fires again when the value changes to something else and
+   * back, so a caller can wave as often as it likes.
+   */
+  action?: YXZPetFlourish | ''
   speakingLevel?: number
   paused?: boolean
   focusAt?: { x: number, y: number }
@@ -30,6 +39,7 @@ const props = withDefaults(defineProps<{
   message?: string
 }>(), {
   status: 'idle',
+  action: '',
   speakingLevel: 0,
   paused: false,
   xOffset: 0,
@@ -48,6 +58,7 @@ const WHITESPACE_RE = /\s+/g
 // space, so the numbers come from the cut itself and cannot drift away
 // from the pictures they belong to.
 interface LayerBox { file: string, x: number, y: number, w: number, h: number, cx: number, cy: number }
+interface ArmBox { file: string, x: number, y: number, w: number, h: number, pivotX: number, pivotY: number, handX: number, handY: number }
 interface RectBox { file: string, x: number, y: number, w: number, h: number }
 
 const cut = manifest as unknown as {
@@ -57,6 +68,7 @@ const cut = manifest as unknown as {
     eyes: LayerBox[]
     mouths: LayerBox[]
     glow: RectBox
+    arm: ArmBox
   }
 }
 
@@ -65,6 +77,11 @@ const ART_H = cut.height
 const EYES = cut.layers.eyes
 const MOUTH = cut.layers.mouths[0]
 const GLOW = cut.layers.glow
+// The raised arm is a picture of its own so that it can be turned around
+// the shoulder.  The pivot is the hinge the arm turns on, and the hand
+// anchor is the middle of the palm, which is where the sparkles of a
+// wave come from.
+const ARM = cut.layers.arm
 // Where the feet are, which is what the figure stands on and what the
 // breathing and the sway turn about.
 const PIVOT_X = ART_W / 2
@@ -100,6 +117,8 @@ const canvas = ref<HTMLCanvasElement>()
 
 const sources: Record<string, string> = {
   body: bodyUrl,
+  arm: armUrl,
+  socket: socketUrl,
   glow: glowUrl,
   [EYES[0].file]: eyeLUrl,
   [EYES[1].file]: eyeRUrl,
@@ -116,6 +135,10 @@ const images = new Map<string, HTMLImageElement>()
 // The action layer.  The channels it owns are added on top of the
 // breathing pose in every frame.
 const motion = createYXZPetMotion()
+// The channels the renderer reads every frame.  They live here rather
+// than inside the drawing call so that the helpers above and below can
+// all reach them.
+const channels = motion.channels
 let frame = 0
 let running = true
 let clock = 0
@@ -133,6 +156,84 @@ let blinkAt = 1.6
 let blinkPhase = 0
 let blinkDepth = 1
 let lastPointerAt = -10
+
+// The arm trails the twist of the body: when the figure turns, the arm
+// catches up a moment later.  That lag is what gives the picture weight,
+// and it costs one spring.
+const armFollow = { angle: 0, velocity: 0 }
+
+// The sparkles a waving hand throws off.
+interface Sparkle { x: number, y: number, vx: number, vy: number, life: number, size: number }
+const sparkles: Sparkle[] = []
+
+// The sparkle art is built once into two small offscreen pictures and
+// then stamped into the frame, so a wave never costs more than a pair
+// of drawImage calls per sparkle.
+let sparkleHalo: HTMLCanvasElement | undefined
+let sparkleStar: HTMLCanvasElement | undefined
+
+function buildSparkleArt() {
+  const size = 64
+  const half = size / 2
+
+  const halo = document.createElement('canvas')
+  halo.width = size
+  halo.height = size
+  const haloContext = halo.getContext('2d')
+  if (haloContext) {
+    const glow = haloContext.createRadialGradient(half, half, 0, half, half, half)
+    glow.addColorStop(0, 'rgba(255, 255, 255, 0.9)')
+    glow.addColorStop(0.3, 'rgba(170, 240, 255, 0.42)')
+    glow.addColorStop(1, 'rgba(150, 225, 255, 0)')
+    haloContext.fillStyle = glow
+    haloContext.fillRect(0, 0, size, size)
+  }
+  sparkleHalo = halo
+
+  const star = document.createElement('canvas')
+  star.width = size
+  star.height = size
+  const starContext = star.getContext('2d')
+  if (starContext) {
+    // A four-pointed star.  It is drawn in a strong blue so that it
+    // still reads against the white glove it comes off.
+    starContext.fillStyle = '#3fd2ff'
+    starContext.beginPath()
+    for (let point = 0; point < 4; point++) {
+      const outer = (Math.PI / 2) * point - Math.PI / 2
+      const inner = outer + Math.PI / 4
+      starContext.lineTo(half + Math.cos(outer) * half * 0.94, half + Math.sin(outer) * half * 0.94)
+      starContext.lineTo(half + Math.cos(inner) * half * 0.24, half + Math.sin(inner) * half * 0.24)
+    }
+    starContext.closePath()
+    starContext.fill()
+    // The white core keeps the star from looking flat.
+    starContext.fillStyle = 'rgba(255, 255, 255, 0.95)'
+    starContext.beginPath()
+    starContext.arc(half, half, half * 0.2, 0, Math.PI * 2)
+    starContext.fill()
+  }
+  sparkleStar = star
+}
+
+/**
+ * How far the arm is turned at this moment.
+ *
+ * Three things add up: the pose the status asks for, the lag that
+ * follows the body, and a small sway so the arm is never quite still.
+ */
+function armAngle() {
+  return channels.armRot + armFollow.angle + Math.sin(clock * 0.73) * 0.018
+}
+
+/** Where the middle of the palm is once the arm has turned. */
+function handPosition(angle: number) {
+  const cos = Math.cos(angle)
+  const sin = Math.sin(angle)
+  const hx = ARM.handX - ARM.pivotX
+  const hy = ARM.handY - ARM.pivotY
+  return { x: ARM.pivotX + hx * cos - hy * sin, y: ARM.pivotY + hx * sin + hy * cos }
+}
 
 function clamp(value: number, low: number, high: number) {
   return value < low ? low : value > high ? high : value
@@ -185,6 +286,34 @@ function faceFor(status: YXZPetStatus) {
 
 const TALK_FRAMES = ['mouth_talk_a', 'mouth_talk_b', 'mouth_talk_c']
 
+/**
+ * The sparkles that come off a waving hand.
+ *
+ * They are little four-pointed stars, drawn additively so that they read
+ * as light rather than as paint.
+ */
+function drawSparkles(context: CanvasRenderingContext2D) {
+  if (!sparkles.length || !sparkleHalo || !sparkleStar)
+    return
+  context.save()
+  for (const sparkle of sparkles) {
+    const fade = Math.max(0, Math.min(1, sparkle.life))
+    // The star grows as it brightens, which is what makes a burst read
+    // as a burst rather than as a set of dots.
+    const size = sparkle.size * (0.5 + fade * 0.5)
+    // The halo is added on top of whatever is behind it.
+    context.globalCompositeOperation = 'lighter'
+    context.globalAlpha = fade * 0.8
+    const haloSize = size * 3.4
+    context.drawImage(sparkleHalo, sparkle.x - haloSize / 2, sparkle.y - haloSize / 2, haloSize, haloSize)
+    // The star itself is painted, so that it reads on a white glove.
+    context.globalCompositeOperation = 'source-over'
+    context.globalAlpha = Math.min(1, fade * 1.15)
+    context.drawImage(sparkleStar, sparkle.x - size, sparkle.y - size, size * 2, size * 2)
+  }
+  context.restore()
+}
+
 function draw() {
   const element = canvas.value
   const context = element?.getContext('2d')
@@ -221,8 +350,6 @@ function draw() {
   const originX = width / 2 + offsetX - (ART_W * size) / 2
   const originY = height * 0.98 + offsetY - ART_H * size
 
-  const channels = motion.channels
-
   // --- the figure --------------------------------------------------------
   const breath = Math.sin(clock * 1.85)
   const sway = Math.sin(clock * 0.61)
@@ -255,6 +382,25 @@ function draw() {
   context.translate(-PIVOT_X, -PIVOT_Y)
 
   context.drawImage(body, 0, 0, ART_W, ART_H)
+
+  // --- the raised arm ----------------------------------------------------
+  // The arm turns on the hinge in the shoulder.  It is drawn over the
+  // body and under the cap that rides with it, and the cap is cut from
+  // the same pixels as the arm, so the joint can never open up.
+  const armImage = images.get('arm')
+  if (armImage) {
+    const angle = armAngle()
+    context.save()
+    context.translate(ARM.pivotX, ARM.pivotY)
+    context.rotate(angle)
+    context.translate(-ARM.pivotX, -ARM.pivotY)
+    context.drawImage(armImage, ARM.x, ARM.y, ARM.w, ARM.h)
+    const socketImage = images.get('socket')
+    if (socketImage)
+      context.drawImage(socketImage, ARM.x, ARM.y, ARM.w, ARM.h)
+    context.restore()
+    drawSparkles(context)
+  }
 
   // --- the halo ----------------------------------------------------------
   // The ring is welded into the body layer: the helmet is one whole
@@ -315,6 +461,48 @@ function tick(at: number) {
     clock += dt
     if (entrance < 1)
       entrance = Math.min(1, entrance + dt * 1.6)
+
+    // The arm trails the body.
+    //
+    // The picture of the arm is drawn inside the body's own rotation,
+    // so the lag has to be *subtracted*: the spring is pulled towards
+    // a part of the body's turn and only catches up a beat later.  A
+    // limb that turned with the body would look welded down; a limb
+    // that lags looks like it has weight of its own.
+    const bodyTurn = channels.bodyRot + Math.sin(clock * 0.61) * 0.011
+    const armTarget = -bodyTurn * 0.6
+    armFollow.velocity += ((armTarget - armFollow.angle) * 62 - armFollow.velocity * 11) * dt
+    armFollow.angle += armFollow.velocity * dt
+
+    // The sparkles a waving hand throws off.  They are born at the
+    // palm, drift outwards, and fall away under their own weight.
+    if (channels.handSpark > 0.04 && Math.random() < channels.handSpark * 0.32) {
+      const hand = handPosition(armAngle())
+      const spread = (Math.random() - 0.5) * 40
+      // The burst leans away from the body, so the sparkles clear the
+      // glove instead of sitting on top of it.
+      const heading = (Math.random() - 0.5) * Math.PI * 1.5 - 0.35
+      const speed = 55 + Math.random() * 90
+      sparkles.push({
+        x: hand.x + spread,
+        y: hand.y + spread * 0.6,
+        vx: Math.cos(heading) * speed,
+        vy: Math.sin(heading) * speed - 24,
+        life: 0.5 + Math.random() * 0.5,
+        size: 8 + Math.random() * 9,
+      })
+      if (sparkles.length > 26)
+        sparkles.splice(0, sparkles.length - 26)
+    }
+    for (let index = sparkles.length - 1; index >= 0; index--) {
+      const sparkle = sparkles[index]
+      sparkle.life -= dt
+      sparkle.x += sparkle.vx * dt
+      sparkle.y += sparkle.vy * dt
+      sparkle.vy += 70 * dt
+      if (sparkle.life <= 0)
+        sparkles.splice(index, 1)
+    }
   }
 
   // Where the eyes should be looking.
@@ -392,6 +580,7 @@ let observer: ResizeObserver | undefined
 
 onMounted(async () => {
   componentState.value = 'loading'
+  buildSparkleArt()
   try {
     await Promise.all(Object.entries(sources).map(async ([name, url]) => {
       images.set(name, await loadImage(url))
@@ -420,6 +609,13 @@ onUnmounted(() => {
 watch(() => props.status, (status) => {
   lastPointerAt = -10
   motion.setStatus(status)
+})
+
+// An action fires when the value changes.  Setting it back to nothing in
+// between lets the very same action be fired again.
+watch(() => props.action, (action) => {
+  if (action)
+    motion.play(action)
 })
 
 watch(() => props.paused, (paused) => {

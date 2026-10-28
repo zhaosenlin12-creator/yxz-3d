@@ -6,6 +6,7 @@ import type { SpeechProviderWithExtraOptions } from '@xsai-ext/providers/utils'
 import type { UnElevenLabsOptions } from 'unspeech'
 
 import type { YXZInteractionStatus } from '../../assets/yxz/interaction'
+import type { YXZPetFlourish } from '../../composables/use-yxz-pet-motion'
 import type { EmotionPayload } from '../../constants/emotions'
 
 import { errorMessageFrom } from '@moeru/std'
@@ -118,7 +119,20 @@ viewUpdateCleanups.push(live2dStore.onShouldUpdateView(async () => {
 const audioAnalyser = ref<AnalyserNode>()
 const nowSpeaking = ref(false)
 const yxzInteractionStatus = ref<YXZInteractionStatus>('idle')
+// The one-off action the pet is playing.  The value is cleared once the
+// action has been taken, so the same action can be fired again later.
+const yxzAction = ref<YXZPetFlourish | ''>('')
 let yxzStatusResetTimer: ReturnType<typeof setTimeout> | undefined
+
+function playYXZAction(action: YXZPetFlourish) {
+  yxzAction.value = ''
+  setTimeout(() => {
+    yxzAction.value = action
+    setTimeout(() => {
+      yxzAction.value = ''
+    }, 150)
+  }, 30)
+}
 const lipSyncStarted = ref(false)
 const lipSyncLoopId = ref<number>()
 const live2dLipSync = ref<Live2DLipSync>()
@@ -651,6 +665,8 @@ async function speakYXZWelcome() {
 
   welcomeSpeechBusy.value = true
   setYXZInteractionStatus('speaking')
+  // The character waves while it says hello.
+  playYXZAction('wave')
   playbackManager.stopAll('new-welcome')
 
   try {
@@ -899,6 +915,7 @@ defineExpose({
         min-w="50% <lg:full" min-h="100 sm:100"
         h-full w-full flex-1
         :status="yxzInteractionStatus"
+        :action="yxzAction"
         :speaking-level="mouthOpenSize"
         :message="assistantResponseText"
         :paused="paused"

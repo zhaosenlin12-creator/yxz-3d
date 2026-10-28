@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { YXZStatus } from '@proj-airi/stage-ui-three'
+import type { YXZPetFlourish } from '@proj-airi/stage-ui/composables/use-yxz-pet-motion'
 
 import { YXZPetScene } from '@proj-airi/stage-ui/components/scenes'
 import { ref } from 'vue'
@@ -18,6 +19,9 @@ const STATUS_LABELS: Record<YXZStatus, string> = {
 }
 
 const status = ref<YXZStatus>('idle')
+// The one-off actions the character can play.  The value is cleared
+// after a beat so that the same action can be fired twice in a row.
+const action = ref<YXZPetFlourish | ''>('')
 const speakingLevel = ref(0)
 const paused = ref(false)
 const mountState = ref<'pending' | 'loading' | 'mounted'>('pending')
@@ -43,6 +47,28 @@ function cycleStatus() {
   const next = STATUSES[(STATUSES.indexOf(status.value) + 1) % STATUSES.length]
   status.value = next
 }
+
+const ACTIONS: { name: YXZPetFlourish, label: string }[] = [
+  { name: 'wave', label: '挥手' },
+  { name: 'wave-hand', label: '摆手' },
+  { name: 'celebrate', label: '庆祝' },
+  { name: 'nod', label: '点头' },
+  { name: 'tilt', label: '歪头' },
+  { name: 'peek', label: '探头' },
+  { name: 'shrug', label: '耸肩' },
+  { name: 'stretch', label: '伸展' },
+]
+
+function playAction(name: YXZPetFlourish) {
+  action.value = ''
+  // A tick later the prop really changes, so the watcher fires.
+  setTimeout(() => {
+    action.value = name
+    setTimeout(() => {
+      action.value = ''
+    }, 120)
+  }, 20)
+}
 </script>
 
 <template>
@@ -51,6 +77,7 @@ function cycleStatus() {
       <YXZPetScene
         v-model:state="mountState"
         :status="status"
+        :action="action"
         :speaking-level="speakingLevel"
         :paused="paused"
         @error="loadError = String($event)"
@@ -70,6 +97,16 @@ function cycleStatus() {
         </button>
         <button type="button" @click="paused = !paused">
           {{ paused ? '继续' : '暂停' }}
+        </button>
+      </div>
+      <div class="actions">
+        <button
+          v-for="item in ACTIONS"
+          :key="item.name"
+          type="button"
+          @click="playAction(item.name)"
+        >
+          {{ item.label }}
         </button>
       </div>
       <dl class="readout">
@@ -127,6 +164,25 @@ function cycleStatus() {
 }
 
 .row button:hover { background: #e6f6fd; }
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+}
+
+.actions button {
+  padding: .3rem .55rem;
+  border: 1px solid #8fcbe4;
+  border-radius: .4rem;
+  background: #fff;
+  color: #087eae;
+  cursor: pointer;
+  font: inherit;
+  font-size: .78rem;
+}
+
+.actions button:hover { background: #e6f6fd; }
 
 .readout {
   display: grid;
