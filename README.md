@@ -146,16 +146,20 @@ pwsh -File start-all.ps1 -BackendPort 8100
 3. **激光切割卡片**：聊天输入区左下「+」→「激光切割卡片」→ 打开「激光切割工作台」五步流程（对话确定作品 → 生成作品预览 → 创作面板产出 3D → 导出切割 SVG → xTool 切割）→ 工作台「开始对话引导」把作品需求直接发给宜小智，逐轮确认后由智能体产出预览 → 预览卡下方「打开创作面板」批注编辑并生成 3D 效果 → 回到工作台导出切割文件（SVG mm 单位，含切割红线/雕刻绿线/定位十字）→ 检测本机激光软件 → 打开 xTool Studio / LightBurn
    - 卡片正面是**用户自己的作品图**，背面是**活动主视觉背景**，尺寸随背面模板（`activity_stage` 为 100 × 56.25 mm）
    - 背面模板随仓库发布在 `cartoon-print-studio/backend/assets/laser/`，后端启动时自动补齐到 `data/laser/template/`，克隆即可用
+   - **正面和背面都可以用 AI 现画**：工作台「导出激光切割卡片」里分别有「AI 生成正面」和「AI 生成背景」，用一句话描述想要的风格（例：深蓝科技感、星辰与电路板、卡通插画风），后端出图后自动登记为模板，随时可换；不生成也能用纯色版式
+   - 正面版式为**满幅作品 + 底部信息栏**（姓名大标题 / 身份学校 / 右侧联系方式 / 标语），不再左右硬分割
 4. **3D 打印作品**：聊天输入区左下「+」→「3D 打印作品」→ 打开「3D 打印工作台」，与激光切割共用同一条「对话引导 → 预览 → 创作面板 → 3D → 导出 STL → 切片打印」链路
-5. **预制模型**：「+」→「宜小智 3D 模型」→ 打开 `/yxz-vrm-preview` 直接看主项目同款 3D 形象
+5. **预制模型**：「+」→「宜小智 3D 模型」→ 打开 `/yxz-vrm-preview` 直接看主项目同款 3D 形象；工作台「宜小智预制 3D 模型示例」里的三个摆件（招手打招呼 / 双手叉腰 / 举手敬礼）就是**真正的宜小智机器人**，模型文件随仓库发布在 `presets/models/<pose>/`，可点「3D 预览」旋转查看、可直接下载 STL 去打印
+6. **生成 3D 的阶段进度**：点「开始生成 3D 模型」后，卡片会按「准备中 → 生成立体结构 → 上色与细节 → 打印优化 → 完成」分阶段推进，实时显示阶段、百分比和已用时长，3D 视图里同时给出设计稿预览；失败时卡片会明确报错并提供「再试一次」，不会一直卡在「正在制作效果」
 
 ---
 
 ## 七、GitHub 与隐私
 
 - 仓库：`https://github.com/zhaosenlin12-creator/yxz-3d.git`（分支 `main`）
-- ⚠️ **不入 GitHub**（.gitignore 已强制排除）：`keys.txt`、`software_paths.json`、`.glb/.obj/.stl` 大模型文件、本地 AI 权重
-- 克隆仓库后需从原电脑拷贝 `cartoon-print-studio\keys.txt`；角色大模型随 ZIP 交付
+- ⚠️ **不入 GitHub**（.gitignore 已强制排除）：`keys.txt`、`software_paths.json`、本地 AI 权重、运行期生成的名片背景图
+- **已入库**：`presets/models/` 里的宜小智预制摆件（GLB + STL + 缩略图）、`presets/images/` 角色渲染图、`cartoon-print-studio/backend/assets/laser/` 名片模板
+- 克隆仓库后需从原电脑拷贝 `cartoon-print-studio\keys.txt`；角色 VRM 主形象随 ZIP 交付
 - 提交前检查：`git status` 出现 `keys.txt` 即禁止 `git add`；勿删除根 `.gitignore` 中的 `**/keys.txt` 规则
 
 ## 八、大模型 / 运行数据（不入 GitHub）
@@ -167,7 +171,7 @@ pwsh -File start-all.ps1 -BackendPort 8100
 | 精灵切图脚本 | `airi/scripts/yxz-rebuild/cut_sprite_layers.py` | 从 `front-wave.png` 重新切层；改图后重跑即可再生成整套精灵 |
 | API keys | `cartoon-print-studio/keys.txt` | 随 ZIP；克隆后需手动放入 |
 | 名片模板 | `cartoon-print-studio/data/laser/template/activity_blue.png` | 缺失时后端 `/api/laser_card` 会报错 |
-| 预制摆件模型 | `presets/models/<pose>/*` | 缺失时 `/api/presets/models` 返回空数组 |
+| 预制摆件模型 | `presets/models/<pose>/*` | **已入库**（真正的宜小智机器人）；重跑脚本可重建：见下方「重建预制模型」 |
 | SD 1.5 权重 | `cartoon-print-studio/ai/forge-webui/models/Stable-diffusion/` | `fetch-models.ps1` 下载 |
 | SD 1.5 diffusers 配置 | `cartoon-print-studio/ai/forge-webui/backend/huggingface/runwayml/stable-diffusion-v1-5/` | `fetch-models.ps1` 下载；缺 `feature_extractor/preprocessor_config.json` 时本地 SD 起不来 |
 | Hunyuan3D-2 mini | `~/.cache/huggingface/hub/models--tencent--Hunyuan3D-2mini/` | `fetch-models.ps1` 下载 |
@@ -200,6 +204,36 @@ cartoon-print-studio\ai\forge-webui\venv\Scripts\python.exe `
 
 > 切图脚本用「头盔轮廓几何拟合」把光环和身体分开：**光环整张留在身体层**，
 > 所以呼吸/摇摆时两层绝不会错位；会动的只有叠加的辉光。
+
+---
+
+## 九·五、重建宜小智预制摆件模型
+
+`presets/models/<pose>/` 里的三个摆件（招手打招呼 / 双手叉腰 / 举手敬礼）是用真实角色渲染图跑
+**混元3D 云端** image-to-3D 得到的，不是手搓模型。重跑脚本：
+
+```powershell
+# 只做「AI 去掉头顶光环/星星」的图片清理
+cartoon-print-studio\ai\forge-webui\venv\Scripts\python.exe `
+    cartoon-print-studio\scripts\build_preset_models.py --stage images
+
+# 用清理后的图重建 3D 模型（走混元3D 云端，约 5 分钟/个）
+cartoon-print-studio\ai\forge-webui\venv\Scripts\python.exe `
+    cartoon-print-studio\scripts\build_preset_models.py --stage models
+
+# 只重调材质（不重新生成，几秒钟）
+cartoon-print-studio\ai\forge-webui\venv\Scripts\python.exe `
+    cartoon-print-studio\scripts\build_preset_models.py --stage retouch
+```
+
+几个关键点：
+
+- **光环必须先去掉**。头顶的光环和星星在 image-to-3D 时会粘到头盔上，把头盔劈成两半，
+  所以脚本先让 AI 把它们抹掉（结果落在 `presets/build/<pose>_clean.png`），再送去建模。
+- **默认关闭 PBR**（`--pbr` 可以打开）。PBR 导出把金属度烘焙成 1、粗糙度烘焙成 0，
+  渲染出来是一坨镜面铬；关掉之后才是设计稿里那种干净的白漆质感，文件还小三分之一。
+- **材质再抹一遍**。`mesh_postprocess.make_matte_material()` 会把金属度压到 0、粗糙度提到 0.62，
+  并丢掉那张全红的 metallic/roughness 贴图。
 
 ---
 

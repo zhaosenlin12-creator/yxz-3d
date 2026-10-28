@@ -5,11 +5,42 @@ import { tool } from '@xsai/tool'
 import { nanoid } from 'nanoid'
 import { z } from 'zod'
 
-import { buildYXZPreviewPrompt, createYXZCartoonModel, createYXZLaserCard, createYXZPreview, previewImageSrc } from '../composables/use-yxz-print-preview'
+import { buildYXZPreviewPrompt, createYXZCartoonModel, createYXZLaserBackground, createYXZLaserCard, createYXZPreview, previewImageSrc } from '../composables/use-yxz-print-preview'
 import { useYXZRequirementMemory } from '../composables/use-yxz-requirement-memory'
 import { useChatSessionStore } from '../stores/chat/session-store'
 
-const YXZ_MODEL_CONFIRMATION_RE = /生成|制作|做成|开始|确认|同意|可以|继续|好/
+/**
+ * Decide whether a visitor message really means "go ahead and build it".
+ *
+ * The old pattern matched any sentence containing 可以 / 继续 / 好, so a
+ * perfectly ordinary question such as "我可以继续微调的吗" started a
+ * multi-minute cloud build and left the card stuck on "正在制作效果".
+ * An approval now has to be either a short, unambiguous confirmation or a
+ * message that explicitly talks about the 3D model.
+ */
+const YXZ_MODEL_KEYWORD_RE = /3\s*d|三维|模型|建模|立体|打印件/i
+const YXZ_MODEL_QUESTION_RE = /[吗呢?？]|如何|怎么|为什么|多久|什么时候|是不是|好不好|行不行|要不要|会不会|难不难/
+const YXZ_MODEL_STRONG_RE = /生成|制作|开始|导出|建模/
+const YXZ_MODEL_NEGATION_RE = /不要|别|不用|先不|暂时不|还没想/
+const YXZ_SHORT_CONFIRM_RE = /^(?:[好行嗯要]|好的|好吧|可以|行吧|没问题|确认|同意|嗯嗯|ok|okay|yes|生成吧|做吧|开始吧|就这个|就它)[。.!！,，、~～\s]*$/i
+
+export function isYXZModelConfirmationText(text: string): boolean {
+  const value = (text ?? '').trim()
+  if (!value || value.length > 40)
+    return false
+  if (YXZ_SHORT_CONFIRM_RE.test(value))
+    return true
+  if (YXZ_MODEL_NEGATION_RE.test(value))
+    return false
+  if (!YXZ_MODEL_KEYWORD_RE.test(value))
+    return false
+  // An explicit action wins even with a polite tail ("可以帮我生成3D模型吗").
+  if (YXZ_MODEL_STRONG_RE.test(value))
+    return true
+  if (YXZ_MODEL_QUESTION_RE.test(value))
+    return false
+  return value.includes('做')
+}
 
 function appendLaserCardCard(input: {
   sessionId: string
@@ -64,8 +95,9 @@ function appendCreationCard(input: {
   preview: { index: number, src: string, caption: string }
   previews?: Array<{ index: number, src: string, caption: string }>
   model?: { modelUrl: string, stlUrl: string, glbUrl: string }
-  status: 'preview' | 'model-building' | 'model-ready'
+  status: 'preview' | 'model-building' | 'model-ready' | 'failed'
   progressMsg?: string
+  errorMsg?: string
 }) {
   const sessions = useChatSessionStore()
   const sessionId = sessions.activeSessionId
@@ -78,9 +110,11 @@ function appendCreationCard(input: {
     && message.yxzCreation.preview.src === input.preview.src)
   const content = input.status === 'model-ready'
     ? '3D 模型已完成，请查看方案卡片。'
-    : input.status === 'model-building'
-      ? (input.progressMsg || '正在制作 3D 模型，请耐心等待…')
-      : '预览已生成，请查看方案卡片。'
+    : input.status === 'failed'
+      ? (input.errorMsg || '3D 模型这次没能做好，可以再试一次。')
+      : input.status === 'model-building'
+        ? (input.progressMsg || '正在制作 3D 模型，请耐心等待…')
+        : '预览已生成，请查看方案卡片。'
   const message = {
     role: 'assistant' as const,
     content,
@@ -96,6 +130,7 @@ function appendCreationCard(input: {
       model: input.model,
       status: input.status,
       progressMsg: input.progressMsg,
+      errorMsg: input.errorMsg,
     },
     createdAt: Date.now(),
     id: existingIndex >= 0 ? messages[existingIndex].id : nanoid(),
@@ -107,6 +142,50 @@ function appendCreationCard(input: {
   }
   else {
     sessions.appendSessionMessage(sessionId, message)
+  }
+}
+
+/**
+ * Run one 3D build and keep the chat card in sync with it.
+ *
+ * The card is switched to a failed state when the backend gives up, so a
+ * build that dies halfway can never leave the visitor staring at a
+ * "正在制作效果" card that never finishes.
+ */
+async function runYXZModelBuild(input: {
+  sessionId?: string
+  description: string
+  options: string[]
+  preview: { index: number, src: string, caption: string }
+  imageIndex: number
+}): Promise<YXZModelResponse> {
+  const card = {
+    sessionId: input.sessionId,
+    description: input.description,
+    options: input.options,
+    preview: input.preview,
+  }
+  if (!input.sessionId)
+    throw new Error('缺少预览会话，无法生成 3D 模型')
+
+  appendCreationCard({ ...card, status: 'model-building' })
+  try {
+    const result = await createYXZCartoonModel({
+      sessionId: input.sessionId,
+      imageIndex: input.imageIndex,
+      onProgress: progress => appendCreationCard({
+        ...card,
+        status: 'model-building',
+        progressMsg: progress.message,
+      }),
+    })
+    appendCreationCard({ ...card, model: result, status: 'model-ready' })
+    return result
+  }
+  catch (error) {
+    const message = error instanceof Error ? error.message : '3D 生成失败，请稍后重试'
+    appendCreationCard({ ...card, status: 'failed', errorMsg: message })
+    throw error
   }
 }
 
@@ -136,7 +215,7 @@ export async function generateYXZModelFromConfirmation(sessionId: string, userTe
   if (!creation)
     throw new Error('请先在当前对话生成预览图')
 
-  if (!YXZ_MODEL_CONFIRMATION_RE.test(userText))
+  if (!isYXZModelConfirmationText(userText))
     throw new Error('请先明确确认制作 3D 模型')
   // The caller normally supplies the active chat-session id. A tool caller
   // may instead pass the preview backend session id, so accept either while
@@ -144,37 +223,47 @@ export async function generateYXZModelFromConfirmation(sessionId: string, userTe
   if (!creation.sessionId || (sessionId !== activeSessionId && sessionId !== creation.sessionId))
     throw new Error('预览会话已失效，请重新生成预览')
 
-  appendCreationCard({
+  const result = await runYXZModelBuild({
     sessionId: creation.sessionId,
     description: creation.description,
     options: creation.options,
     preview: creation.preview,
-    status: 'model-building',
-  })
-  const result = await createYXZCartoonModel({
-    sessionId: creation.sessionId,
     imageIndex: creation.preview.index,
-    onProgress: progress => appendCreationCard({
-      sessionId: creation.sessionId,
-      description: creation.description,
-      options: creation.options,
-      preview: creation.preview,
-      status: 'model-building',
-      progressMsg: progress.message,
-    }),
-  })
-  appendCreationCard({
-    sessionId: creation.sessionId,
-    description: creation.description,
-    options: creation.options,
-    preview: creation.preview,
-    model: result,
-    status: 'model-ready',
   })
   return {
     result,
     message: '3D 模型已完成，请查看方案卡片。',
   }
+}
+
+/**
+ * Rebuild the 3D model of an existing preview card.
+ *
+ * Used by the "再试一次" button on a card whose build failed: the card keeps
+ * the same preview, so the visitor does not have to describe the product
+ * again.
+ */
+export async function retryYXZModelBuild(previewSrc: string): Promise<void> {
+  const sessions = useChatSessionStore()
+  const sessionId = sessions.activeSessionId
+  if (!sessionId)
+    throw new Error('当前没有可用的宜小智会话')
+
+  const messages = sessions.getSessionMessages(sessionId)
+  const card = [...messages].reverse().find((message): message is ChatAssistantMessage & { createdAt?: number } => message.role === 'assistant'
+    && message.yxzCreation?.kind === 'yxz-creation'
+    && message.yxzCreation.preview.src === previewSrc)
+  const creation = card?.yxzCreation
+  if (!creation?.sessionId)
+    throw new Error('预览会话已失效，请重新生成预览')
+
+  await runYXZModelBuild({
+    sessionId: creation.sessionId,
+    description: creation.description,
+    options: creation.options,
+    preview: creation.preview,
+    imageIndex: creation.preview.index,
+  })
 }
 
 export async function createYXZCreationTools() {
@@ -190,12 +279,19 @@ export async function createYXZCreationTools() {
         slogan: z.string().max(30).describe('卡片标语，默认“数理创未来 智慧启新程”'),
         previewSessionId: z.string().max(40).describe('作品预览会话 id（yxz_generatePreview 返回的 sessionId），作为卡片正面图；没有则留空'),
         previewImageIndex: z.number().int().min(0).max(9).describe('作品预览图序号，默认 0'),
+        background: z.string().max(120).optional().describe('卡片背面的背景描述（例如“深蓝科技感，星辰与电路板”）；用户没有特别要求就留空使用默认活动背景'),
       }).strict(),
-      execute: async ({ name, title, unit, contact, slogan, previewSessionId, previewImageIndex }) => {
+      execute: async ({ name, title, unit, contact, slogan, previewSessionId, previewImageIndex, background }) => {
         const artworkSessionId = (previewSessionId ?? '').trim()
         const artworkImageIndex = previewImageIndex ?? 0
         let result: Awaited<ReturnType<typeof createYXZLaserCard>>
         try {
+          let backTemplate: string | undefined
+          const backgroundPrompt = (background ?? '').trim()
+          if (backgroundPrompt) {
+            const generated = await createYXZLaserBackground(backgroundPrompt)
+            backTemplate = generated.id
+          }
           result = await createYXZLaserCard({
             sessionId: artworkSessionId ? `${artworkSessionId}_card` : undefined,
             artworkSessionId: artworkSessionId || undefined,
@@ -205,6 +301,7 @@ export async function createYXZCreationTools() {
             unit,
             contact,
             slogan,
+            ...(backTemplate ? { backTemplate } : {}),
           })
         }
         catch (error) {
@@ -291,36 +388,16 @@ export async function createYXZCreationTools() {
         const cardCreatedAt = card.createdAt ?? 0
         if (!latestUser || (latestUser.createdAt ?? 0) <= cardCreatedAt)
           throw new Error('请先查看预览，再回复是否制作 3D 模型')
-        if (!YXZ_MODEL_CONFIRMATION_RE.test(userText))
+        if (!isYXZModelConfirmationText(userText))
           throw new Error('请先让用户明确确认制作 3D 模型')
         if (!creation.sessionId || creation.sessionId !== sessionId)
           throw new Error('预览会话已失效，请重新生成预览')
-        appendCreationCard({
+        const result = await runYXZModelBuild({
           sessionId: creation.sessionId,
           description: creation.description,
           options: creation.options,
           preview: creation.preview,
-          status: 'model-building',
-        })
-        const result = await createYXZCartoonModel({
-          sessionId: creation.sessionId,
           imageIndex,
-          onProgress: progress => appendCreationCard({
-            sessionId: creation.sessionId,
-            description: creation.description,
-            options: creation.options,
-            preview: creation.preview,
-            status: 'model-building',
-            progressMsg: progress.message,
-          }),
-        })
-        appendCreationCard({
-          sessionId: creation.sessionId,
-          description: creation.description,
-          options: creation.options,
-          preview: creation.preview,
-          model: result,
-          status: 'model-ready',
         })
         return {
           status: 'model-ready',

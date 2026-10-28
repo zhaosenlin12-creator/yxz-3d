@@ -13,7 +13,7 @@ import { ref, toRaw } from 'vue'
 import { useAnalytics } from '../composables'
 import { useLlmmarkerParser } from '../composables/llm-marker-parser'
 import { categorizeResponse, createStreamingCategorizer } from '../composables/response-categoriser'
-import { generateYXZModelFromConfirmation } from '../tools/yxz-creation'
+import { generateYXZModelFromConfirmation, isYXZModelConfirmationText } from '../tools/yxz-creation'
 import { buildContextPromptMessage } from './chat/context-prompt'
 import { createDatetimeContext, createMinecraftContext } from './chat/context-providers'
 import { useChatContextStore } from './chat/context-store'
@@ -41,7 +41,6 @@ const YXZ_SYSTEM_GUIDANCE = `你是“宜小智AI智能创造系统”的宜小�
 5. 用户确认预览后再生成 3D 模型；未经用户确认不得自动打印、登录或承诺取件。
 6. 激光切割卡片：用户想做卡片/名片/桌牌等平面切割物料时，先用 yxz_generatePreview 把他的作品做成预览图，再问清姓名、身份、学校和联系方式，最后调用 yxz_laserCard，并把 yxz_generatePreview 返回的 sessionId 作为 previewSessionId 传进去。卡片尺寸固定、背面是活动主视觉背景图、正面是他的作品预览图。生成后告诉他三条路：预览卡里下载切割 SVG、用 xTool 打开切割、或点「打开创作面板」继续编辑并产出 3D 效果。
 7. 3D 打印件与激光卡片是同一条链路：对话确定需求 → 生成预览图 → 3D 模型 → 下载 STL 交给切片软件。不要跳过预览直接给模型。`
-const YXZ_MODEL_CONFIRMATION_RE = /生成|制作|做成|开始|确认|同意|可以|继续|好/
 
 interface SendOptions {
   model: string
@@ -244,8 +243,13 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       const latestPreviewCard = [...sessionMessagesForSend].reverse().find(message => message.role === 'assistant'
         && message.yxzCreation?.kind === 'yxz-creation'
         && message.yxzCreation.status === 'preview')
+      // A build that is still running must not be started a second time.
+      const buildInFlight = sessionMessagesForSend.some(message => message.role === 'assistant'
+        && message.yxzCreation?.kind === 'yxz-creation'
+        && message.yxzCreation.status === 'model-building')
       const isYXZModelConfirmation = !!latestPreviewCard
-        && YXZ_MODEL_CONFIRMATION_RE.test(sendingMessage)
+        && !buildInFlight
+        && isYXZModelConfirmationText(sendingMessage)
 
       if (isYXZModelConfirmation) {
         try {

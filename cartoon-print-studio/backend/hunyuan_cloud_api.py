@@ -237,15 +237,15 @@ def image_to_model(image_path: str, out_dir: str, *,
                    enable_pbr: bool = True,
                    face_count: int = 500000,
                    max_wait: float = 480.0,
-                   target_height_mm: float = 70.0) -> Dict[str, Any]:
+                   target_height_mm: float = 70.0,
+                   on_poll=None) -> Dict[str, Any]:
     """Full pipeline: submit -> poll -> download -> pick glb -> process for print."""
-    import shutil
     import zipfile
     os.makedirs(out_dir, exist_ok=True)
     job_id = submit_image_to_model(
         image_path, model=model, enable_pbr=enable_pbr, face_count=face_count,
     )
-    resp = poll_until_done(job_id, max_wait=max_wait)
+    resp = poll_until_done(job_id, max_wait=max_wait, on_poll=on_poll)
 
     files3d = resp.get("ResultFile3Ds") or []
     if not files3d:
@@ -255,27 +255,43 @@ def image_to_model(image_path: str, out_dir: str, *,
     url = glb_entry.get("Url")
     if not url:
         raise RuntimeError(f"hunyuan3d result has no Url: {glb_entry}")
-    zip_path = os.path.join(out_dir, "hunyuan3d_result.zip")
-    print(f"[hunyuan3d] downloading result zip from COS ...", flush=True)
-    size = _download(url, zip_path)
+    blob_path = os.path.join(out_dir, "hunyuan3d_result.bin")
+    print(f"[hunyuan3d] downloading result from COS ...", flush=True)
+    size = _download(url, blob_path)
     print(f"[hunyuan3d] downloaded {size} bytes", flush=True)
 
+    # Depending on the job the service hands back either a bare .glb or a zip
+    # that contains one.  Detect the container from the magic bytes instead of
+    # trusting the file name, otherwise a plain GLB download blows up with
+    # "File is not a zip file".
     glb_src = None
-    with zipfile.ZipFile(zip_path, "r") as z:
-        names = z.namelist()
-        for n in names:
-            if n.lower().endswith(".glb"):
-                glb_src = os.path.join(out_dir, "result" + os.path.splitext(n)[1])
-                with open(glb_src, "wb") as f:
-                    f.write(z.read(n))
-                break
-        if glb_src is None:
-            # extract everything and look for a glb
-            z.extractall(out_dir)
+    with open(blob_path, "rb") as handle:
+        magic = handle.read(4)
+    if magic == b"glTF":
+        glb_src = os.path.join(out_dir, "result.glb")
+        if os.path.isfile(glb_src):
+            os.remove(glb_src)
+        os.rename(blob_path, glb_src)
+    else:
+        zip_path = os.path.join(out_dir, "hunyuan3d_result.zip")
+        if os.path.isfile(zip_path):
+            os.remove(zip_path)
+        os.rename(blob_path, zip_path)
+        with zipfile.ZipFile(zip_path, "r") as z:
+            names = z.namelist()
             for n in names:
                 if n.lower().endswith(".glb"):
-                    glb_src = os.path.join(out_dir, n)
+                    glb_src = os.path.join(out_dir, "result.glb")
+                    with open(glb_src, "wb") as f:
+                        f.write(z.read(n))
                     break
+            if glb_src is None:
+                # extract everything and look for a glb
+                z.extractall(out_dir)
+                for n in names:
+                    if n.lower().endswith(".glb"):
+                        glb_src = os.path.join(out_dir, n)
+                        break
     if glb_src is None:
         raise RuntimeError(f"hunyuan3d zip contains no .glb: {names}")
     info = process_glb(glb_src, out_dir, target_height_mm=target_height_mm)

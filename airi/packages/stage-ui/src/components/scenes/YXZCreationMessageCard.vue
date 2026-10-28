@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 
 import { yxzPreviewPageUrl } from '../../composables/use-yxz-print-preview'
+import { retryYXZModelBuild } from '../../tools/yxz-creation'
 
 export interface YXZCardPreviewItem {
   src: string
@@ -16,14 +17,16 @@ const props = withDefaults(defineProps<{
   stlUrl?: string
   sessionId?: string
   interactive?: boolean
-  status?: 'preview' | 'model-building' | 'model-ready' | 'adopted' | 'redescribe'
+  status?: 'preview' | 'model-building' | 'model-ready' | 'failed' | 'adopted' | 'redescribe'
   progressMsg?: string
+  errorMsg?: string
   previews?: YXZCardPreviewItem[]
 }>(), {
   description: '',
   interactive: true,
   status: 'preview',
   progressMsg: '',
+  errorMsg: '',
   previews: () => [],
 })
 
@@ -32,6 +35,8 @@ const emit = defineEmits<{
   (event: 'redescribe'): void
 }>()
 const copied = ref(false)
+const retrying = ref(false)
+const retryError = ref('')
 const modelPreviewUrl = computed(() => props.modelUrl ? yxzPreviewPageUrl(props.modelUrl) : '')
 
 const gallery = computed<YXZCardPreviewItem[]>(() => {
@@ -81,12 +86,30 @@ const badgeText = computed(() => {
     return '模型已完成'
   if (props.status === 'model-building')
     return '制作中…'
+  if (props.status === 'failed')
+    return '这次没做成功'
   if (props.status === 'adopted')
     return '已采用'
   if (props.status === 'redescribe')
     return '已重新描述'
   return '可继续制作'
 })
+
+async function retryBuild() {
+  if (retrying.value || !props.previewSrc)
+    return
+  retrying.value = true
+  retryError.value = ''
+  try {
+    await retryYXZModelBuild(props.previewSrc)
+  }
+  catch (error) {
+    retryError.value = error instanceof Error ? error.message : '这次没能做好，可以再试一次'
+  }
+  finally {
+    retrying.value = false
+  }
+}
 
 async function copyPreviewAddress() {
   if (!modelPreviewUrl.value)
@@ -118,6 +141,14 @@ async function copyPreviewAddress() {
         <div class="yxz-creation-card-building-bar" />
       </div>
     </div>
+    <div v-else-if="status === 'failed'" class="yxz-creation-card-building is-failed">
+      <span class="yxz-creation-card-building-dot" />
+      <span>{{ errorMsg || '这次没能做好，可以再试一次。' }}</span>
+      <button type="button" class="yxz-creation-card-secondary" :disabled="retrying" @click="retryBuild">
+        {{ retrying ? '正在重试…' : '再试一次' }}
+      </button>
+      <small v-if="retryError" class="yxz-creation-card-retry-error">{{ retryError }}</small>
+    </div>
     <img
       :src="previewSrc"
       :alt="caption"
@@ -141,7 +172,7 @@ async function copyPreviewAddress() {
     <p v-if="description" class="yxz-creation-card-description">
       {{ description }}
     </p>
-    <div v-if="interactive && status !== 'model-building'" class="yxz-creation-card-actions">
+    <div v-if="interactive && status !== 'model-building' && status !== 'failed'" class="yxz-creation-card-actions">
       <button type="button" class="yxz-creation-card-primary" @click="emit('adopt')">
         采用这个方案
       </button>
@@ -333,6 +364,21 @@ async function copyPreviewAddress() {
   display: flex;
   align-items: center;
   gap: .45rem;
+}
+
+.yxz-creation-card-building.is-failed {
+  background: rgba(220, 60, 60, .12);
+  color: #b3261e;
+}
+
+.yxz-creation-card-building.is-failed .yxz-creation-card-building-dot {
+  background: #d33;
+  animation: none;
+}
+
+.yxz-creation-card-retry-error {
+  font-size: .7rem;
+  opacity: .85;
 }
 
 .yxz-creation-card-building-track {

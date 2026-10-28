@@ -131,6 +131,7 @@ const hideInternalFailure = computed(() => !creation.value && !laserCard.value
             :session-id="creation.sessionId"
             :status="creation.status"
             :progress-msg="creation.progressMsg"
+            :error-msg="creation.errorMsg"
             :interactive="false"
             class="mt-3"
           />

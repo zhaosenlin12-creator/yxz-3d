@@ -782,11 +782,11 @@ def previews(req: PreviewsReq):
         )
     except Exception as e:
         traceback.print_exc()
-        pg.fail(f"previews 失败: {e}")
-        raise HTTPException(500, f"previews error: {e}")
+        pg.fail("这次没能生成出预览图，请再试一次")
+        raise HTTPException(500, "这次没能生成出预览图，请再试一次")
     if not results:
-        pg.fail("previews 全部失败")
-        raise HTTPException(500, "no previews generated (all providers failed)")
+        pg.fail("这次没能生成出预览图，请再试一次")
+        raise HTTPException(500, "这次没能生成出预览图，请再试一次")
     items = []
     n_skipped = 0
     for i, (blob, tag) in enumerate(results):
@@ -800,8 +800,8 @@ def previews(req: PreviewsReq):
                       "b64": base64.b64encode(blob).decode(),
                       "path": f"/api/data/{sid}/previews/img_{i}.png"})
     if not items:
-        pg.fail("全部失败,无可用图")
-        raise HTTPException(500, "all providers returned no images for this batch")
+        pg.fail("这次没能生成出预览图，请再试一次")
+        raise HTTPException(500, "这次没能生成出预览图，请再试一次")
     pg.done(f"已生成 {len(items)} 张" + (f" ({n_skipped} 张跳过)" if n_skipped else ""))
     with open(os.path.join(sd, "prompt.txt"), "w", encoding="utf-8") as f:
         f.write(req.prompt)
@@ -844,12 +844,12 @@ def refine_preview_endpoint(req: RefineReq):
     try:
         blob, tag = api_image.refine_preview(reference, req.instruction, sid=sid)
     except RuntimeError as e:
-        pg.fail(f"按批注修改失败: {e}")
-        raise HTTPException(502, f"AI 按批注修改失败：{e}")
+        pg.fail("这次没能按批注修改成功，请再试一次")
+        raise HTTPException(502, "这次没能按批注修改成功，请再试一次")
     except Exception as e:
         traceback.print_exc()
-        pg.fail(f"按批注修改异常: {e}")
-        raise HTTPException(500, f"AI 按批注修改异常：{e}")
+        pg.fail("这次没能按批注修改成功，请再试一次")
+        raise HTTPException(500, "这次没能按批注修改成功，请再试一次")
 
     out_path = os.path.join(pdir, "refined_0.png")
     with open(out_path, "wb") as f:
@@ -868,9 +868,9 @@ def refine_preview_endpoint(req: RefineReq):
 
 @app.post("/api/3d")
 def to_3d(req: ThreeDReq):
-    pg = progress.Progress(req.session_id, "3d-triposr")
+    pg = progress.Progress(req.session_id, "3d-triposr", reset=True)
     os.environ["PROGRESS_SID"] = req.session_id
-    pg.emit("preprocess", 10, "正在预处理图像（背景移除）")
+    pg.emit("preprocess", 10, "正在处理你的设计稿…", "queued")
     sd = session_dir(req.session_id)
     src = os.path.join(sd, "previews", f"img_{req.image_index}.png")
     if not os.path.isfile(src):
@@ -881,7 +881,7 @@ def to_3d(req: ThreeDReq):
         info = triposr_runner.generate_3d(src, out)
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(500, f"triposr error: {e}")
+        raise HTTPException(500, "这次没能生成出模型，请再试一次")
     # Re-export cleaned mesh (single connected body, flat base on z=0).
     try:
         import trimesh
@@ -924,8 +924,8 @@ def to_3d_cartoon(req: ThreeDCartoonReq):
     Always succeeds, always looks like the cartoon, always prints cleanly.
     This is the recommended default for cute cartoon characters.
     """
-    pg = progress.Progress(req.session_id, "3d-cartoon")
-    pg.emit("preprocess", 10, "正在读取预览图")
+    pg = progress.Progress(req.session_id, "3d-cartoon", reset=True)
+    pg.emit("preprocess", 10, "正在读取你的设计稿…", "queued")
     sd = session_dir(req.session_id)
     src = os.path.join(sd, "previews", f"img_{req.image_index}.png")
     if req.custom_image:
@@ -948,7 +948,7 @@ def to_3d_cartoon(req: ThreeDCartoonReq):
         raise HTTPException(404, "preview not found")
     out = os.path.join(sd, "model")
     os.makedirs(out, exist_ok=True)
-    pg.emit("layer", 40, f"构建 {req.layers} 层 3D 浮雕")
+    pg.emit("layer", 40, f"正在把设计稿叠成 {req.layers} 层立体浮雕…", "geometry")
     try:
         info = mesh_postprocess.cartoon_3d_figurine(
             src, out,
@@ -967,7 +967,7 @@ def to_3d_cartoon(req: ThreeDCartoonReq):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, f"cartoon relief error: {e}")
-    pg.done(f"导出完成 ({info['faces']:,} 面)")
+    pg.done("立体模型已经做好啦")
     return {
         "session_id": req.session_id,
         **info,
@@ -1032,14 +1032,14 @@ def _previews_v2_worker(req: PreviewsV2Req, sid: str):
             size='1024x1024', sid=sid,
         )
     except Exception as e:
-        pg.fail(f'图片生成失败: {e}')
+        pg.fail(f'预览图生成失败：{e}')
         return
     if not raw_items:
-        pg.fail('没有生成出图片')
+        pg.fail('这次没能生成出预览图，请再试一次')
         return
     items, n_saved, n_failed = _save_preview_items(raw_items, pdir, captions, sub_prompts, sid, req.n, pg)
     if not items:
-        pg.fail('所有图片都生成失败,请检查网络/key 配置')
+        pg.fail('图片服务暂时不可用，请稍后再试')
         return
     if n_failed:
         thinking.append(f"图片来源: {img_source} ({n_saved}/{req.n} 张成功,{n_failed} 张失败)")
@@ -1052,7 +1052,7 @@ def _previews_v2_worker(req: PreviewsV2Req, sid: str):
     with open(os.path.join(sd, "specs.json"), "w", encoding="utf-8") as f:
         json.dump([{"caption": c, "sub_prompt": p} for c, p in zip(captions, sub_prompts)],
                   f, ensure_ascii=False, indent=2)
-    pg.done(f'预览 {len(items)}/{req.n} 张完成（来源 {img_source}）')
+    pg.done(f'预览 {len(items)}/{req.n} 张完成')
 @app.post("/api/previews_v2")
 def previews_v2(req: PreviewsV2Req):
     """Stage 2: 先 think，再批量出图。立刻返回 sid，后续进度通过 /api/progress/{sid} 拉取。"""
@@ -1064,7 +1064,7 @@ def previews_v2(req: PreviewsV2Req):
     sd = session_dir(sid)
     os.makedirs(sd, exist_ok=True)
     # Write a placeholder so the poller sees *something* immediately.
-    progress.Progress(sid, 'previews').emit('start', 0, '开始 previews')
+    progress.Progress(sid, 'previews')
     # Fire the real work on a thread. Uvicorn workers are sync, so we use a
     # background thread; daemon=True so it dies with the process.
     threading.Thread(target=_previews_v2_worker, args=(req, sid), daemon=True).start()
@@ -1207,7 +1207,7 @@ def to_3d_v2(req: ThreeDV2Req):
         info = triposr_runner.generate_3d(view_paths, out, mc_res=128, threshold=15.0)
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(500, f"multi-view triposr error: {e}")
+        raise HTTPException(500, "这次没能生成出模型，请再试一次")
     return {
         "session_id": req.session_id,
         "image_index": req.image_index,
@@ -1236,7 +1236,7 @@ class ThreeDHYReq(BaseModel):
 @app.post("/api/3d_hy")
 def to_3d_hy(req: ThreeDHYReq):
     pg = progress.Progress(req.session_id, "3d-hunyuan")
-    pg.emit("warmup", 5, "检查 Hunyuan 模型")
+    pg.emit("warmup", 5, "正在准备建模引擎…", "queued")
     os.environ["PROGRESS_SID"] = req.session_id
     """High-quality 3D using Hunyuan3D-2 mini (Tencent 3.5B image-to-3D model).
     First call loads the model (~3 min). Subsequent calls reuse GPU weights.
@@ -1256,7 +1256,7 @@ def to_3d_hy(req: ThreeDHYReq):
         )
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(500, f"hunyuan3d-2mini error: {e}")
+        raise HTTPException(500, "这次没能生成出模型，请再试一次")
     # Re-export cleaned mesh: drop debris, keep largest body, sit on z=0, add base.
     try:
         import trimesh
@@ -1285,18 +1285,17 @@ def to_3d_tripo(req: ThreeDTripoReq):
     convert to STL/OBJ/GLB for printing + viewing.
     """
     if not tripo_api.API_KEY:
-        raise HTTPException(503, "TRIPO3D key not configured")
-    pg = progress.Progress(req.session_id, "3d-tripo")
+        raise HTTPException(503, "3D 生成服务暂时不可用，请检查服务端密钥配置")
+    pg = progress.Progress(req.session_id, "3d-tripo", reset=True)
     # Use cached balance to avoid hanging on flaky network
     bal = _cached_tripo_balance()
     credits = None
     if isinstance(bal, dict) and bal.get("ok"):
         credits = int(bal.get("balance", 0))
     if credits is not None and credits < 30:
-        pg.fail(f"Tripo 额度不足 ({credits})")
-        raise HTTPException(402, f"Tripo 额度不足 ({credits})")
-    credit_msg = f"余额 {credits} credits" if credits is not None else "余额查询跳过"
-    pg.emit("upload", 5, f"上传参考图到 Tripo3D（{credit_msg}）")
+        pg.fail("生成额度暂时用完了，请稍后再试一次")
+        raise HTTPException(402, "3D 生成额度暂时用完了，请稍后再试一次")
+    pg.emit("upload", 5, "正在上传你的设计稿…", "queued")
     sd = session_dir(req.session_id)
     src = os.path.join(sd, "previews", f"img_{req.image_index}.png")
     if not os.path.isfile(src):
@@ -1310,11 +1309,10 @@ def to_3d_tripo(req: ThreeDTripoReq):
         except Exception:
             pct = 0
         status = (t.get("status") or "running").upper()
-        pg.emit(f"tripo-{status}", max(10, min(95, pct)), f"Tripo3D 生成中 {pct}%")
+        pg.emit(f"tripo-{status}", max(10, min(95, pct)), "正在生成立体结构…", "geometry")
 
     def on_net_fail(fail_count, last_err):
-        msg = f"网络波动第 {fail_count} 次,继续等待 Tripo3D ({type(last_err).__name__})"
-        pg.emit("tripo-net-flicker", 80, msg)
+        pg.emit("tripo-net-flicker", 80, "网络有点慢，正在继续等待…", "geometry")
 
     t0 = time.time()
     _orig_poll = tripo_api.poll_until_done
@@ -1343,10 +1341,11 @@ def to_3d_tripo(req: ThreeDTripoReq):
                     recovered = _json.load(_f)
         except Exception:
             pass
-        hint = ""
         if recovered and recovered.get("task_id"):
-            hint = f" (task_id={recovered['task_id']} 仍在云端,可稍后查询)"
-        pg.fail(f"Tripo3D 失败: {e}{hint}")
+            # The task id only helps the operator; it must not reach the
+            # visitor, who should just see a friendly retry hint.
+            print(f"[tripo3d] recoverable task_id={recovered['task_id']}", flush=True)
+        pg.fail("这次没能生成出模型，请再试一次")
         raise HTTPException(
             status_code=500,
             detail={
@@ -1363,9 +1362,9 @@ def to_3d_tripo(req: ThreeDTripoReq):
 
     pbr_glb = result["files"].get("model_pbr.glb") or result["files"].get("model.glb")
     if not pbr_glb or not os.path.isfile(pbr_glb):
-        pg.fail("Tripo3D 未产出 GLB")
-        raise HTTPException(500, "tripo3d: no GLB in result")
-    pg.emit("postprocess", 96, "后处理: 修洞、居中、缩放到打印尺寸")
+        pg.fail("这次没能生成出模型，请再试一次")
+        raise HTTPException(500, "这次没能生成出模型，请再试一次")
+    pg.emit("postprocess", 96, "正在优化模型，方便直接打印…", "optimizing")
     try:
         printable = tripo_api.process_for_print(
             pbr_glb, out,
@@ -1374,14 +1373,14 @@ def to_3d_tripo(req: ThreeDTripoReq):
         )
     except Exception as e:
         traceback.print_exc()
-        pg.fail(f"后处理失败: {e}")
+        pg.fail(f"模型整理时出了点问题，请再试一次（{e}）")
         raise HTTPException(500, f"postprocess error: {e}")
 
     faces = int(printable.get("faces", 0))
     vertices = int(printable.get("vertices", 0))
     ext = printable.get("extents_mm", "0,0,0").split(",")
     extents_mm = [float(x) for x in ext] + [0.0] * (3 - len(ext))
-    pg.done(f"Tripo3D 真 3D 完成 ({faces} 面, {extents_mm[1]:.0f}mm 高)")
+    pg.done(f"3D 模型已经做好啦（高 {extents_mm[1]:.0f}mm）")
     return {
         "session_id": req.session_id,
         "engine": "tripo3d",
@@ -1419,8 +1418,8 @@ def to_3d_hycloud(req: ThreeDHYCloudReq):
     import hunyuan_cloud_api as hyc
     keys = hyc.health()
     if not keys["key_loaded"]:
-        raise HTTPException(503, "混元3D 密钥未配置（keys.txt 需要 hunyuan3d-secret-id / -key）")
-    pg = progress.Progress(req.session_id, "3d-hunyuan-cloud")
+        raise HTTPException(503, "3D 生成服务暂时不可用，请检查服务端密钥配置")
+    pg = progress.Progress(req.session_id, "3d-hunyuan-cloud", reset=True)
     sd = session_dir(req.session_id)
     src = os.path.join(sd, "previews", f"img_{req.image_index}.png")
     if not os.path.isfile(src):
@@ -1428,18 +1427,19 @@ def to_3d_hycloud(req: ThreeDHYCloudReq):
     out = os.path.join(sd, "model")
     os.makedirs(out, exist_ok=True)
 
+    t0 = time.time()
+
     def on_poll(resp):
         try:
             status = str(resp.get("Status", "")).upper()
-            credits = resp.get("ResultCreditConsumed")
-            msg = f"混元3D 云端生成中（{status}）"
-            if credits:
-                msg += f"，已消耗 {credits} 积分"
-            pg.emit(f"hunyuan3d-{status.lower()}", 50, msg)
+            # Ramp the bar while the cloud job renders so the visitor sees the
+            # model actually progressing instead of a frozen 0%.
+            elapsed = time.time() - t0
+            pct = 15 + min(70, int(elapsed * 70.0 / 300.0))
+            pg.emit(f"hunyuan3d-{status.lower()}", pct, "正在生成立体结构…", "geometry")
         except Exception:
             pass
 
-    t0 = time.time()
     try:
         result = hyc.image_to_model(
             src, out,
@@ -1448,18 +1448,20 @@ def to_3d_hycloud(req: ThreeDHYCloudReq):
             face_count=req.face_count,
             max_wait=420.0,
             target_height_mm=req.target_height_mm,
+            on_poll=on_poll,
         )
     except Exception as e:
         traceback.print_exc()
-        pg.fail(f"混元3D 云端失败: {e}")
-        raise HTTPException(500, {"error": f"hunyuan3d-cloud error: {e}", "engine": "hunyuan3d-cloud"})
+        pg.fail(f"这次没能生成出模型，请再试一次（{e}）")
+        raise HTTPException(500, {"error": "这次没能生成出模型，请再试一次"})
     faces = int(result.get("faces", 0))
     ext = result.get("extents_mm", "0,0,0")
     if isinstance(ext, list):
         ext_str = ",".join(str(x) for x in ext[:3])
     else:
         ext_str = str(ext)
-    pg.done(f"混元3D 云端完成 ({faces} 面)")
+    pg.emit("texturing", 92, "正在整理颜色与材质…", "texturing")
+    pg.done("3D 模型已经做好啦")
     return {
         "session_id": req.session_id,
         "engine": "hunyuan3d-cloud",
@@ -1620,6 +1622,7 @@ class LaserCardReq(BaseModel):
     bg_style: str = "gradient"
     note: str = ""
     back_template: str = "activity_stage"
+    front_template: str = ""
     back_caption: str = "宜昌市第四届中小学生数理文化活动"
     session_id: Optional[str] = None
     artwork_session_id: Optional[str] = None
@@ -1631,6 +1634,101 @@ def laser_templates():
     """List available fixed back-side templates."""
     root = laser_card.ensure_templates(DATA)
     return {"templates": laser_card.list_templates(root)}
+
+
+class LaserBackgroundReq(BaseModel):
+    """One-sentence description -> an AI generated card face.
+
+    ``side`` picks which face the artwork belongs on: "back" is the activity
+    background, "front" is the printed face that carries the visitor's name.
+    """
+    description: str
+    name: Optional[str] = None
+    side: str = "back"
+
+
+def _safe_template_slug(text: Optional[str]) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]", "", (text or "").strip())
+    return cleaned[:32]
+
+
+@app.post("/api/laser/background")
+def laser_background(req: LaserBackgroundReq):
+    """Generate a card back background from a one-line description.
+
+    The visitor describes the look they want ("深蓝科技感、星辰与电路板…")
+    and the image service produces the artwork.  The result is stored as a
+    normal back template, so the cutting pipeline itself stays untouched and
+    the card can still be opened in xTool straight away.
+    """
+    description = (req.description or "").strip()
+    if not description:
+        raise HTTPException(422, "请先描述你想要的背景，例如：深蓝科技感，星辰与电路板")
+
+    side = "front" if (req.side or "back").strip().lower() == "front" else "back"
+    root = laser_card.ensure_templates(DATA)
+    if side == "front":
+        prompt = (
+            "激光切割卡片的正面主视觉，横向 16:9 横幅构图。"
+            f"风格要求：{description}。"
+            "画面要求：现代科技感与卡通插画风结合，明亮通透、色彩干净、层次分明，"
+            "左下角和右下角保持干净以便叠加姓名与联系方式；"
+            "不要出现任何文字、字母、数字、水印或人物脸部特写，适合印刷。"
+        )
+    else:
+        prompt = (
+            "活动主视觉背景，横向 16:9 横幅构图，用作激光切割卡片的背面。"
+            f"风格要求：{description}。"
+            "画面要求：现代科技感与卡通插画风结合，明亮通透、色彩干净、层次分明，"
+            "中下部保持干净以便叠加文字；"
+            "不要出现任何文字、字母、数字、水印或人物脸部特写，适合印刷。"
+        )
+    try:
+        source, items = api_image.generate_previews([prompt], prefer="aixj", size="1024x1024")
+        blob = next((b for b, _ in items if b), None)
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(500, f"背景生成失败：{exc}") from exc
+    if not blob:
+        raise HTTPException(502, "背景生成服务暂时不可用，请稍后再试")
+
+    try:
+        import io as _io
+        from PIL import Image as _PILImage
+
+        with _PILImage.open(_io.BytesIO(blob)) as handle:
+            image = handle.convert("RGB")
+            # The image service answers with a square; a card back is 16:9.
+            ratio = 16 / 9
+            width, height = image.size
+            if width / height > ratio:
+                new_width = int(height * ratio)
+                left = (width - new_width) // 2
+                image = image.crop((left, 0, left + new_width, height))
+            else:
+                new_height = int(width / ratio)
+                top = (height - new_height) // 2
+                image = image.crop((0, top, width, top + new_height))
+            image = image.resize((1600, 900), _PILImage.LANCZOS)
+    except Exception as exc:
+        raise HTTPException(500, f"背景处理失败：{exc}") from exc
+
+    slug = _safe_template_slug(req.name) or f"custom_{uuid.uuid4().hex[:8]}"
+    if side == "front" and not slug.startswith("front_"):
+        slug = f"front_{slug}"
+    target = os.path.join(root, f"{slug}.png")
+    image.save(target, "PNG", optimize=True)
+    label = (req.name or description).strip()[:20] or ("我的正面" if side == "front" else "我的背景")
+    laser_card.register_template(root, slug, label, 100.0, 56.25, side=side)
+    return {
+        "id": slug,
+        "name": label,
+        "url": f"/api/data/laser/template/{slug}.png",
+        "size_mm": {"width": 100.0, "height": 56.25},
+        "side": side,
+        "source": source,
+        "message": "正面已生成，可以直接用在卡片正面" if side == "front" else "背景已生成，可以直接用在卡片背面",
+    }
 
 
 class LaserDesignReq(BaseModel):
@@ -1756,7 +1854,9 @@ def laser_card_generate(req: LaserCardReq):
         "back_url": f"/api/data/laser/{sid}/card_back.png",
         "size_mm": result["size_mm"],
         "back_template": result["back_template"],
+        "front_template": result.get("front_template") or "",
         "has_artwork": bool(result.get("has_artwork")),
+        "has_front_art": bool(result.get("has_front_art")),
         "message": "名片已生成，可打开 SVG/PNG 交给激光软件切割",
     }
 
@@ -2111,50 +2211,38 @@ def _startup():
     except Exception:
         traceback.print_exc()
 
-    def warm():
+    # The local diffusion stacks (SD 1.5, TripoSR, Hunyuan3D-2 mini) are
+    # several GB of VRAM/RAM each and they are only fallback engines: the
+    # default path is the cloud image + cloud 3D chain.  Preloading them on
+    # every start made the app slow to boot and could starve the machine of
+    # memory, so we only report what is installed and let each engine load
+    # itself the first time a request actually needs it.
+    def report_engines():
         try:
             if sd_client.is_available():
-                print("[startup] loading SD 1.5...", flush=True)
-                sd_client.warmup()
-                print("[startup] SD ready", flush=True)
+                print("[startup] SD 1.5 available (loads on first use)", flush=True)
             else:
                 print("[startup] SD 1.5 unavailable - using cloud image chain "
                       "(local checkpoint or torch missing)", flush=True)
             if triposr_runner.is_available():
-                print("[startup] loading TripoSR...", flush=True)
-                triposr_runner.warmup()
-                print("[startup] TripoSR ready", flush=True)
+                print("[startup] TripoSR available (loads on first use)", flush=True)
             else:
                 print("[startup] TripoSR unavailable - using cloud/cartoon chain "
                       "(model weights or torch missing)", flush=True)
-            print(f"[startup] jojo-image key loaded: {bool(api_image.JOJO_KEY)}", flush=True)
-            print(f"[startup] AIXJ image keys: {len(api_image.AIXJ_IMAGE_KEYS)}", flush=True)
-            print(f"[startup] LLM keys: {llm_client.key_counts()}", flush=True)
-        except Exception:
-            traceback.print_exc()
-    def warm_hunyuan():
-        try:
             if hunyuan_runner.is_available():
-                print("[startup] loading Hunyuan3D-2 mini (one-time)...", flush=True)
-                hunyuan_runner.warmup()
-                print("[startup] Hunyuan3D-2 mini ready", flush=True)
+                print("[startup] Hunyuan3D-2 mini available (loads on first use)", flush=True)
             else:
                 # 打印真实原因（模型权重缺失 / 无 CUDA / torch 缺失），
                 # 原来的 "torch missing" 文案会误导排查方向。
                 print(f"[startup] Hunyuan3D-2 mini unavailable "
                       f"({hunyuan_runner.get_status().get('reason', 'unknown')}) "
                       f"- using Tripo3D/cartoon chain", flush=True)
+            print(f"[startup] jojo-image key loaded: {bool(api_image.JOJO_KEY)}", flush=True)
+            print(f"[startup] AIXJ image keys: {len(api_image.AIXJ_IMAGE_KEYS)}", flush=True)
+            print(f"[startup] LLM keys: {llm_client.key_counts()}", flush=True)
         except Exception:
             traceback.print_exc()
-            print("[startup] Hunyuan3D-2 mini FAILED to load - falling back to TripoSR", flush=True)
-    # Import-heavy diffusion stacks are not safe to initialize concurrently:
-    # transformers/diffusers can race while populating lazy exports. Warm the
-    # local SD stack first, then initialize Hunyuan in the same background
-    # worker so one failure does not make the other engine flaky.
-    def warm_all():
-        warm()
-        warm_hunyuan()
-    threading.Thread(target=warm_all, daemon=True).start()
+    threading.Thread(target=report_engines, daemon=True).start()
 # Frontend
 if os.path.isdir(FRONTEND):
     app.mount("/", StaticFiles(directory=FRONTEND, html=True), name="frontend")

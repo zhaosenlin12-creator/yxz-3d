@@ -66,6 +66,11 @@ def _load():
     global _TSR
     if _TSR is not None:
         return _TSR
+    # The heavy imports have to happen before TSR is referenced.  They used
+    # to be skipped entirely, so every TripoSR call died with
+    # "NoneType has no attribute from_pretrained".
+    if not _ensure_packages():
+        raise RuntimeError(f"TripoSR dependencies unavailable: {_HEAVY_ERR or 'unknown error'}")
     print("[triposr] loading model...")
     t0 = time.time()
     _TSR = TSR.from_pretrained(
@@ -127,17 +132,28 @@ def set_device(device):
         print(f"[triposr] to {device} failed: {e}")
 
 def warmup():
+    """Load the local model. Raises when the local engine is not installed."""
     _load()
     return True
 
 
 def is_available() -> bool:
+    """True when the local TripoSR engine can actually run.
+
+    Checking that ``torch`` imports is not enough: the TripoSR package, the
+    marching-cubes shim and the RMBG helper are separate dependencies, and
+    the checkpoint has to be on disk.  Only a real probe of all three keeps
+    the status honest.
+    """
+    if not os.path.isfile(os.path.join(TRI_MODEL, "model.ckpt")):
+        return False
     try:
         import importlib
         importlib.import_module("torch")
-        return True
+        importlib.import_module("tsr.system")
     except Exception:
         return False
+    return True
 
 
 def generate_3d(image_paths, output_dir, *, mc_res=128, threshold=15.0, max_views=2):

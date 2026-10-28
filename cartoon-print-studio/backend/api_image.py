@@ -134,7 +134,7 @@ def _aixj_image_call(prompt, *, n=1, size="1024x1024", model=AIXJ_IMAGE_MODEL,
     for ki, key in enumerate(AIXJ_IMAGE_KEYS):
         if sid:
             _pg.Progress(sid, "previews").emit(
-                "aixj-trying", 5, f"aixj 生图 尝试 key {ki+1}/{n_keys}")
+                "aixj-trying", 5, f"正在准备预览图（{ki+1}/{n_keys}）…")
         if key in _AIXJ_DEAD_KEYS:
             print(f"[aixj] skip dead key {ki+1}/{n_keys}", flush=True)
             continue
@@ -208,7 +208,7 @@ def _jojo_call(prompt: str, *, n: int = 1, size: str = "1024x1024",
     for ki, key in enumerate(JOJO_KEYS):
         if sid:
             _pg.Progress(sid, "previews").emit(
-                "jojo-trying", 5, f"jojo-image 尝试 key {ki+1}/{n_keys}")
+                "jojo-trying", 5, f"正在准备预览图（{ki+1}/{n_keys}）…")
         # Skip keys we already know are dead this session.
         import time as _t
         if key in _JOJO_DEAD_KEYS and _JOJO_DEAD_UNTIL.get(key, 0) < _t.time():
@@ -236,7 +236,7 @@ def _jojo_call(prompt: str, *, n: int = 1, size: str = "1024x1024",
                 _JOJO_DEAD_UNTIL[key] = _t.time() + 3600
                 print(f"[jojo] key {ki+1}/{n_keys} DEAD (HTTP {e.code}): {err[:120]} - skipping rest of run", flush=True)
                 if sid:
-                    _pg.Progress(sid, "previews").emit("jojo-key-dead", 5, f"jojo key {ki+1} \u4f59\u989d\u4e0d\u8db3,\u8df3\u8fc7")
+                    _pg.Progress(sid, "previews").emit("jojo-key-dead", 5, "某个出图服务暂时不可用，正在跳过…")
                 continue
             print(f"[jojo] key {ki+1}/{n_keys} HTTP {e.code}: {err[:160]}")
             continue
@@ -288,7 +288,7 @@ def _minimax_image_call(prompt, *, n=1, size="1024x1024", model="image-01",
         if not key: continue
         if sid:
             _pg.Progress(sid, "previews").emit(
-                "minimax-trying", 5, f"minimax 尝试 key {ki+1}/{n_keys}")
+                "minimax-trying", 5, f"正在准备预览图（{ki+1}/{n_keys}）…")
         for ep in MINIMAX_IMAGE_ENDPOINTS:
             try:
                 req = urllib.request.Request(
@@ -354,7 +354,7 @@ def _try_minimax_image(prompts, size, sid=None):
         if sid:
             _pg.Progress(sid, "previews").emit(
                 f"minimax-{i+1}/{n_total}", int(i / n_total * 90),
-                f"minimax 第 {i+1}/{n_total} 张...")
+                f"正在生成第 {i+1}/{n_total} 张预览…")
         res = _minimax_image_call(p, n=1, size=size, timeout=60, sid=sid)
         if not res:
             return (None, f"minimax#fail{i+1}")
@@ -390,7 +390,7 @@ def _try_aixj_image(prompts, size, sid=None):
         if sid:
             _pg.Progress(sid, "previews").emit(
                 f"aixj-{i+1}/{n_total}", int(i / n_total * 90),
-                f"aixj 生图 第 {i+1}/{n_total} 张...")
+                f"正在生成第 {i+1}/{n_total} 张预览…")
         res = _aixj_image_call(p, n=1, size=size, timeout=90, sid=sid)
         if not res:
             # transient TLS handshake timeouts happen under concurrency;
@@ -407,7 +407,7 @@ def _try_aixj_image(prompts, size, sid=None):
     if n_ok == 0:
         print(f"[api_image] aixj ALL FAILED (+{time.time()-t0:.1f}s)")
         if sid:
-            _pg.Progress(sid, "previews").emit("aixj-dead", 90, "aixj 整体不可用,切换 minimax")
+            _pg.Progress(sid, "previews").emit("aixj-dead", 90, "出图服务暂时不可用，正在换一种方式…")
         return None
     if n_ok < n_total:
         print(f"[api_image] aixj partial ({n_ok}/{n_total}) (+{time.time()-t0:.1f}s)")
@@ -462,14 +462,14 @@ def generate_previews(prompts, *, prefer="aixj", size="1024x1024", sid=None):
             items.extend(m)
             if sid:
                 _pg.Progress(sid, "previews").emit(
-                    "aixj-partial", 70, "aixj 部分失败,切换 minimax 补齐")
+                    "aixj-partial", 70, "部分预览还没生成好，正在补齐…")
             prefer = "minimax"
         else:
             if m is not None:
                 items.extend(m)
                 if sid:
                     _pg.Progress(sid, "previews").emit(
-                        "aixj-partial", 70, "aixj 部分失败,切换 minimax 补齐")
+                        "aixj-partial", 70, "部分预览还没生成好，正在补齐…")
             else:
                 print("[api_image] aixj unavailable, falling back to minimax")
             prefer = "minimax"
@@ -485,7 +485,7 @@ def generate_previews(prompts, *, prefer="aixj", size="1024x1024", sid=None):
             _merge_slots(items, m, "minimax")
             if sid:
                 _pg.Progress(sid, "previews").emit(
-                    "minimax-partial", 70, "minimax 部分失败,切换 jojo 补齐")
+                    "minimax-partial", 70, "部分预览还没生成好，正在补齐…")
         else:
             print("[api_image] minimax unavailable, falling back to jojo")
         prefer = "jojo"
@@ -502,7 +502,7 @@ def generate_previews(prompts, *, prefer="aixj", size="1024x1024", sid=None):
             if sid:
                 _pg.Progress(sid, "previews").emit(
                     f"jojo-{i+1}/{n_total}", int(i / n_total * 90),
-                    f"jojo 第 {i+1}/{n_total} 张 (用 {n_keys} 个 key)...")
+                    f"正在生成第 {i+1}/{n_total} 张预览…")
             res = _jojo_call(p, n=1, size=size, timeout=60, sid=sid)
             entry = (res[0], f"jojo#{i+1}") if res else (None, f"jojo#fail{i+1}")
             if i < len(items):
@@ -517,7 +517,7 @@ def generate_previews(prompts, *, prefer="aixj", size="1024x1024", sid=None):
             if MINIMAX_IMAGE_KEYS:
                 print("[api_image] jojo keys all dead, falling back to minimax-image")
                 if sid:
-                    _pg.Progress(sid, "previews").emit("jojo-all-dead", 60, "jojo 全 dead,切换 minimax")
+                    _pg.Progress(sid, "previews").emit("jojo-all-dead", 60, "出图服务暂时不可用，正在换一种方式…")
                 return generate_previews(prompts, prefer="minimax", size=size, sid=sid)
             print("[api_image] jojo empty, falling back to local SD")
             return generate_previews(prompts, prefer="local", size=size, sid=sid)
@@ -557,7 +557,7 @@ def generate_previews(prompts, *, prefer="aixj", size="1024x1024", sid=None):
             items.append((buf.getvalue(), f"sd#{seed_used}"))
             if sid:
                 pct = int((i + 1) / n_total * 90)
-                _pg.Progress(sid, "previews").emit(f"sd-{i+1}/{n_total}", pct, f"本地 SD 第 {i+1}/{n_total} 张完成")
+                _pg.Progress(sid, "previews").emit(f"sd-{i+1}/{n_total}", pct, f"正在生成第 {i+1}/{n_total} 张预览…")
         return "sd-local", items
 
     print(f"[api_image] no provider matched prefer={prefer}; returning empty")
@@ -628,7 +628,7 @@ def refine_preview(reference: bytes, instruction: str, *, sid=None, timeout=150.
             continue
         if sid:
             _pg.Progress(sid, "previews").emit(
-                "refine-trying", 8, f"AI 按批注修改中（尝试 key {ki+1}/{n_keys}）…")
+                "refine-trying", 8, "AI 正在按批注修改设计稿…")
         try:
             body, boundary = _build_multipart(
                 {"model": AIXJ_IMAGE_MODEL, "prompt": prompt},

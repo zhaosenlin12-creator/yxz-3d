@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import os
 import re
 import shutil
@@ -36,6 +37,7 @@ from PIL import Image, ImageDraw, ImageFont
 # files are mirrored into <data>/laser/template, which is what the static
 # /api/data/laser/template/<file> route serves.
 PACKAGED_TEMPLATE_DIR = Path(__file__).resolve().parent / "assets" / "laser"
+DATA_ROOT_HINT = Path(os.path.abspath(Path(__file__).resolve().parent.parent / "data"))
 
 
 def ensure_templates(data_root: str) -> str:
@@ -86,9 +88,64 @@ _HEX_RE = re.compile(r"^#?([0-9a-fA-F]{6})$")
 _TEMPLATE_SLUG_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
-def resolve_size_mm(back_template: str) -> tuple[float, float]:
-    """Card size in millimetres for one back template."""
-    return TEMPLATE_SIZE_MM.get(back_template, DEFAULT_CARD_MM)
+def resolve_size_mm(back_template: str, template_root: str | None = None) -> tuple[float, float]:
+    """Card size in millimetres for one back template.
+
+    Templates that were generated on the fly (the visitor asked the AI for a
+    background) carry their own size in the runtime registry.
+    """
+    if back_template in TEMPLATE_SIZE_MM:
+        return TEMPLATE_SIZE_MM[back_template]
+    entry = load_registry(template_root).get(back_template)
+    if entry:
+        try:
+            return float(entry.get("width_mm", 100.0)), float(entry.get("height_mm", 56.25))
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_CARD_MM
+
+
+def registry_path(template_root: str | None) -> str:
+    root = Path(template_root or (Path(os.path.abspath(DATA_ROOT_HINT)) / "laser" / "template"))
+    return str(root / "templates.json")
+
+
+def load_registry(template_root: str | None = None) -> dict[str, dict]:
+    """Read the runtime registry of AI-generated back templates."""
+    path = registry_path(template_root)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def register_template(template_root: str, slug: str, name: str,
+                      width_mm: float = 100.0, height_mm: float = 56.25,
+                      side: str = "back") -> str:
+    """Remember the display name and size of a generated template.
+
+    ``side`` records whether the artwork belongs on the back of the card
+    ("back") or was painted as the front artwork ("front"), so the studio can
+    offer the right picker for each side.
+    """
+    registry = load_registry(template_root)
+    registry[slug] = {
+        "name": name,
+        "width_mm": float(width_mm),
+        "height_mm": float(height_mm),
+        "side": "front" if side == "front" else "back",
+    }
+    path = registry_path(template_root)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(registry, handle, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+    return path
 
 
 def _font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont:
@@ -117,14 +174,40 @@ def _rounded_mask(w: int, h: int, radius: int) -> Image.Image:
     return mask
 
 
-def _cover(image: Image.Image, w: int, h: int) -> Image.Image:
-    """Cover-fit the image into w x h and center it."""
+def _cover(image: Image.Image, w: int, h: int, focus_y: float = 0.5) -> Image.Image:
+    """Cover-fit the image into w x h; ``focus_y`` biases the vertical crop.
+
+    ``focus_y`` is 0 for "keep the top" and 1 for "keep the bottom", so a
+    portrait artwork on a wide card can keep its subject in frame.
+    """
     ratio = max(w / image.width, h / image.height)
     nw, nh = max(1, int(image.width * ratio)), max(1, int(image.height * ratio))
     resized = image.resize((nw, nh), Image.LANCZOS)
     canvas = Image.new("RGB", (w, h), (0, 0, 0))
-    canvas.paste(resized, ((w - nw) // 2, (h - nh) // 2))
+    offset_y = int((h - nh) * focus_y)
+    canvas.paste(resized, ((w - nw) // 2, offset_y))
     return canvas
+
+
+def _scrim(image: Image.Image, theme: tuple[int, int, int], card_w: int, card_h: int,
+           strength: float = 1.0) -> Image.Image:
+    """Darken the artwork so the printed text stays readable on top of it.
+
+    ``strength`` scales the whole gradient, so an AI-painted background can
+    keep most of its artwork visible while a busy model render still gets a
+    solid enough footer.
+    """
+    overlay = Image.new("RGBA", (card_w, card_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    start = int(card_h * 0.36)
+    for y in range(start, card_h):
+        t = (y - start) / max(1, card_h - start)
+        draw.line([(0, y), (card_w, y)], fill=(*theme, int(238 * strength * (t ** 1.25))))
+    top = max(1, int(card_h * 0.14))
+    for y in range(0, top):
+        t = 1 - (y / top)
+        draw.line([(0, y), (card_w, y)], fill=(*theme, int(78 * strength * t)))
+    return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
 
 
 def _contain(image: Image.Image, w: int, h: int) -> Image.Image:
@@ -156,12 +239,14 @@ def load_artwork(path: str) -> Optional[Image.Image]:
         return None
 
 
-def render_front(spec: dict[str, Any], size_mm: tuple[float, float], artwork: Optional[Image.Image] = None) -> Image.Image:
+def render_front(spec: dict[str, Any], size_mm: tuple[float, float],
+                 artwork: Optional[Image.Image] = None,
+                 front_art: Optional[Image.Image] = None) -> Image.Image:
     """Render the editable front of the card.
 
-    With artwork the layout becomes a作品卡: the model preview on the left and
-    the collected text on the right.  Without artwork it falls back to the
-    centred text-only business card.
+    ``artwork`` is the model preview the visitor produced; ``front_art`` is an
+    AI-painted card face.  Either one turns the front into a full-bleed
+    poster, otherwise we fall back to the centred text-only business card.
     """
     width_mm, height_mm = size_mm
     card_w = max(1, int(width_mm * MM))
@@ -177,16 +262,8 @@ def render_front(spec: dict[str, Any], size_mm: tuple[float, float], artwork: Op
         darker = tuple(max(0, int(v * 0.55)) for v in theme)
         background = _vertical_gradient(card_w, card_h, theme, darker)
 
-    # The decorative circles only belong to the text-only layout; with artwork
-    # they would read as stray marks on the finished card.
-    if artwork is None:
-        overlay = Image.new("RGBA", (card_w, card_h), (0, 0, 0, 0))
-        odraw = ImageDraw.Draw(overlay)
-        # A thin, low-alpha ring only.  A filled blob in the accent colour
-        # turns muddy olive on the blue gradient and reads as a printing
-        # defect rather than a decoration.
-        odraw.ellipse((card_w - 150, card_h - 150, card_w - 34, card_h - 34), outline=(*accent, 45), width=3)
-        background = Image.alpha_composite(background.convert("RGBA"), overlay).convert("RGB")
+    # The plain gradient already carries the card; extra decoration rings
+    # only read as stray marks on the finished card, so none are drawn.
 
     draw = ImageDraw.Draw(background)
     white = (255, 255, 255)
@@ -194,7 +271,9 @@ def render_front(spec: dict[str, Any], size_mm: tuple[float, float], artwork: Op
 
     slogan = (spec.get("slogan") or "").strip()
     name = (spec.get("name") or "").strip() or "姓名"
-    line1 = " ".join(x.strip() for x in [(spec.get("title") or "").strip(), (spec.get("unit") or "").strip()] if x)
+    title_text = (spec.get("title") or "").strip()
+    unit_text = (spec.get("unit") or "").strip()
+    line1 = " ".join(x for x in (title_text, unit_text) if x)
     contact = (spec.get("contact") or "").strip()
     note = (spec.get("note") or "").strip()
 
@@ -202,43 +281,98 @@ def render_front(spec: dict[str, Any], size_mm: tuple[float, float], artwork: Op
     # both look deliberate.
     unit = card_h / 540.0
 
-    if artwork is not None:
-        panel_w = int(card_w * 0.46)
-        panel = _contain(artwork, panel_w, card_h)
-        background.paste(panel, (0, 0))
+    if front_art is not None:
+        # An AI-painted card face.  Keep the artwork readable: the scrim only
+        # reaches for the footer so the type still has a calm base to sit on.
+        background = _scrim(_cover(front_art, card_w, card_h, focus_y=0.5), theme, card_w, card_h, strength=1.25)
         draw = ImageDraw.Draw(background)
-        draw.rectangle((0, 0, panel_w - 1, card_h), outline=(*accent, 255), width=max(2, int(3 * unit)))
 
-        text_left = panel_w + int(card_w * 0.045)
-        text_right = card_w - int(card_w * 0.05)
-        cursor = int(card_h * 0.10)
+        pad_x = int(card_w * 0.055)
+        pad_y = int(card_h * 0.075)
+        name_size = int(84 * unit)
+        info_size = int(30 * unit)
+        contact_size = int(26 * unit)
+        contact_line_h = int(38 * unit)
 
-        if slogan:
-            font = _font(max(12, int(26 * unit)), bold=False)
-            draw.text((text_left, cursor), slogan, font=font, fill=soft)
-            cursor += int(44 * unit)
+        contact_lines = [x.strip() for x in contact.splitlines() if x.strip()][:3]
+        contact_block_h = len(contact_lines) * contact_line_h
 
-        font_name = _font(max(20, int(84 * unit)), bold=True)
-        draw.text((text_left, cursor), name, font=font_name, fill=white)
-        cursor += int(112 * unit)
+        baseline = card_h - pad_y
+        draw.text((pad_x, baseline - name_size), name, font=_font(max(20, name_size), bold=True), fill=white)
 
+        if contact_lines:
+            y = baseline - contact_block_h
+            font = _font(max(11, contact_size), bold=False)
+            for line in contact_lines:
+                width = draw.textlength(line, font=font)
+                draw.text((card_w - pad_x - width, y), line, font=font, fill=white)
+                y += contact_line_h
+
+        row_y = baseline - max(name_size, contact_block_h) - int(22 * unit)
         if line1:
-            font = _font(max(12, int(34 * unit)), bold=False)
-            draw.text((text_left, cursor), line1, font=font, fill=soft)
-            cursor += int(48 * unit)
+            draw.text((pad_x, row_y), line1, font=_font(max(11, info_size), bold=False), fill=soft)
+        if slogan:
+            # The slogan is a quiet supporting line, not a second headline.
+            font = _font(max(11, int(24 * unit)), bold=False)
+            width = draw.textlength(slogan, font=font)
+            draw.text((card_w - pad_x - width, row_y + int(6 * unit)), slogan, font=font, fill=soft)
 
-        draw.rounded_rectangle((text_left, cursor, text_left + int(180 * unit), cursor + max(2, int(5 * unit))), radius=3, fill=accent)
-        cursor += int(26 * unit)
-
-        if contact:
-            font = _font(max(11, int(28 * unit)), bold=False)
-            for line in [x.strip() for x in contact.splitlines() if x.strip()][:3]:
-                draw.text((text_left, cursor), line, font=font, fill=white)
-                cursor += int(38 * unit)
+        accent_y = row_y - int(28 * unit)
+        draw.rounded_rectangle(
+            (pad_x, accent_y, pad_x + int(96 * unit), accent_y + max(2, int(5 * unit))),
+            radius=3,
+            fill=accent,
+        )
 
         if note:
             font = _font(max(10, int(22 * unit)), bold=False)
-            draw.text((text_left, card_h - int(52 * unit)), note, font=font, fill=soft)
+            draw.text((pad_x, baseline + int(12 * unit)), note, font=font, fill=soft)
+    elif artwork is not None:
+        # One full-bleed artwork with a single information bar at the bottom.
+        # The previous layout cut the card in half (artwork left, text right)
+        # and read as two unrelated pieces glued together.
+        background = _scrim(_cover(artwork, card_w, card_h, focus_y=0.42), theme, card_w, card_h)
+        draw = ImageDraw.Draw(background)
+
+        pad_x = int(card_w * 0.055)
+        pad_y = int(card_h * 0.075)
+        name_size = int(76 * unit)
+        info_size = int(28 * unit)
+        contact_size = int(26 * unit)
+        contact_line_h = int(36 * unit)
+
+        contact_lines = [x.strip() for x in contact.splitlines() if x.strip()][:3]
+        contact_block_h = len(contact_lines) * contact_line_h
+
+        baseline = card_h - pad_y
+        draw.text((pad_x, baseline - name_size), name, font=_font(max(20, name_size), bold=True), fill=white)
+
+        if contact_lines:
+            y = baseline - contact_block_h
+            font = _font(max(11, contact_size), bold=False)
+            for line in contact_lines:
+                width = draw.textlength(line, font=font)
+                draw.text((card_w - pad_x - width, y), line, font=font, fill=white)
+                y += contact_line_h
+
+        row_y = baseline - max(name_size, contact_block_h) - int(20 * unit)
+        if line1:
+            draw.text((pad_x, row_y), line1, font=_font(max(11, info_size), bold=False), fill=soft)
+        if slogan:
+            font = _font(max(11, info_size), bold=False)
+            width = draw.textlength(slogan, font=font)
+            draw.text((card_w - pad_x - width, row_y), slogan, font=font, fill=soft)
+
+        accent_y = row_y - int(26 * unit)
+        draw.rounded_rectangle(
+            (pad_x, accent_y, pad_x + int(92 * unit), accent_y + max(2, int(5 * unit))),
+            radius=3,
+            fill=accent,
+        )
+
+        if note:
+            font = _font(max(10, int(22 * unit)), bold=False)
+            draw.text((pad_x, baseline + int(10 * unit)), note, font=font, fill=soft)
     else:
         if slogan:
             font = _font(max(12, int(26 * unit)), bold=False)
@@ -249,16 +383,21 @@ def render_front(spec: dict[str, Any], size_mm: tuple[float, float], artwork: Op
         w = draw.textlength(name, font=font_name)
         draw.text(((card_w - w) / 2, int(168 * unit)), name, font=font_name, fill=white)
 
-        if line1:
+        if title_text:
             font = _font(max(12, int(36 * unit)), bold=False)
-            w = draw.textlength(line1, font=font)
-            draw.text(((card_w - w) / 2, int(292 * unit)), line1, font=font, fill=soft)
+            w = draw.textlength(title_text, font=font)
+            draw.text(((card_w - w) / 2, int(292 * unit)), title_text, font=font, fill=soft)
+        if unit_text:
+            font = _font(max(11, int(27 * unit)), bold=False)
+            w = draw.textlength(unit_text, font=font)
+            draw.text(((card_w - w) / 2, int(338 * unit)), unit_text, font=font, fill=soft)
+        if title_text or unit_text:
             sep_w = int(220 * unit)
-            draw.rounded_rectangle(((card_w - sep_w) / 2, int(360 * unit), (card_w + sep_w) / 2, int(360 * unit) + max(2, int(5 * unit))), radius=3, fill=accent)
+            draw.rounded_rectangle(((card_w - sep_w) / 2, int(392 * unit), (card_w + sep_w) / 2, int(392 * unit) + max(2, int(5 * unit))), radius=3, fill=accent)
 
         if contact:
             font = _font(max(11, int(30 * unit)), bold=False)
-            y = int(400 * unit)
+            y = int(432 * unit)
             for line in [x.strip() for x in contact.splitlines() if x.strip()][:3]:
                 w = draw.textlength(line, font=font)
                 draw.text(((card_w - w) / 2, y), line, font=font, fill=white)
@@ -430,7 +569,7 @@ def generate(
         raise FileNotFoundError(f"名片背面模板缺失：{template_path}")
     back_template = os.path.splitext(os.path.basename(template_path))[0]
 
-    size_mm = resolve_size_mm(back_template)
+    size_mm = resolve_size_mm(back_template, template_root)
     card_w = max(1, int(size_mm[0] * MM))
     card_h = max(1, int(size_mm[1] * MM))
 
@@ -441,7 +580,9 @@ def generate(
     artwork_path = str(spec.get("artwork_path") or "")
     artwork = load_artwork(artwork_path)
 
-    front = render_front(spec, size_mm, artwork)
+    front_art = _load_front_art(spec.get("front_template"), template_root)
+
+    front = render_front(spec, size_mm, artwork, front_art)
     back = render_back(template_path, spec, size_mm)
     front_path = os.path.join(out_dir, "card_front.png")
     back_path = os.path.join(out_dir, "card_back.png")
@@ -475,9 +616,26 @@ def generate(
         "front_path": front_path,
         "back_path": back_path,
         "back_template": back_template,
+        "front_template": (spec.get("front_template") or "").strip(),
         "has_artwork": artwork is not None,
+        "has_front_art": front_art is not None,
         "size_mm": {"width": size_mm[0], "height": size_mm[1]},
     }
+
+
+def _load_front_art(front_template: Any, template_root: str) -> Optional[Image.Image]:
+    """Load the AI-painted artwork registered for the front of the card."""
+    slug = str(front_template or "").strip()
+    if not slug or not _TEMPLATE_SLUG_RE.match(slug):
+        return None
+    path = os.path.join(template_root, f"{slug}.png")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with Image.open(path) as handle:
+            return handle.convert("RGB")
+    except Exception:
+        return None
 
 
 def list_templates(template_root: str) -> list[dict[str, Any]]:
@@ -485,15 +643,19 @@ def list_templates(template_root: str) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     if not root.is_dir():
         return items
+    registry = load_registry(template_root)
     for path in sorted(root.glob("*.png")):
         slug = path.stem
         if not _TEMPLATE_SLUG_RE.match(slug):
             continue
-        width_mm, height_mm = resolve_size_mm(slug)
+        entry = registry.get(slug) or {}
+        width_mm, height_mm = resolve_size_mm(slug, template_root)
         items.append({
             "id": slug,
-            "name": TEMPLATE_NAMES.get(slug, slug),
+            "name": entry.get("name") or TEMPLATE_NAMES.get(slug, slug),
             "url": f"/api/data/laser/template/{path.name}",
             "size_mm": {"width": width_mm, "height": height_mm},
+            "generated": bool(entry),
+            "side": entry.get("side") or "back",
         })
     return items

@@ -153,28 +153,80 @@ def export_view_glb(mesh: trimesh.Trimesh, path: str) -> None:
     scene.export(path)
 
 
-def _largest_component(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
-    parts = mesh.split(only_watertight=False)
-    if len(parts) == 1:
+def _connected_face_groups(mesh: trimesh.Trimesh) -> list:
+    """Face-index groups of the mesh's connected components.
+
+    ``Trimesh.split`` copies the material image once per part.  A PBR mesh
+    from the cloud engines carries a 4K texture plus hundreds of loose
+    fragments, so splitting it used to allocate gigabytes and die with a
+    MemoryError.  Walking the face graph instead keeps the cleanup cheap and
+    lets the caller re-attach the texture exactly once.
+    """
+    face_count = len(mesh.faces)
+    if face_count == 0:
+        return []
+    try:
+        adjacency = mesh.face_adjacency
+    except Exception:
+        adjacency = np.zeros((0, 2), dtype=np.int64)
+    if len(adjacency) == 0:
+        return [np.arange(face_count, dtype=np.int64)]
+    try:
+        labels = trimesh.graph.connected_labels(adjacency, node_count=face_count)
+    except Exception:
+        return [np.arange(face_count, dtype=np.int64)]
+    return [np.where(labels == label)[0].astype(np.int64) for label in range(int(labels.max()) + 1)]
+
+
+def _keep_faces(mesh: trimesh.Trimesh, face_index: np.ndarray) -> trimesh.Trimesh:
+    """Rebuild the mesh from a subset of faces, keeping the texture mapping."""
+    if len(face_index) == len(mesh.faces):
         return mesh
-    parts.sort(key=lambda m: len(m.faces), reverse=True)
-    return parts[0]
+    used = np.unique(mesh.faces[face_index])
+    remap = np.full(len(mesh.vertices), -1, dtype=np.int64)
+    remap[used] = np.arange(len(used), dtype=np.int64)
+    new_faces = remap[mesh.faces[face_index]]
+    result = trimesh.Trimesh(
+        vertices=np.asarray(mesh.vertices)[used],
+        faces=new_faces,
+        process=False,
+    )
+    visual = getattr(mesh, "visual", None)
+    uv = getattr(visual, "uv", None)
+    if uv is not None and len(uv) == len(mesh.vertices):
+        try:
+            result.visual = trimesh.visual.TextureVisuals(
+                uv=np.asarray(uv)[face_index] if len(face_index) == len(mesh.faces) else np.asarray(uv)[used],
+                material=visual.material,
+            )
+        except Exception:
+            pass
+    return result
+
+
+def _largest_component(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    groups = _connected_face_groups(mesh)
+    if len(groups) == 1:
+        return mesh
+    groups.sort(key=lambda idx: len(idx), reverse=True)
+    return _keep_faces(mesh, groups[0])
 
 
 def _drop_tiny_debris(mesh: trimesh.Trimesh, max_diam_mm: float = MAX_DEBRIS_DIAMETER_MM) -> trimesh.Trimesh:
-    parts = mesh.split(only_watertight=False)
-    if len(parts) <= 1:
+    groups = _connected_face_groups(mesh)
+    if len(groups) <= 1:
         return mesh
     keep = []
-    for p in parts:
-        d = float(np.linalg.norm(p.extents))
-        if d >= max_diam_mm:
-            keep.append(p)
+    for group in groups:
+        vertices = np.asarray(mesh.vertices)[np.unique(mesh.faces[group])]
+        extent = float(np.linalg.norm(vertices.max(axis=0) - vertices.min(axis=0)))
+        if extent >= max_diam_mm:
+            keep.append(group)
     if not keep:
         return mesh
     if len(keep) == 1:
-        return keep[0]
-    return trimesh.util.concatenate(keep)
+        return _keep_faces(mesh, keep[0])
+    return _keep_faces(mesh, np.concatenate(keep))
 
 
 def _add_base_plate(mesh: trimesh.Trimesh, base_z: float = 0.6) -> trimesh.Trimesh:
@@ -231,6 +283,135 @@ def clean_for_print(mesh: trimesh.Trimesh, *,
     if add_base:
         mesh = _add_base_plate(mesh)
     return mesh
+
+
+def _shrink_material(material, texture_size: int):
+    """Return a copy of a PBR material whose textures are downscaled."""
+    from PIL import Image as _PILImage
+
+    def _resize(image):
+        if image is None or not hasattr(image, "resize"):
+            return None
+        try:
+            return image.convert("RGB").resize((texture_size, texture_size), _PILImage.LANCZOS)
+        except Exception:
+            return None
+
+    base = _resize(getattr(material, "baseColorTexture", None))
+    if base is None:
+        return material
+    return trimesh.visual.material.PBRMaterial(
+        name=getattr(material, "name", None),
+        baseColorFactor=getattr(material, "baseColorFactor", None),
+        baseColorTexture=base,
+        metallicFactor=getattr(material, "metallicFactor", None),
+        roughnessFactor=getattr(material, "roughnessFactor", None),
+        metallicRoughnessTexture=_resize(getattr(material, "metallicRoughnessTexture", None)),
+        normalTexture=_resize(getattr(material, "normalTexture", None)),
+        occlusionTexture=_resize(getattr(material, "occlusionTexture", None)),
+        emissiveFactor=getattr(material, "emissiveFactor", None),
+        emissiveTexture=_resize(getattr(material, "emissiveTexture", None)),
+        doubleSided=bool(getattr(material, "doubleSided", False)),
+        alphaMode=getattr(material, "alphaMode", None),
+        alphaCutoff=getattr(material, "alphaCutoff", None),
+    )
+
+
+def make_matte_material(mesh, roughness: float = 0.62, metallic: float = 0.0):
+    """Flatten a chrome-like PBR material into matte painted plastic.
+
+    The cloud image-to-3D engines answer with a fully metallic, zero-roughness
+    material (their metallic/roughness map is a flat red), which renders the
+    figurine like polished chrome instead of the painted plastic the design
+    calls for.  Dropping that map and pinning the factors gives a clean matte
+    surface that also prints better.
+    """
+    if mesh is None:
+        return mesh
+    visual = getattr(mesh, "visual", None)
+    material = getattr(visual, "material", None)
+    if material is None:
+        return mesh
+
+    try:
+        matte = trimesh.visual.material.PBRMaterial(
+            name=getattr(material, "name", None),
+            baseColorFactor=getattr(material, "baseColorFactor", None),
+            baseColorTexture=getattr(material, "baseColorTexture", None),
+            metallicFactor=float(metallic),
+            roughnessFactor=float(roughness),
+            metallicRoughnessTexture=None,
+            normalTexture=getattr(material, "normalTexture", None),
+            occlusionTexture=getattr(material, "occlusionTexture", None),
+            emissiveFactor=getattr(material, "emissiveFactor", None),
+            emissiveTexture=getattr(material, "emissiveTexture", None),
+            doubleSided=bool(getattr(material, "doubleSided", False)),
+            alphaMode=getattr(material, "alphaMode", None),
+            alphaCutoff=getattr(material, "alphaCutoff", None),
+        )
+        mesh.visual = trimesh.visual.TextureVisuals(
+            uv=getattr(visual, "uv", None),
+            material=matte,
+        )
+    except Exception as exc:
+        print(f"[mesh] matte material skipped: {exc}", flush=True)
+    return mesh
+
+
+def optimize_for_web(mesh, *, target_faces: int = 60000, texture_size: int = 1024):
+    """Shrink a textured mesh for a fast web preview and small print files.
+
+    The cloud engines answer with ~200k faces plus a 4K texture set, which is
+    roughly 35 MB per GLB: the browser has to download all of it before the
+    visitor sees their model.  Decimating the geometry and downscaling the
+    textures keeps the silhouette and the paint while shrinking the download
+    by roughly 5x.  UVs are per-vertex on these meshes, so they are carried
+    over by nearest-neighbour lookup.
+    """
+    if mesh is None or len(mesh.faces) == 0:
+        return mesh
+
+    visual = getattr(mesh, "visual", None)
+    uv = getattr(visual, "uv", None)
+    material = getattr(visual, "material", None)
+
+    vertices = np.asarray(mesh.vertices)
+    faces = np.asarray(mesh.faces)
+    new_vertices, new_faces = vertices, faces
+    new_uv = None if uv is None else np.asarray(uv)
+
+    if len(faces) > target_faces:
+        try:
+            from fast_simplification import simplify
+            from scipy.spatial import cKDTree
+
+            simplified = simplify(
+                points=vertices,
+                triangles=faces,
+                target_count=int(target_faces),
+                agg=7,
+            )
+            new_vertices = np.asarray(simplified[0], dtype=np.float64)
+            new_faces = np.asarray(simplified[1], dtype=np.int64)
+            if uv is not None and len(uv) == len(vertices):
+                tree = cKDTree(vertices)
+                _, nearest = tree.query(new_vertices, k=1)
+                new_uv = np.asarray(uv)[nearest]
+        except Exception as exc:
+            print(f"[mesh] decimation skipped: {exc}", flush=True)
+            new_vertices, new_faces = vertices, faces
+            new_uv = None if uv is None else np.asarray(uv)
+
+    result = trimesh.Trimesh(vertices=new_vertices, faces=new_faces, process=False)
+    if new_uv is not None and material is not None:
+        try:
+            result.visual = trimesh.visual.TextureVisuals(
+                uv=new_uv,
+                material=_shrink_material(material, texture_size),
+            )
+        except Exception as exc:
+            print(f"[mesh] texture shrink skipped: {exc}", flush=True)
+    return result
 
 
 def _save_mesh(mesh: trimesh.Trimesh, output_dir: str) -> dict:

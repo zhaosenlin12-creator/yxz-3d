@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import type { YXZLaserCardResponse, YXZModelProgress } from '../../../../packages/stage-ui/src/composables/use-yxz-print-preview'
+import type { YXZBuildStage, YXZLaserCardResponse, YXZLaserTemplate, YXZModelProgress } from '../../../../packages/stage-ui/src/composables/use-yxz-print-preview'
 
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
 import YXZPreviewCanvasEditor from '../../../../packages/stage-ui/src/components/scenes/YXZPreviewCanvasEditor.vue'
 
-import { createYXZCartoonModel, createYXZLaserCard, detectYXZLocalSoftware, getYXZPrintApiBase, openYXZLaserCardInSoftware } from '../../../../packages/stage-ui/src/composables/use-yxz-print-preview'
+import { createYXZCartoonModel, createYXZLaserBackground, createYXZLaserCard, detectYXZLocalSoftware, formatYXZElapsed, getYXZPrintApiBase, listYXZLaserTemplates, openYXZLaserCardInSoftware, resolveYXZBuildStage, YXZ_BUILD_STAGES } from '../../../../packages/stage-ui/src/composables/use-yxz-print-preview'
 
 const route = useRoute()
 const sessionId = String(route.query.session ?? '')
@@ -26,12 +26,49 @@ interface YXZPresetModel {
 const editedDataUrl = ref('')
 const building = ref(false)
 const progress = ref<YXZModelProgress | null>(null)
+const buildStartedAt = ref(0)
+const elapsedMs = ref(0)
 const model = ref<{ glbUrl: string, stlUrl: string } | null>(null)
 const errorMessage = ref('')
 const presets = ref<YXZPresetModel[]>([])
 const presetsLoading = ref(true)
 // '2d' = canvas editing, '3d' = model preview (scene switching like Tripo)
 const activeView = ref<'2d' | '3d'>('2d')
+
+let elapsedTimer: ReturnType<typeof setInterval> | undefined
+
+const currentStage = computed<YXZBuildStage>(() => progress.value?.stage ?? 'queued')
+const stageIndex = computed(() => YXZ_BUILD_STAGES.findIndex(stage => stage.id === currentStage.value))
+function stageState(stageId: YXZBuildStage) {
+  if (currentStage.value === 'failed')
+    return stageIndex.value >= 0 && YXZ_BUILD_STAGES[stageIndex.value].id === stageId ? 'failed' : 'todo'
+  if (currentStage.value === 'done')
+    return 'done'
+  const index = YXZ_BUILD_STAGES.findIndex(stage => stage.id === stageId)
+  if (index < 0)
+    return 'todo'
+  if (index < stageIndex.value)
+    return 'done'
+  if (index === stageIndex.value)
+    return 'active'
+  return 'todo'
+}
+
+function startElapsedTimer() {
+  buildStartedAt.value = Date.now()
+  elapsedMs.value = 0
+  stopElapsedTimer()
+  elapsedTimer = setInterval(() => {
+    elapsedMs.value = Date.now() - buildStartedAt.value
+  }, 500)
+}
+
+function stopElapsedTimer() {
+  if (elapsedTimer) {
+    clearInterval(elapsedTimer)
+    elapsedTimer = undefined
+  }
+}
 
 // --- Laser-cut card export -------------------------------------------
 // The card is the physical end of the chain: its back is the fixed activity
@@ -42,6 +79,17 @@ const laserBusy = ref(false)
 const laserError = ref('')
 const laserSide = ref<'front' | 'back'>('front')
 const laserSoftwareMessage = ref('')
+// The card back is generated on request: the visitor describes the look they
+// want and the image service paints it.
+const laserTemplates = ref<YXZLaserTemplate[]>([])
+const laserBackTemplate = ref('activity_stage')
+const laserFrontTemplate = ref('')
+const laserBackgroundPrompt = ref('')
+const laserFrontPrompt = ref('')
+const backgroundBusy = ref<'back' | 'front' | ''>('')
+const backgroundMessage = ref('')
+const backTemplates = computed(() => laserTemplates.value.filter(item => item.side !== 'front'))
+const frontTemplates = computed(() => laserTemplates.value.filter(item => item.side === 'front'))
 const laserCardImage = computed(() => {
   if (!laserCard.value)
     return ''
@@ -66,6 +114,8 @@ async function generateLaserCard() {
       title: laserForm.value.title,
       unit: laserForm.value.unit,
       contact: laserForm.value.contact,
+      backTemplate: laserBackTemplate.value,
+      frontTemplate: laserFrontTemplate.value,
     })
     laserSide.value = 'front'
   }
@@ -111,7 +161,46 @@ async function loadPresets() {
   }
 }
 
-onMounted(loadPresets)
+async function loadLaserTemplates() {
+  try {
+    laserTemplates.value = await listYXZLaserTemplates()
+  }
+  catch { /* the packaged template stays selected */ }
+}
+
+async function generateLaserBackground(side: 'back' | 'front' = 'back') {
+  if (backgroundBusy.value)
+    return
+  const description = (side === 'front' ? laserFrontPrompt.value : laserBackgroundPrompt.value).trim()
+  if (!description) {
+    backgroundMessage.value = side === 'front' ? '先描述一下你想要的正面风格' : '先说说你想要什么样的背景吧'
+    return
+  }
+  backgroundBusy.value = side
+  backgroundMessage.value = side === 'front' ? '正在为你绘制卡片正面…' : '正在为你绘制背景…'
+  try {
+    const template = await createYXZLaserBackground(description, side)
+    if (side === 'front')
+      laserFrontTemplate.value = template.id
+    else
+      laserBackTemplate.value = template.id
+    await loadLaserTemplates()
+    backgroundMessage.value = side === 'front' ? '正面好了，已经选上，可以直接生成卡片' : '背景好了，已经选上，可以直接生成卡片'
+    if (laserCard.value)
+      await generateLaserCard()
+  }
+  catch (error) {
+    backgroundMessage.value = error instanceof Error ? error.message : '背景生成失败，请稍后重试'
+  }
+  finally {
+    backgroundBusy.value = ''
+  }
+}
+
+onMounted(() => {
+  void loadPresets()
+  void loadLaserTemplates()
+})
 
 function presetPreviewUrl(p: YXZPresetModel) {
   return `/yxz-preview?model=${encodeURIComponent(`${getYXZPrintApiBase()}${p.glbUrl}`)}`
@@ -140,25 +229,29 @@ async function startModelBuild() {
   building.value = true
   errorMessage.value = ''
   model.value = null
-  progress.value = { percent: 2, message: '开始制作 3D 模型，请耐心等待…', step: 'building' }
+  activeView.value = '3d'
+  progress.value = { percent: 2, message: '已收到你的方案，马上开始制作…', step: 'building', stage: 'queued' }
+  startElapsedTimer()
   try {
     const result = await createYXZCartoonModel({
       sessionId,
       imageIndex,
       ...(editedDataUrl.value ? { customImage: editedDataUrl.value } : {}),
       onProgress: (p) => {
-        progress.value = p
+        progress.value = { ...p, stage: p.stage ?? resolveYXZBuildStage(p.step, p.percent) }
       },
     })
     model.value = { glbUrl: result.glbUrl, stlUrl: result.stlUrl }
-    progress.value = { percent: 100, message: `3D 模型已生成（${result.engine ?? 'Tripo3D'}）`, step: 'done' }
+    progress.value = { percent: 100, message: '3D 模型已经做好啦，可以预览和下载了', step: 'done', stage: 'done' }
     activeView.value = '3d'
   }
   catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '3D 生成失败，请重试'
+    progress.value = { percent: 0, message: errorMessage.value, step: 'failed', stage: 'failed' }
   }
   finally {
     building.value = false
+    stopElapsedTimer()
   }
 }
 
@@ -271,6 +364,32 @@ function goBack() {
             <a :href="`${model.stlUrl}${model.stlUrl.includes('?') ? '&' : '?'}download=1`" download rel="noreferrer">下载 STL（打印用）</a>
           </div>
         </template>
+        <div v-else-if="building" class="yxz-studio-3d-building">
+          <div class="yxz-studio-3d-building-preview">
+            <img :src="editedDataUrl || previewSrc" :alt="caption">
+            <div class="yxz-studio-3d-building-overlay">
+              <span class="yxz-studio-3d-building-spinner" />
+              <strong>{{ progress?.message || '正在制作 3D 模型，请耐心等待…' }}</strong>
+              <small>成品做好后会自动在这里显示 3D 预览</small>
+            </div>
+          </div>
+          <ol class="yxz-studio-stages is-wide">
+            <li
+              v-for="(stage, index) in YXZ_BUILD_STAGES"
+              :key="stage.id"
+              :class="[`is-${stageState(stage.id)}`, { 'is-current': index === stageIndex }]"
+            >
+              <span class="yxz-studio-stage-dot" />
+              <div>
+                <strong>{{ stage.label }}</strong>
+                <small>{{ stage.hint }}</small>
+              </div>
+            </li>
+          </ol>
+          <p class="yxz-studio-elapsed">
+            已用时 {{ formatYXZElapsed(elapsedMs) }} · 进度 {{ progressPercent }}%
+          </p>
+        </div>
         <div v-else class="yxz-studio-3d-empty">
           <div class="yxz-studio-3d-empty-icon">
             🧊
@@ -295,9 +414,9 @@ function goBack() {
         </div>
 
         <div class="yxz-studio-card">
-          <h3>生成彩色 3D 模型</h3>
+          <h3>生成 3D 模型</h3>
           <p class="yxz-studio-note">
-            引擎优先 Tripo3D 高清（PBR 彩色）→ 混元3D 云端 → 本地彩色，自动切换。
+            按你的设计稿生成可以 3D 打印的立体模型，全程自动完成。
           </p>
           <button
             class="yxz-studio-build"
@@ -312,6 +431,22 @@ function goBack() {
               <span :style="{ width: `${progressPercent}%` }" />
             </div>
             <p>{{ progress?.message || '正在制作 3D 模型，请耐心等待…' }}</p>
+            <ol class="yxz-studio-stages">
+              <li
+                v-for="(stage, index) in YXZ_BUILD_STAGES"
+                :key="stage.id"
+                :class="[`is-${stageState(stage.id)}`, { 'is-current': index === stageIndex }]"
+              >
+                <span class="yxz-studio-stage-dot" />
+                <div>
+                  <strong>{{ stage.label }}</strong>
+                  <small>{{ stage.hint }}</small>
+                </div>
+              </li>
+            </ol>
+            <p class="yxz-studio-elapsed">
+              已用时 {{ formatYXZElapsed(elapsedMs) }} · 进度 {{ progressPercent }}%
+            </p>
           </div>
 
           <p v-if="errorMessage" class="yxz-studio-error">
@@ -332,6 +467,81 @@ function goBack() {
           <p class="yxz-studio-note">
             正面放你的作品预览图，背面是活动主视觉背景，尺寸固定 {{ laserCard?.sizeMm.width ?? 100 }} × {{ laserCard?.sizeMm.height ?? 56.25 }} mm。
           </p>
+          <div class="yxz-studio-laser-bg">
+            <label class="yxz-studio-laser-bg-label">
+              卡片正面主视觉
+              <textarea
+                v-model="laserFrontPrompt"
+                rows="2"
+                maxlength="120"
+                placeholder="描述正面的风格，例如：明亮蓝紫渐变，电路板与光点，底部留白放名字"
+              />
+            </label>
+            <div class="yxz-studio-laser-bg-actions">
+              <button
+                type="button"
+                class="yxz-studio-linkish"
+                :disabled="backgroundBusy !== ''"
+                @click="generateLaserBackground('front')"
+              >
+                {{ backgroundBusy === 'front' ? '正在绘制…' : 'AI 生成正面' }}
+              </button>
+              <button
+                v-if="laserFrontTemplate"
+                type="button"
+                class="yxz-studio-linkish"
+                @click="laserFrontTemplate = ''"
+              >
+                恢复纯色版式
+              </button>
+            </div>
+            <div v-if="frontTemplates.length" class="yxz-studio-laser-templates">
+              <button
+                v-for="tpl in frontTemplates"
+                :key="tpl.id"
+                type="button"
+                :class="['yxz-studio-laser-template', { active: laserFrontTemplate === tpl.id }]"
+                @click="laserFrontTemplate = tpl.id"
+              >
+                <img :src="`${getYXZPrintApiBase()}${tpl.url}`" :alt="tpl.name" loading="lazy">
+                <span>{{ tpl.name }}</span>
+              </button>
+            </div>
+          </div>
+          <div class="yxz-studio-laser-bg">
+            <label class="yxz-studio-laser-bg-label">
+              卡片背面背景
+              <textarea
+                v-model="laserBackgroundPrompt"
+                rows="2"
+                maxlength="120"
+                placeholder="描述你想要的背景，例如：深蓝科技感，星辰与电路板，卡通插画风"
+              />
+            </label>
+            <div class="yxz-studio-laser-bg-actions">
+              <button
+                type="button"
+                class="yxz-studio-linkish"
+                :disabled="backgroundBusy !== ''"
+                @click="generateLaserBackground('back')"
+              >
+                {{ backgroundBusy === 'back' ? '正在绘制…' : 'AI 生成背景' }}
+              </button>
+              <span v-if="backgroundMessage" class="yxz-studio-note">{{ backgroundMessage }}</span>
+            </div>
+            <div v-if="backTemplates.length" class="yxz-studio-laser-templates">
+              <button
+                v-for="tpl in backTemplates"
+                :key="tpl.id"
+                type="button"
+                :class="['yxz-studio-laser-template', { active: laserBackTemplate === tpl.id }]"
+                @click="laserBackTemplate = tpl.id"
+              >
+                <img :src="`${getYXZPrintApiBase()}${tpl.url}`" :alt="tpl.name" loading="lazy">
+                <span>{{ tpl.name }}</span>
+              </button>
+            </div>
+          </div>
           <div class="yxz-studio-laser-fields">
             <label>姓名 <input v-model="laserForm.name" maxlength="12" placeholder="张三"></label>
             <label>身份 <input v-model="laserForm.title" maxlength="20" placeholder="学生"></label>
@@ -686,6 +896,69 @@ function goBack() {
   font-size: 14px;
 }
 
+.yxz-studio-3d-building {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
+.yxz-studio-3d-building-preview {
+  position: relative;
+  flex: 1;
+  min-height: 260px;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(160, 205, 255, .22);
+  background: rgba(6, 21, 39, .6);
+}
+
+.yxz-studio-3d-building-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: saturate(.85) brightness(.72);
+}
+
+.yxz-studio-3d-building-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 20px;
+  text-align: center;
+  background: radial-gradient(circle at 50% 45%, rgba(11, 42, 74, .35) 0%, rgba(4, 16, 30, .82) 78%);
+}
+
+.yxz-studio-3d-building-overlay strong {
+  font-size: 15px;
+  color: #eaf6ff;
+}
+
+.yxz-studio-3d-building-overlay small {
+  font-size: 12px;
+  color: #7fa9cc;
+}
+
+.yxz-studio-3d-building-spinner {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 3px solid rgba(56, 182, 255, .25);
+  border-top-color: #38b6ff;
+  animation: yxz-studio-spin 900ms linear infinite;
+}
+
+@keyframes yxz-studio-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .yxz-studio-side {
   display: flex;
   flex-direction: column;
@@ -700,6 +973,81 @@ function goBack() {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.yxz-studio-laser-bg {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(160, 205, 255, .18);
+  background: rgba(255, 255, 255, .03);
+}
+
+.yxz-studio-laser-bg-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: #7fa9cc;
+}
+
+.yxz-studio-laser-bg-label textarea {
+  width: 100%;
+  resize: vertical;
+  border-radius: 8px;
+  border: 1px solid rgba(160, 205, 255, .22);
+  background: rgba(6, 21, 39, .7);
+  color: #eaf6ff;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  line-height: 1.5;
+}
+
+.yxz-studio-laser-bg-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.yxz-studio-laser-templates {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.yxz-studio-laser-template {
+  flex: none;
+  width: 108px;
+  border: 1px solid rgba(160, 205, 255, .2);
+  border-radius: 8px;
+  background: rgba(6, 21, 39, .6);
+  color: #9fc6e6;
+  font-size: 11px;
+  padding: 4px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+}
+
+.yxz-studio-laser-template.active {
+  border-color: #38b6ff;
+  color: #eaf6ff;
+  box-shadow: 0 0 0 1px rgba(56, 182, 255, .5);
+}
+
+.yxz-studio-laser-template img {
+  width: 100%;
+  height: 46px;
+  object-fit: cover;
+  border-radius: 6px;
+  display: block;
 }
 
 .yxz-studio-card h3 {
@@ -768,6 +1116,85 @@ function goBack() {
   margin: 0;
   color: #a9ddff;
   font-size: 12px;
+}
+
+.yxz-studio-stages {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.yxz-studio-stages.is-wide {
+  gap: 10px;
+}
+
+.yxz-studio-stages li {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  opacity: .45;
+  transition: opacity .3s ease;
+}
+
+.yxz-studio-stages li.is-done,
+.yxz-studio-stages li.is-active,
+.yxz-studio-stages li.is-failed {
+  opacity: 1;
+}
+
+.yxz-studio-stage-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .28);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, .06);
+}
+
+.yxz-studio-stages li.is-done .yxz-studio-stage-dot {
+  background: #7ff2a8;
+  box-shadow: 0 0 0 3px rgba(127, 242, 168, .18);
+}
+
+.yxz-studio-stages li.is-active .yxz-studio-stage-dot {
+  background: #38b6ff;
+  box-shadow: 0 0 0 4px rgba(56, 182, 255, .2);
+  animation: yxz-studio-pulse 1.4s ease-in-out infinite;
+}
+
+.yxz-studio-stages li.is-failed .yxz-studio-stage-dot {
+  background: #ff8f8f;
+  box-shadow: 0 0 0 4px rgba(255, 143, 143, .2);
+}
+
+@keyframes yxz-studio-pulse {
+  50% {
+    box-shadow: 0 0 0 7px rgba(56, 182, 255, 0);
+  }
+}
+
+.yxz-studio-stages li strong {
+  display: block;
+  font-size: 12px;
+  color: #eaf6ff;
+  font-weight: 600;
+}
+
+.yxz-studio-stages li small {
+  display: block;
+  font-size: 11px;
+  color: #7fa9cc;
+  line-height: 1.5;
+}
+
+.yxz-studio-elapsed {
+  margin: 0;
+  color: #7fa9cc;
+  font-size: 11px;
 }
 
 .yxz-studio-error {

@@ -37,6 +37,59 @@ export interface YXZModelProgress {
   percent: number
   message: string
   step?: string
+  /** User-facing phase of the build; drives the progress checklist. */
+  stage?: YXZBuildStage
+}
+
+/**
+ * The phases a 3D build goes through, in the order the visitor sees them.
+ *
+ * The backend reports coarse engine steps; the UI only ever shows these
+ * friendly phases so the visitor never reads engine names or queue chatter.
+ */
+export type YXZBuildStage = 'queued' | 'geometry' | 'texturing' | 'optimizing' | 'done' | 'failed'
+
+export const YXZ_BUILD_STAGES: Array<{ id: YXZBuildStage, label: string, hint: string }> = [
+  { id: 'queued', label: '准备中', hint: '已经收到你的方案，马上开工' },
+  { id: 'geometry', label: '生成立体结构', hint: '把设计稿变成可以打印的立体模型' },
+  { id: 'texturing', label: '上色与细节', hint: '还原你定下来的颜色和材质' },
+  { id: 'optimizing', label: '打印优化', hint: '整理模型，让它可以直接打印' },
+  { id: 'done', label: '完成', hint: '模型做好啦，可以预览和下载' },
+]
+
+const STAGE_BY_STEP: Array<[RegExp, YXZBuildStage]> = [
+  [/^(fail|error)/i, 'failed'],
+  [/^(done|complete|finished|success)/i, 'done'],
+  [/^(start|queued|submit|warmup|upload|preprocess|previews)/i, 'queued'],
+  [/(paint|texture|texturing|color|pbr|uv|material)/i, 'texturing'],
+  [/(clean|optimi|postprocess|base|export|stl|slicer|scal|orient|centr)/i, 'optimizing'],
+  [/(hunyuan|tripo|build|generat|geometry|sample|decimate|mesh|layer|reconstruct|view)/i, 'geometry'],
+]
+
+/** Map a backend step (and its percent) onto the visitor-facing phase. */
+export function resolveYXZBuildStage(step?: string, percent = 0): YXZBuildStage {
+  const raw = (step ?? '').trim()
+  if (raw) {
+    for (const [pattern, stage] of STAGE_BY_STEP) {
+      if (pattern.test(raw))
+        return stage
+    }
+  }
+  if (percent >= 100)
+    return 'done'
+  if (percent <= 0)
+    return 'queued'
+  return 'geometry'
+}
+
+/** Elapsed time in a compact, human friendly form (e.g. "1 分 08 秒"). */
+export function formatYXZElapsed(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000))
+  const minutes = Math.floor(total / 60)
+  const seconds = total % 60
+  if (minutes <= 0)
+    return `${seconds} 秒`
+  return `${minutes} 分 ${String(seconds).padStart(2, '0')} 秒`
 }
 
 export interface YXZModelResponse {
@@ -71,6 +124,8 @@ export interface YXZLaserCardRequest {
   accent?: string
   note?: string
   backTemplate?: string
+  /** AI-painted artwork used as the printed front face of the card. */
+  frontTemplate?: string
   backCaption?: string
 }
 
@@ -82,7 +137,9 @@ export interface YXZLaserCardResponse {
   backUrl: string
   sizeMm: { width: number, height: number }
   backTemplate: string
+  frontTemplate: string
   hasArtwork: boolean
+  hasFrontArt: boolean
   message: string
 }
 
@@ -222,6 +279,76 @@ export async function openYXZExportInSoftware(request: { softwareId: string, ses
   return raw
 }
 
+export interface YXZLaserTemplate {
+  id: string
+  name: string
+  url: string
+  sizeMm: { width: number, height: number }
+  generated?: boolean
+  /** Which face the artwork belongs on. */
+  side?: 'back' | 'front'
+}
+
+/** List the card back templates (the packaged one plus everything the AI made). */
+export async function listYXZLaserTemplates(fetcher: typeof fetch = fetch): Promise<YXZLaserTemplate[]> {
+  const response = await fetcher(`${getYXZPrintApiBase()}/api/laser/templates`)
+  if (!response.ok)
+    throw new Error(`背景模板读取失败（HTTP ${response.status}）`)
+  const raw: unknown = await response.json()
+  if (!isRecord(raw) || !Array.isArray(raw.templates))
+    return []
+  return raw.templates.filter((item): item is Record<string, unknown> => isRecord(item)).map((item): YXZLaserTemplate => {
+    const size = isRecord(item.size_mm) ? item.size_mm : {}
+    return {
+      id: typeof item.id === 'string' ? item.id : '',
+      name: typeof item.name === 'string' ? item.name : '',
+      url: typeof item.url === 'string' ? item.url : '',
+      sizeMm: {
+        width: typeof size.width === 'number' ? size.width : 100,
+        height: typeof size.height === 'number' ? size.height : 56.25,
+      },
+      generated: item.generated === true,
+      side: item.side === 'front' ? 'front' : 'back',
+    }
+  }).filter(item => item.id)
+}
+
+/**
+ * Ask the image service for a card back background.
+ *
+ * The visitor describes the look they want, the backend paints it and stores
+ * it as a regular back template, so the cutting flow stays the same.
+ */
+export async function createYXZLaserBackground(description: string, side: 'back' | 'front' = 'back', fetcher: typeof fetch = fetch): Promise<YXZLaserTemplate> {
+  const prompt = (description || '').trim()
+  if (!prompt)
+    throw new Error('请先描述你想要的背景')
+  const response = await fetcher(`${getYXZPrintApiBase()}/api/laser/background`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ description: prompt, side }),
+  })
+  const raw: unknown = await response.json().catch(() => undefined)
+  if (!response.ok) {
+    const detail = isRecord(raw) && typeof raw.detail === 'string' ? raw.detail : ''
+    throw new Error(detail || `背景生成失败（HTTP ${response.status}）`)
+  }
+  if (!isRecord(raw) || typeof raw.id !== 'string')
+    throw new Error('背景服务返回的数据格式无法识别')
+  const size = isRecord(raw.size_mm) ? raw.size_mm : {}
+  return {
+    id: raw.id,
+    name: typeof raw.name === 'string' ? raw.name : '我的背景',
+    url: typeof raw.url === 'string' ? raw.url : '',
+    sizeMm: {
+      width: typeof size.width === 'number' ? size.width : 100,
+      height: typeof size.height === 'number' ? size.height : 56.25,
+    },
+    generated: true,
+    side,
+  }
+}
+
 /**
  * Render the laser-cut card.
  *
@@ -241,6 +368,7 @@ export async function createYXZLaserCard(request: YXZLaserCardRequest, fetcher: 
     accent: request.accent || '#F5A623',
     bg_style: 'gradient',
     back_template: request.backTemplate || 'activity_stage',
+    front_template: request.frontTemplate || '',
     back_caption: request.backCaption || '宜昌市第四届中小学生数理文化活动',
     note: request.note ?? '',
     ...(request.sessionId ? { session_id: request.sessionId } : {}),
@@ -275,6 +403,8 @@ export async function createYXZLaserCard(request: YXZLaserCardRequest, fetcher: 
       height: typeof size.height === 'number' ? size.height : 56.25,
     },
     backTemplate: typeof raw.back_template === 'string' ? raw.back_template : 'activity_stage',
+    frontTemplate: typeof raw.front_template === 'string' ? raw.front_template : '',
+    hasFrontArt: raw.has_front_art === true,
     hasArtwork: raw.has_artwork === true,
     message: typeof raw.message === 'string' ? raw.message : '卡片已生成',
   }
@@ -293,8 +423,7 @@ export async function openYXZLaserCardInSoftware(softwareId: string, sessionId: 
   return raw
 }
 
-async function pollYXZModelProgress(sessionId: string, signal: AbortSignal, onProgress?: (progress: YXZModelProgress) => void, fetcher: typeof fetch = fetch) {
-  let since = 0
+async function pollYXZModelProgress(sessionId: string, signal: AbortSignal, onProgress?: (progress: YXZModelProgress) => void, fetcher: typeof fetch = fetch, since = 0) {
   while (!signal.aborted) {
     try {
       const response = await fetcher(`${getYXZPrintApiBase()}/api/progress/${encodeURIComponent(sessionId)}?since=${since}`, { signal })
@@ -311,6 +440,12 @@ async function pollYXZModelProgress(sessionId: string, signal: AbortSignal, onPr
               percent: typeof event.percent === 'number' ? event.percent : 0,
               message: typeof event.message === 'string' ? event.message : '正在生成 3D 模型…',
               step: typeof event.step === 'string' ? event.step : undefined,
+              stage: typeof event.stage === 'string'
+                ? event.stage as YXZBuildStage
+                : resolveYXZBuildStage(
+                    typeof event.step === 'string' ? event.step : undefined,
+                    typeof event.percent === 'number' ? event.percent : 0,
+                  ),
             })
           }
         }
@@ -326,6 +461,29 @@ async function pollYXZModelProgress(sessionId: string, signal: AbortSignal, onPr
   }
 }
 
+/**
+ * Highest timestamp the server already knows about for this session.
+ *
+ * A build must not replay the events of the previous run (nor the image
+ * generation phase that ran before it), otherwise the card briefly shows
+ * finished / preview chatter that has nothing to do with this job.
+ */
+async function fetchLatestProgressTs(sessionId: string, fetcher: typeof fetch): Promise<number> {
+  try {
+    const response = await fetcher(`${getYXZPrintApiBase()}/api/progress/${encodeURIComponent(sessionId)}?since=9999999999999`)
+    if (!response.ok)
+      return 0
+    const raw: unknown = await response.json().catch(() => undefined)
+    if (!isRecord(raw))
+      return 0
+    const latest = raw.latest
+    return isRecord(latest) && typeof latest.ts === 'number' ? latest.ts : 0
+  }
+  catch {
+    return 0
+  }
+}
+
 export async function createYXZCartoonModel(request: YXZModelRequest, fetcher: typeof fetch = fetch): Promise<YXZModelResponse> {
   if (!request.sessionId)
     throw new Error('缺少预览会话，无法生成 3D 模型')
@@ -334,7 +492,8 @@ export async function createYXZCartoonModel(request: YXZModelRequest, fetcher: t
   const progressController = new AbortController()
   const onAbort = () => progressController.abort()
   linked.signal.addEventListener('abort', onAbort, { once: true })
-  const progressTask = pollYXZModelProgress(request.sessionId, progressController.signal, request.onProgress, fetcher)
+  const baseline = await fetchLatestProgressTs(request.sessionId, fetcher)
+  const progressTask = pollYXZModelProgress(request.sessionId, progressController.signal, request.onProgress, fetcher, baseline)
 
   // Quality-first engine chain: Tripo3D cloud PBR (primary) ->
   // Tencent Cloud Hunyuan3D 专业版 (second, auto-switch when Tripo unreachable) ->
@@ -370,8 +529,9 @@ export async function createYXZCartoonModel(request: YXZModelRequest, fetcher: t
       try {
         request.onProgress?.({
           percent: 2,
-          message: i === 0 ? '开始制作 3D 模型，请耐心等待…' : `${engine.label} 引擎不可用，正在切换备用引擎（${i + 1}/${engines.length}）…`,
+          message: i === 0 ? '已收到你的方案，马上开始制作…' : '生成通道暂时不稳定，正在自动换一条继续…',
           step: 'building',
+          stage: 'queued',
         })
         const response = await fetcher(`${getYXZPrintApiBase()}${engine.endpoint}`, {
           method: 'POST',
@@ -401,7 +561,7 @@ export async function createYXZCartoonModel(request: YXZModelRequest, fetcher: t
         if (!isRecord(raw) || typeof raw.session_id !== 'string' || typeof raw.model_url !== 'string')
           throw new Error('3D 生成服务返回的数据格式无法识别')
 
-        request.onProgress?.({ percent: 100, message: `3D 模型已生成（${engine.label}）`, step: 'done' })
+        request.onProgress?.({ percent: 100, message: '3D 模型已经做好啦，可以预览和下载了', step: 'done', stage: 'done' })
         return {
           sessionId: raw.session_id,
           modelUrl: absolutePrintApiUrl(raw.model_url),
@@ -412,11 +572,11 @@ export async function createYXZCartoonModel(request: YXZModelRequest, fetcher: t
       }
       catch (error) {
         if (linked.timedOut()) {
-          request.onProgress?.({ percent: 0, message: '3D 生成超过 10 分钟仍未完成，请稍后重试', step: 'failed' })
+          request.onProgress?.({ percent: 0, message: '3D 生成超过 10 分钟仍未完成，请稍后重试', step: 'failed', stage: 'failed' })
           throw new Error('3D 生成超过 10 分钟仍未完成，请稍后重试')
         }
         lastError = error instanceof Error ? error : new Error(String(error))
-        request.onProgress?.({ percent: 5, message: `${engine.label} 引擎失败，尝试下一个引擎…`, step: 'building' })
+        request.onProgress?.({ percent: 5, message: '这一条生成通道没能完成，正在换一条继续…', step: 'building', stage: 'geometry' })
       }
     }
   }
@@ -427,7 +587,7 @@ export async function createYXZCartoonModel(request: YXZModelRequest, fetcher: t
     await progressTask.catch(() => undefined)
   }
 
-  request.onProgress?.({ percent: 0, message: lastError?.message ?? '3D 生成失败，请重试', step: 'failed' })
+  request.onProgress?.({ percent: 0, message: lastError?.message ?? '3D 生成失败，请重试', step: 'failed', stage: 'failed' })
   throw lastError ?? new Error('3D 生成失败，请重试')
 }
 

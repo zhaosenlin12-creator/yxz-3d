@@ -159,9 +159,11 @@ cartoon-print-studio/keys.txt
 airi/apps/stage-web/public/provider-seed.json
 
 
-# Large 3D preset assets are shipped inside the release zip, not the git repo
-presets/models
-presets/models/**
+# The 宜小智 preset models are part of the product (they are what the
+# "宜小智预制 3D 模型" gallery opens), so they are committed.  They are
+# rebuilt with:
+#   python cartoon-print-studio/scripts/build_preset_models.py --stage models
+presets/build/*.tmp
 
 # Character model assets & runtime data (shipped in zip only)
 cartoon-print-studio/data/yxz_character_tripo
