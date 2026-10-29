@@ -55,6 +55,28 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File start-all.ps1
 > **断点续装**：依赖清单 / Python 版本 / torch 通道都没变时，安装步骤**秒级跳过**。
 > 想强制重装用 `-Force`；只想补模型权重用 `-OnlyModels`；不想下模型用 `-SkipModels`。
 
+### 第 2.5 步：把展台那台的体验原样搬过来
+
+密钥**不入 GitHub**（仓库是公开的），所以换机器时要把填好的
+`keys.txt` 带过去。带上它装，前后端的凭据和语音链会全部自动生成，
+新机器就是和展台那台同一套体验：
+
+```powershell
+# 把展台那台的 cartoon-print-studio\keys.txt 拷到本机任意位置
+pwsh -NoProfile -ExecutionPolicy Bypass -File install-new-pc.ps1 -KeysSource "D:\kaifa\keys.txt"
+```
+
+装完直接体检，一条命令看清这台机器是不是真的可用：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File verify-install.ps1
+```
+
+体检会逐项检查：四个服务进程、密钥是否齐备、前端凭据（`.env.local`
+与 `provider-seed.json`）、云端能力（Tripo 余额 / 生图 key）、Edge
+音色清单、本机打印与激光切割软件、以及本地 AI 权重，最后给出
+"全绿 / 主流程可用 / 有必须处理的项"。
+
 ### 第 3 步：验证
 
 | 检查项 | 方法 | 期望 |
