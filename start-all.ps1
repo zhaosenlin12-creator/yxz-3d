@@ -27,7 +27,8 @@ param(
     [switch]$NoServerRuntime,
     [switch]$NoVoicebox,
     [switch]$NoSupervisor,
-    [switch]$SkipInstall
+    [switch]$SkipInstall,
+    [switch]$WithModels
 )
 
 $ErrorActionPreference = 'Continue'
@@ -68,7 +69,12 @@ if (-not $SkipInstall) {
         # 目标机器可能只有 Windows PowerShell 5.1，没有 pwsh。
         $psExe = Get-YxzPowerShell
         if (-not $psExe) { Fail "找不到 PowerShell，无法自动安装依赖"; exit 1 }
-        & $psExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'install-new-pc.ps1')
+        # AI 模型权重（SD 1.5 / Hunyuan3D / TripoSR，约 9GB）默认不拉：
+        # 3D 走的是 Tripo / 混元云端，本地权重只是兜底引擎。为了让换机
+        # 第一次就能很快用起来，默认跳过；要本地兜底就加 -WithModels。
+        $installArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'install-new-pc.ps1'))
+        if (-not $WithModels) { $installArgs += '-SkipModels' }
+        & $psExe @installArgs
         if ($LASTEXITCODE -ne 0) { Fail "自动安装未完成，请手动运行 install-new-pc.ps1"; exit 1 }
         Write-Host ""
     }

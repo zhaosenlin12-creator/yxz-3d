@@ -11,9 +11,12 @@ echo   2) 从 keys.txt 生成前端服务商配置（LLM / TTS / 语音链）
 echo   3) 拉起后端 / 前端 / 本地语音包 / WS 通道
 echo   4) 自动打开浏览器
 echo.
-echo   首次运行需联网下载依赖（Node 依赖 + Python 环境 + AI 权重）
+echo   首次运行需联网下载依赖（Node 依赖 + Python 环境）
 echo   约 2-4GB，看网速 10-40 分钟；装完后可离线使用。
 echo   已有依赖的机器 30 秒内起来。
+echo.
+echo   需要本地 AI 兜底引擎（多下约 9GB 权重）时：
+echo   一键部署并启动.bat -WithModels
 echo ============================================================
 echo.
 
