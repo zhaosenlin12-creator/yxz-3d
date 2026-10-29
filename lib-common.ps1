@@ -479,3 +479,15 @@ function Find-ProjectServerRuntime {
     }
     return $null
 }
+
+function Get-YxzPowerShell {
+    # 目标机器不一定装了 PowerShell 7（pwsh）。Windows 10/11 自带的是
+    # Windows PowerShell 5.1，脚本本身没有用 7 独有的语法，所以 5.1 也能跑。
+    # 这里做一层兜底：新电脑只有 5.1 时，调用子脚本不要再硬写 pwsh，
+    # 否则"自动装依赖"这一步会直接 command not found，装不上也起不来。
+    $ps7 = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($ps7) { return $ps7.Source }
+    $ps5 = Get-Command powershell -ErrorAction SilentlyContinue
+    if ($ps5) { return $ps5.Source }
+    return $null
+}

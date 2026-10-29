@@ -61,12 +61,32 @@ Ok "Python  $python  ($pyVer)"
 
 $uv = Get-UvPath
 if ($uv) { Ok "uv      $uv  (依赖解析走 uv，比 pip 快一个数量级)" }
-else     { Warn "未找到 uv，将回退到 pip（会慢很多，建议先装：pip install uv）" }
+else {
+    # 新电脑上一般没装 uv。回退到 pip 解析 aiohttp 会指数级回溯，
+    # 实测十分钟都不收敛 —— 所以这里直接把它装上（uv 本体只有十几 MB）。
+    Warn "未找到 uv，正在自动安装（pip install uv）..."
+    & $python -m pip install --upgrade uv 2>&1 | Select-Object -Last 3 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+    if ($LASTEXITCODE -ne 0) {
+        # PEP 668 的"外部管理环境"会直接拒绝安装，换个姿势再来一次。
+        & $python -m pip install --upgrade --break-system-packages uv 2>&1 |
+            Select-Object -Last 3 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+    }
+    $uv = Get-UvPath
+    if ($uv) { Ok "uv      $uv" }
+    else     { Warn "uv 安装失败，将回退到 pip（会慢很多，建议先装：pip install uv）" }
+}
 
 $corepack = Get-Command corepack.cmd -ErrorAction SilentlyContinue
 if (-not $corepack) { Warn "未找到 corepack，改用已安装的 pnpm" }
 $pnpm = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
-if (-not $pnpm) { Fail "未找到 pnpm，请执行：corepack enable"; exit 1 }
+if (-not $pnpm -and $corepack) {
+    # Node 16.9+ 自带 corepack，pnpm 只是没被启用而已。
+    # 新电脑上这几乎是标准情况，脚本自己把它打开就行。
+    Step "启用 corepack 以获得 pnpm ..."
+    & $corepack.Source enable 2>&1 | Select-Object -Last 3 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+    $pnpm = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
+}
+if (-not $pnpm) { Fail "未找到 pnpm，请执行：corepack enable（Node 自带 corepack）"; exit 1 }
 Ok "pnpm    $($pnpm.Source)"
 
 # ---- 1) 镜像 ---------------------------------------------------------
@@ -165,7 +185,14 @@ if ($OnlyModels) {
 # 缺了它们，本地生图 / 本地 3D 生成都走不通，只能靠云端 key。
 if (-not $SkipModels) {
     Step "下载 AI 模型权重（SD 1.5 / Hunyuan3D-2 mini / TripoSR，约 9GB，断点续传）..."
-    & pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'fetch-models.ps1')
+    # 目标机器可能只有 Windows PowerShell 5.1，没有 pwsh。
+    $psExe = Get-YxzPowerShell
+    if ($psExe) {
+        & $psExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'fetch-models.ps1')
+    }
+    else {
+        Warn "找不到 PowerShell，跳过模型权重下载（本地生图 / 本地 3D 会不可用，云端 key 仍可出图）"
+    }
     Write-Host ""
 }
 

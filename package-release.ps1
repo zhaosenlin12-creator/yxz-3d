@@ -61,7 +61,8 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 Write-Host "[2/7] 拷贝前端 airi ..." -ForegroundColor Cyan
 Copy-Clean -Src (Join-Path $SourceRoot 'airi') -Dst (Join-Path $OutDir 'airi') `
     -ExcludeDirs @('node_modules', '.git', '.turbo', '.cache', 'dist', 'logs', 'tmp',
-                   '__pycache__', 'coverage', '.output', '.vite', 'test-results') `
+                   '__pycache__', 'coverage', '.output', '.vite', 'test-results',
+                   '.pytest_cache', '.run', '.next', 'storybook-static') `
     -ExcludeFiles @('*.log', '.eslintcache', '.dev.err.log', '.parts.log', '.chain.log')
 Ok "airi"
 
@@ -83,7 +84,18 @@ foreach ($name in $keepData) {
     $src = Join-Path $SourceRoot ("cartoon-print-studio\data\{0}" -f $name)
     if (Test-Path -LiteralPath $src) {
         Copy-Clean -Src $src -Dst (Join-Path $OutDir ("cartoon-print-studio\data\{0}" -f $name)) `
-            -ExcludeDirs @() -ExcludeFiles @('*.log')
+            -ExcludeDirs @() -ExcludeFiles @('*.log', '*.blend', '*.blend1')
+        Info "data\$name"
+    }
+}
+
+# data 根目录下还有值得带走的东西：
+#   edge_voices.json      Edge 免费音色清单快照 —— 官方接口 503 / 断网时仍能选音色
+#   provider_health.json  不带：那是本机的熔断器状态，换机器应该从干净状态开始
+foreach ($name in @('edge_voices.json')) {
+    $src = Join-Path $SourceRoot ("cartoon-print-studio\data\{0}" -f $name)
+    if (Test-Path -LiteralPath $src) {
+        Copy-Item -LiteralPath $src -Destination (Join-Path $OutDir ("cartoon-print-studio\data\{0}" -f $name)) -Force
         Info "data\$name"
     }
 }
@@ -96,10 +108,18 @@ Copy-Clean -Src (Join-Path $SourceRoot 'presets') -Dst (Join-Path $OutDir 'prese
 Ok "presets"
 
 Write-Host "[6/7] 拷贝根目录交付脚本 ..." -ForegroundColor Cyan
-Get-ChildItem -LiteralPath $SourceRoot -File | Where-Object {
-    $_.Name -ne '.gitignore'
-} | ForEach-Object {
+# .gitignore 也带走：它里面写着 keys.txt / .env.local 不入库，
+# 万一有人在这个目录里 git init，密钥不会被误提交。
+Get-ChildItem -LiteralPath $SourceRoot -File | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $OutDir $_.Name) -Force
+}
+# 根目录的 scripts/ 是项目自己的工具脚本（名片模板生成等），
+# 跟着仓库一起走，换机器后不用再从别处捞。
+$rootScripts = Join-Path $SourceRoot 'scripts'
+if (Test-Path -LiteralPath $rootScripts) {
+    Copy-Clean -Src $rootScripts -Dst (Join-Path $OutDir 'scripts') `
+        -ExcludeDirs @('__pycache__') -ExcludeFiles @('*.log')
+    Info "scripts"
 }
 Ok "根目录文件"
 
@@ -126,9 +146,81 @@ else {
     Warn "源 keys.txt 未找到，转移电脑后需要手动补齐 API key"
 }
 
+# ---- 交付前自检：缺一个都不能出包 --------------------------------
+# 打包最怕的是"少拷了一个文件，别的机器上某个功能莫名其妙没了"。
+# 这里把整条链路上真正吃文件的环节列出来，缺任何一项直接失败，
+# 不让残包流出去。
+Write-Host "[自检] 校验关键文件 ..." -ForegroundColor Cyan
+$mustHave = @(
+    'cartoon-print-studio\keys.txt',
+    'cartoon-print-studio\backend\server.py',
+    'cartoon-print-studio\backend\provider_health.py',
+    'cartoon-print-studio\backend\tripo_api.py',
+    'cartoon-print-studio\backend\hunyuan_cloud_api.py',
+    'cartoon-print-studio\backend\edge_tts_api.py',
+    'cartoon-print-studio\data\edge_voices.json',
+    'airi\apps\stage-web\.env.local',
+    'airi\apps\stage-web\public\provider-seed.json',
+    'airi\packages\stage-ui\src\components\scenes\YXZPetScene.vue',
+    'airi\packages\stage-ui\src\components\scenes\YXZLaserCardMessageCard.vue',
+    'airi\packages\stage-ui\src\components\scenes\YXZCreationWorkbench.vue',
+    'airi\packages\stage-ui\src\assets\yxz\layers\manifest.json',
+    'airi\packages\stage-ui\src\assets\yxz\layers\body.png',
+    'airi\packages\stage-ui-three\src\components\YXZRealModelScene.vue',
+    'airi\packages\stage-ui\src\composables\use-yxz-print-preview.ts',
+    'airi\packages\stage-ui\src\composables\use-yxz-voice-input.ts',
+    'start-all.ps1',
+    'stop-all.ps1',
+    'install-new-pc.ps1',
+    'verify-install.ps1',
+    'gen-provider-bootstrap.ps1',
+    'supervise-all.ps1',
+    '一键部署并启动.bat',
+    '停止服务.bat',
+    '交付使用说明.md'
+)
+$missing = @()
+foreach ($rel in $mustHave) {
+    if (-not (Test-Path -LiteralPath (Join-Path $OutDir $rel))) { $missing += $rel }
+}
+if ($missing.Count -gt 0) {
+    foreach ($m in $missing) { Write-Host "  [FAIL] 缺失: $m" -ForegroundColor Red }
+    throw "打包自检未通过：缺 $($missing.Count) 个关键文件"
+}
+Ok "关键文件齐全（$($mustHave.Count) 项）"
+
+# 预制模型：4 个宜小智姿态，少一个展厅就是空的
+$presetModels = @(Get-ChildItem (Join-Path $OutDir 'presets') -Recurse -Filter 'model.glb' -File -ErrorAction SilentlyContinue)
+if ($presetModels.Count -lt 4) {
+    Warn "预制 3D 模型只有 $($presetModels.Count) 个（应为 4）"
+}
+else {
+    Ok "预制 3D 模型 $($presetModels.Count) 个"
+}
+
 $size = (Get-ChildItem -LiteralPath $OutDir -Recurse -File -ErrorAction SilentlyContinue |
     Measure-Object Length -Sum).Sum / 1MB
 Write-Host ("  交付目录大小: {0:N1} MB" -f $size) -ForegroundColor Green
+
+# ---- 生成包内清单 -------------------------------------------------
+Write-Host "[自检] 生成包内清单 ..." -ForegroundColor Cyan
+$manifest = Join-Path $OutDir '包内清单.txt'
+$allFiles = @(Get-ChildItem -LiteralPath $OutDir -Recurse -File -ErrorAction SilentlyContinue)
+$lines = New-Object System.Collections.Generic.List[string]
+$lines.Add('宜小智工作台 交付包清单')
+$lines.Add("生成时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+$lines.Add("源目录  : $SourceRoot")
+$lines.Add('')
+$lines.Add(('大小(KB)'.PadRight(12) + '相对路径'))
+$lines.Add(('-' * 100))
+foreach ($f in ($allFiles | Sort-Object FullName)) {
+    $rel = $f.FullName.Substring($OutDir.Length).TrimStart('\')
+    $lines.Add(([math]::Round($f.Length / 1KB, 1).ToString().PadRight(12) + $rel))
+}
+$lines.Add('')
+$lines.Add("文件总数: $($allFiles.Count)")
+[System.IO.File]::WriteAllLines($manifest, $lines, (New-Object System.Text.UTF8Encoding($true)))
+Ok "包内清单.txt"
 
 if ($SkipZip) {
     Write-Host "已跳过打包 ZIP（-SkipZip）" -ForegroundColor Green
@@ -140,12 +232,21 @@ Write-Host "生成 ZIP ..." -ForegroundColor Cyan
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 Compress-Archive -Path (Join-Path $OutDir '*') -DestinationPath $zip -CompressionLevel Optimal
 Ok ("ZIP: {0} ({1:N1} MB)" -f $zip, ((Get-Item $zip).Length / 1MB))
+$sha = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+[System.IO.File]::WriteAllText(
+    (Join-Path (Split-Path -Parent $OutDir) 'yxz-3d-release.zip.sha256'),
+    "$sha  yxz-3d-release.zip`r`n",
+    (New-Object System.Text.ASCIIEncoding))
+Ok "SHA256: $sha"
 
 Write-Host "" -ForegroundColor Green
 Write-Host "完成！" -ForegroundColor Green
 Write-Host "  目录: $OutDir"
 Write-Host "  ZIP : $zip"
 Write-Host ""
-Write-Host "新电脑：进入目录先运行 install-new-pc.ps1，再运行 start-all.ps1。"
-Write-Host "start-all.ps1 会自动调用 gen-provider-bootstrap.ps1，从 keys.txt 生成"
-Write-Host "前端服务商配置；没有这一步前端是没有 LLM / TTS 服务商的。"
+Write-Host "新电脑：解压覆盖后双击「一键部署并启动.bat」即可。"
+Write-Host "  依赖缺失会自动调用 install-new-pc.ps1 安装；"
+Write-Host "  启动时自动从 keys.txt 重新生成前端服务商配置。"
+Write-Host "  装完可用 verify-install.ps1 做整机体检。"
+Write-Host ""
+Write-Host "提醒：本包含真实 API key，请勿公开传播。" -ForegroundColor Yellow
