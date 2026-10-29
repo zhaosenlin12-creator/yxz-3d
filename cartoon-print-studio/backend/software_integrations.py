@@ -236,6 +236,21 @@ def _cached_discovery() -> tuple[dict[str, list[str]], dict[str, list[str]]]:
     return registry, shortcuts
 
 
+def warm_discovery_cache() -> None:
+    """Fill the registry/shortcut cache in the background.
+
+    The lookup costs about ten seconds, and until it is done every visitor
+    who opens the preview page waits for it -- long enough to look like the
+    "检测本机软件" button is missing.  Doing the work once at start-up
+    means the first visitor gets an instant answer.
+    """
+    try:
+        _cached_discovery()
+    except Exception:
+        # A missing registry must never keep the backend from starting.
+        pass
+
+
 def detect_software() -> list[dict[str, Any]]:
     """Return known local tools, with an executable path only when installed."""
     local = os.environ.get("LOCALAPPDATA", "")

@@ -345,7 +345,10 @@ async function startModelBuild() {
   }
 }
 
-const modelPreviewUrl = computed(() => model.value ? `/yxz-preview?model=${encodeURIComponent(model.value.glbUrl)}&up=${encodeURIComponent(model.value.upAxis)}&sid=${encodeURIComponent(sessionId)}` : '')
+const modelPreviewUrl = computed(() => model.value ? `/yxz-preview?model=${encodeURIComponent(model.value.glbUrl)}&up=${encodeURIComponent(model.value.upAxis)}&sid=${encodeURIComponent(sessionId)}&embed=1` : '')
+// The same page opened on its own: the embedded variant is trimmed down
+// to fit the frame, the standalone one keeps the roomy layout.
+const modelPreviewFullUrl = computed(() => model.value ? `/yxz-preview?model=${encodeURIComponent(model.value.glbUrl)}&up=${encodeURIComponent(model.value.upAxis)}&sid=${encodeURIComponent(sessionId)}` : '')
 const progressPercent = computed(() => progress.value?.percent ?? 0)
 const origin = typeof window !== 'undefined' ? window.location.origin : ''
 
@@ -461,34 +464,38 @@ function goBack() {
             title="宜小智 3D 模型预览"
           />
           <div class="yxz-studio-3d-actions">
-            <a :href="modelPreviewUrl" target="_blank" rel="noopener noreferrer">新窗口打开 3D 预览 ↗</a>
+            <a :href="modelPreviewFullUrl" target="_blank" rel="noopener noreferrer">新窗口打开 3D 预览 ↗</a>
             <a :href="`${model.stlUrl}${model.stlUrl.includes('?') ? '&' : '?'}download=1`" download rel="noreferrer">下载 STL（打印用）</a>
           </div>
           <section v-if="parts.length" class="yxz-studio-parts" aria-label="模型零件拆分">
-            <header class="yxz-studio-parts-head">
-              <strong>零件拆分</strong>
-              <small>这个模型由 {{ parts.length }} 个独立零件组成，可以分别预览和打印</small>
-            </header>
-            <div class="yxz-studio-parts-grid">
-              <article v-for="part in parts" :key="part.index" class="yxz-studio-part">
-                <h5>{{ part.name }}</h5>
-                <p>{{ part.extents_mm.join(' × ') }} mm · {{ part.faces.toLocaleString('en-US') }} 面</p>
-                <div class="yxz-studio-part-actions">
-                  <a
-                    class="yxz-studio-preset-link"
-                    :href="partPreviewUrl(part)"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >3D 预览</a>
-                  <a
-                    class="yxz-studio-preset-link"
-                    :href="`${getYXZPrintApiBase()}${part.stl_url}${part.stl_url.includes('?') ? '&' : '?'}download=1`"
-                    download
-                    rel="noreferrer"
-                  >下载 STL</a>
-                </div>
-              </article>
-            </div>
+            <details class="yxz-studio-parts-details" :open="parts.length <= 12">
+              <summary class="yxz-studio-parts-head">
+                <strong>零件拆分</strong>
+                <small v-if="parts.length === 1">整个模型是一个连通的整体，可以直接 3D 打印</small>
+                <small v-else-if="parts.length <= 30">这个模型由 {{ parts.length }} 个独立零件组成，可以分别预览和打印</small>
+                <small v-else>网格被拆成了 {{ parts.length }} 块碎片，说明模型本身不完整，建议重新生成一次</small>
+              </summary>
+              <div class="yxz-studio-parts-grid">
+                <article v-for="part in parts" :key="part.index" class="yxz-studio-part">
+                  <h5>{{ part.name }}</h5>
+                  <p>{{ part.extents_mm.join(' × ') }} mm · {{ part.faces.toLocaleString('en-US') }} 面</p>
+                  <div class="yxz-studio-part-actions">
+                    <a
+                      class="yxz-studio-preset-link"
+                      :href="partPreviewUrl(part)"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >3D 预览</a>
+                    <a
+                      class="yxz-studio-preset-link"
+                      :href="`${getYXZPrintApiBase()}${part.stl_url}${part.stl_url.includes('?') ? '&' : '?'}download=1`"
+                      download
+                      rel="noreferrer"
+                    >下载 STL</a>
+                  </div>
+                </article>
+              </div>
+            </details>
           </section>
         </template>
         <div v-else-if="building" class="yxz-studio-3d-building">
@@ -1073,8 +1080,13 @@ function goBack() {
 }
 
 .yxz-studio-3d-frame {
-  flex: 1;
+  /* The viewer needs a height of its own.  With `flex: 1` the frame
+     collapsed to the 120px default as soon as anything grew below it,
+     which pushed the model out of sight and left the visitor with a
+     strip of buttons and nothing to look at. */
+  flex: 0 0 auto;
   width: 100%;
+  height: clamp(420px, 58vh, 660px);
   border: 0;
   border-radius: 10px;
   background: #0a1a2c;
@@ -1107,6 +1119,32 @@ function goBack() {
   flex-wrap: wrap;
   gap: 6px 12px;
   align-items: baseline;
+  margin-bottom: 10px;
+}
+
+.yxz-studio-parts-details > .yxz-studio-parts-head {
+  margin-bottom: 0;
+  padding: 6px 0;
+  cursor: pointer;
+  list-style: none;
+}
+
+.yxz-studio-parts-details > .yxz-studio-parts-head::-webkit-details-marker {
+  display: none;
+}
+
+.yxz-studio-parts-details > .yxz-studio-parts-head::after {
+  content: '展开';
+  margin-left: auto;
+  color: #38b6ff;
+  font-size: 12px;
+}
+
+.yxz-studio-parts-details[open] > .yxz-studio-parts-head::after {
+  content: '收起';
+}
+
+.yxz-studio-parts-details[open] > .yxz-studio-parts-head {
   margin-bottom: 10px;
 }
 

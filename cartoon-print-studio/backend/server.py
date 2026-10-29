@@ -24,6 +24,24 @@ _BACKEND = os.path.join(ROOT, "backend")
 import sys
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+import provider_health
+
+
+# The 3D engine chain runs several engines one after another.  Only the
+# first one may clear the progress log: an engine that comes after a
+# failure has to keep the events of the engine before it, otherwise the
+# progress bar the visitor is watching jumps back to zero mid-build.
+_PROGRESS_RESET = threading.local()
+
+
+def _progress_should_reset() -> bool:
+    """True when this engine may start a fresh progress log."""
+    return bool(getattr(_PROGRESS_RESET, "reset", True))
+
+
+def _new_progress(sid: str, phase: str, reset: bool = False):
+    """Create a progress logger that honours the chain's reset rule."""
+    return progress.Progress(sid, phase, reset=(reset and _progress_should_reset()))
 
 # ---- crash forensics -------------------------------------------------
 # The backend used to vanish with exit code 1 and nobody could tell why:
@@ -199,6 +217,69 @@ def session_dir(sid: str) -> str:
         raise HTTPException(400, "无效的会话 ID")
     os.makedirs(p, exist_ok=True)
     return p
+
+
+SOURCE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
+
+
+def resolve_source_png(session_id: str, image_index: int, source_png: Optional[str]) -> str:
+    """Pick the picture a 3D engine has to work from.
+
+    The visitor can edit the preview in the canvas before the build starts.
+    That edit used to reach only the local relief engine, so the cloud
+    engines silently rebuilt the *original* drawing -- the edit looked like
+    it had been thrown away.  Every engine now reads the same source file.
+
+    ``source_png`` is a file name inside the session's own preview folder,
+    never a path: the client must not be able to point the builder at an
+    arbitrary file on this machine.
+    """
+    sd = session_dir(session_id)
+    previews = os.path.join(sd, "previews")
+    if source_png:
+        name = str(source_png).strip()
+        if not SOURCE_NAME_RE.fullmatch(name):
+            raise HTTPException(400, "无效的图片来源")
+        candidate = os.path.join(previews, name)
+        if os.path.commonpath([os.path.abspath(candidate), os.path.abspath(previews)]) != os.path.abspath(previews):
+            raise HTTPException(400, "无效的图片来源")
+        if not os.path.isfile(candidate):
+            raise HTTPException(404, "preview not found")
+        return candidate
+    src = os.path.join(previews, f"img_{int(image_index)}.png")
+    if not os.path.isfile(src):
+        raise HTTPException(404, "preview not found")
+    return src
+
+
+def store_edited_preview(session_id: str, image_index: int, custom_image: Optional[str]) -> Optional[str]:
+    """Save the visitor's edited preview and return its file name.
+
+    The edited picture is kept next to the original one so the build has a
+    stable file to read, and so a second edit replaces the first instead of
+    piling up.
+    """
+    if not custom_image:
+        return None
+    if not str(custom_image).startswith("data:image/") or "," not in str(custom_image):
+        raise HTTPException(400, "custom_image 必须是图片 data URL")
+    _, encoded = str(custom_image).split(",", 1)
+    if len(encoded) > 40 * 1024 * 1024:
+        raise HTTPException(413, "custom_image 过大")
+    try:
+        import base64 as _b64
+        blob = _b64.b64decode(encoded, validate=False)
+    except Exception:
+        raise HTTPException(400, "custom_image 不是有效的图片")
+    if len(blob) < 32:
+        raise HTTPException(400, "custom_image 不是有效的图片")
+    sd = session_dir(session_id)
+    previews = os.path.join(sd, "previews")
+    os.makedirs(previews, exist_ok=True)
+    name = f"edit_{int(image_index)}.png"
+    with open(os.path.join(previews, name), "wb") as handle:
+        handle.write(blob)
+    return name
 
 
 @app.post("/api/upload-image", status_code=201)
@@ -438,6 +519,9 @@ class RefineReq(BaseModel):
 class ThreeDReq(BaseModel):
     session_id: str
     image_index: int = 0
+    # File name of the picture to rebuild, inside the session's preview
+    # folder.  Set when the visitor edited the preview in the canvas.
+    source_png: Optional[str] = None
 class PrintReq(BaseModel):
     session_id: str
     seed: Optional[int] = None   # when picking a candidate from /api/3d_multi
@@ -600,13 +684,23 @@ def health():
             "llm_detail": llm_client.key_counts(),
             "aixj_image_keys": len(api_image.AIXJ_IMAGE_KEYS),
             "minimax_image_keys": len(api_image.MINIMAX_IMAGE_KEYS),
+            # A key whose plan ran out is taken out of the rotation for an
+            # hour, so the visitor is not billed for a doomed call every
+            # time a picture is requested.
+            "minimax_dead_keys": len(api_image._MINIMAX_DEAD_KEYS),
+            "minimax_alive_keys": max(
+                0, len(api_image.MINIMAX_IMAGE_KEYS) - len(api_image._MINIMAX_DEAD_KEYS)),
             "prefer_chain": (api_image.health() or {}).get("chain", "?"),
             "tripo3d_key_loaded": tripo_info.get("key_loaded", False),
             "tripo3d_balance": (bal or {}).get("balance"),
             "tripo3d_ok": (bal or {}).get("ok", False),
             # True while the first probe is still running: the UI shows
             # "checking" instead of wrongly reporting the provider as down.
-            "tripo3d_checking": bool(_BALANCE_PROBE["running"])}
+            "tripo3d_checking": bool(_BALANCE_PROBE["running"]),
+            # Which providers are currently usable.  This is the first
+            # thing to look at when a build goes wrong: a provider in the
+            # "open" state is the reason the visitor waited.
+            "providers": provider_health.snapshot()}
 
 
 @app.get("/api/ping")
@@ -1122,13 +1216,11 @@ def refine_preview_endpoint(req: RefineReq):
 
 @app.post("/api/3d")
 def to_3d(req: ThreeDReq):
-    pg = progress.Progress(req.session_id, "3d-triposr", reset=True)
+    pg = _new_progress(req.session_id, "3d-triposr", reset=True)
     os.environ["PROGRESS_SID"] = req.session_id
     pg.emit("preprocess", 10, "正在处理你的设计稿…", "queued")
     sd = session_dir(req.session_id)
-    src = os.path.join(sd, "previews", f"img_{req.image_index}.png")
-    if not os.path.isfile(src):
-        raise HTTPException(404, "preview not found")
+    src = resolve_source_png(req.session_id, req.image_index, req.source_png)
     out = os.path.join(sd, "model")
     os.makedirs(out, exist_ok=True)
     try:
@@ -1180,7 +1272,7 @@ def to_3d_cartoon(req: ThreeDCartoonReq):
     Always succeeds, always looks like the cartoon, always prints cleanly.
     This is the recommended default for cute cartoon characters.
     """
-    pg = progress.Progress(req.session_id, "3d-cartoon", reset=True)
+    pg = _new_progress(req.session_id, "3d-cartoon", reset=True)
     pg.emit("preprocess", 10, "正在读取你的设计稿…", "queued")
     sd = session_dir(req.session_id)
     src = os.path.join(sd, "previews", f"img_{req.image_index}.png")
@@ -1410,6 +1502,9 @@ class ThreeDV2Req(BaseModel):
     session_id: str
     image_index: int = 0
     views: int = 1  # 1 supplement view (front + 1 alternate) - keeps TripoSR within 6GB VRAM
+    # File name of the picture to rebuild, inside the session's preview
+    # folder.  Set when the visitor edited the preview in the canvas.
+    source_png: Optional[str] = None
 def _view_prompts(base_prompt: str, n: int) -> List[str]:
     """Generate n distinct view prompts to supplement the front view."""
     style_suffix = ", soft pastel cel-shaded cartoon, simple shapes, full body, kid-friendly, white background, no text, single object, clean silhouette, 3d printable figurine"
@@ -1434,11 +1529,23 @@ def to_3d_v2(req: ThreeDV2Req):
     sd = session_dir(req.session_id)
     pdir = os.path.join(sd, "previews")
     previews_meta = os.path.join(sd, "specs.json")
-    src = os.path.join(pdir, f"img_{req.image_index}.png")
-    pg = progress.Progress(req.session_id, "3d-v2", reset=True)
+    src = resolve_source_png(req.session_id, req.image_index, req.source_png)
+    pg = _new_progress(req.session_id, "3d-v2", reset=True)
     if not os.path.isfile(src):
         pg.fail(f"预览图不存在: {src}")
         raise HTTPException(404, "preview not found")
+    # The local builder needs torch and the model weights.  When they are
+    # not installed this engine can never answer, and the chain in front
+    # of it has to hear that straight away: generating the supplementary
+    # views first would spend twenty seconds and a few image credits on a
+    # model that is never going to be built.  501 means "this engine is
+    # not installed", and the caller moves on to the next one.
+    probe = mesh_isolation.probe_local_mesh("triposr")
+    if not probe.get("available"):
+        reason = str(probe.get("reason") or "本地建模引擎未安装")
+        print(f"[3d_v2] local engine unavailable, skipping: {reason}", flush=True)
+        pg.fail("本地建模引擎不可用")
+        raise HTTPException(501, f"local_engine_unavailable: {reason}")
     # Load the user's original prompt + sub-prompt for this index to keep viewpoint consistent
     try:
         with open(previews_meta, "r", encoding="utf-8") as f:
@@ -1456,8 +1563,14 @@ def to_3d_v2(req: ThreeDV2Req):
     # going if we got at least one usable view.
     valid_items = [(b, t) for b, t in (raw_items or []) if b is not None]
     if not valid_items:
-        pg.fail("补充视角生图失败")
-        raise HTTPException(500, "supplementary view generation failed")
+        # The supplementary views only make the reconstruction nicer.  When
+        # the image service is unreachable the front view alone still gives
+        # a usable model, so the build must not die here -- the visitor is
+        # watching a progress bar and expects a model, not an error.
+        print("[3d_v2] supplementary views unavailable, continuing with the "
+              "front view only")
+        pg.emit("views-fallback", 40, "补充视角暂时取不到，先用主视角继续…", "geometry")
+        valid_items = []
     views_dir = os.path.join(sd, "models_v2_views")
     os.makedirs(views_dir, exist_ok=True)
     view_paths: List[str] = [src]
@@ -1503,6 +1616,9 @@ class ThreeDTripoReq(BaseModel):
     model_version: str = "v3.1-20260211"
     texture_quality: str = "detailed"
     face_limit: Optional[int] = None
+    # File name of the picture to rebuild, inside the session's preview
+    # folder.  Set when the visitor edited the preview in the canvas.
+    source_png: Optional[str] = None
 
 
 class ThreeDHYReq(BaseModel):
@@ -1512,7 +1628,7 @@ class ThreeDHYReq(BaseModel):
     octree: int = 96
 @app.post("/api/3d_hy")
 def to_3d_hy(req: ThreeDHYReq):
-    pg = progress.Progress(req.session_id, "3d-hunyuan", reset=True)
+    pg = _new_progress(req.session_id, "3d-hunyuan", reset=True)
     pg.emit("warmup", 5, "正在准备 3D 模型…", "queued")
     os.environ["PROGRESS_SID"] = req.session_id
     """High-quality 3D using Hunyuan3D-2 mini (Tencent 3.5B image-to-3D model).
@@ -1565,7 +1681,7 @@ def to_3d_tripo(req: ThreeDTripoReq):
     """
     if not tripo_api.API_KEY:
         raise HTTPException(503, "3D 生成服务暂时不可用，请检查服务端密钥配置")
-    pg = progress.Progress(req.session_id, "3d-tripo", reset=True)
+    pg = _new_progress(req.session_id, "3d-tripo", reset=True)
     # Only the cached balance is read here.  The probe itself runs in the
     # background: asking for the balance on the request path would stall the
     # visitor for seconds whenever the provider is slow, which is exactly
@@ -1588,9 +1704,7 @@ def to_3d_tripo(req: ThreeDTripoReq):
     # provider, so there is nothing to wait for here.
     pg.emit("upload", 5, "正在上传你的设计稿…", "queued")
     sd = session_dir(req.session_id)
-    src = os.path.join(sd, "previews", f"img_{req.image_index}.png")
-    if not os.path.isfile(src):
-        raise HTTPException(404, "preview not found")
+    src = resolve_source_png(req.session_id, req.image_index, req.source_png)
     out = os.path.join(sd, "model")
     os.makedirs(out, exist_ok=True)
 
@@ -1698,6 +1812,9 @@ class ThreeDHYCloudReq(BaseModel):
     model: str = "3.1"
     enable_pbr: bool = True
     face_count: int = 500000
+    # File name of the picture to rebuild, inside the session's preview
+    # folder.  Set when the visitor edited the preview in the canvas.
+    source_png: Optional[str] = None
 
 
 @app.post("/api/3d_hycloud")
@@ -1711,11 +1828,9 @@ def to_3d_hycloud(req: ThreeDHYCloudReq):
     keys = hyc.health()
     if not keys["key_loaded"]:
         raise HTTPException(503, "3D 生成服务暂时不可用，请检查服务端密钥配置")
-    pg = progress.Progress(req.session_id, "3d-hunyuan-cloud", reset=True)
+    pg = _new_progress(req.session_id, "3d-hunyuan-cloud", reset=True)
     sd = session_dir(req.session_id)
-    src = os.path.join(sd, "previews", f"img_{req.image_index}.png")
-    if not os.path.isfile(src):
-        raise HTTPException(404, "preview not found")
+    src = resolve_source_png(req.session_id, req.image_index, req.source_png)
     out = os.path.join(sd, "model")
     os.makedirs(out, exist_ok=True)
 
@@ -1767,6 +1882,194 @@ def to_3d_hycloud(req: ThreeDHYCloudReq):
         "extents_mm": ext_str,
         "elapsed_s": round(time.time() - t0, 1),
     }
+
+
+class ThreeDBuildReq(BaseModel):
+    model_config = {"protected_namespaces": ()}
+    session_id: str
+    image_index: int = 0
+    # The visitor's edited preview, as a data URL.  It is stored next to
+    # the original preview and every engine builds from that file.
+    custom_image: Optional[str] = None
+    target_height_mm: float = 70.0
+
+
+# The 3D engines, best first.  "provider" is the name the shared circuit
+# breaker knows the engine by: a provider that is known to be down is
+# skipped straight away instead of costing the visitor a timeout.
+_BUILD_ENGINES = [
+    {"key": "tripo", "provider": "tripo3d", "label": "Tripo3D 高清"},
+    {"key": "hycloud", "provider": "hunyuan3d", "label": "混元3D 云端"},
+    {"key": "v2", "provider": "local-triposr", "label": "本地彩色 3D"},
+    {"key": "cartoon", "provider": "local-relief", "label": "立体浮雕"},
+]
+
+# A cloud engine that fails on the network is worth one more try: a DNS
+# answer that did not come back usually clears within seconds, and a retry
+# keeps the visitor on the good engine instead of dropping them to the
+# relief model.
+ENGINE_RETRY_WAIT_S = 4.0
+
+
+def _run_build_engine(key: str, req: ThreeDBuildReq, source_name: Optional[str]) -> Dict[str, Any]:
+    """Run one 3D engine and return its payload."""
+    if key == "tripo":
+        return to_3d_tripo(ThreeDTripoReq(
+            session_id=req.session_id,
+            image_index=req.image_index,
+            target_height_mm=req.target_height_mm,
+            model_version="v3.1-20260211",
+            texture_quality="detailed",
+            source_png=source_name,
+        ))
+    if key == "hycloud":
+        return to_3d_hycloud(ThreeDHYCloudReq(
+            session_id=req.session_id,
+            image_index=req.image_index,
+            target_height_mm=req.target_height_mm,
+            model="3.1",
+            enable_pbr=True,
+            face_count=500000,
+            source_png=source_name,
+        ))
+    if key == "v2":
+        return to_3d_v2(ThreeDV2Req(
+            session_id=req.session_id,
+            image_index=req.image_index,
+            views=1,
+            source_png=source_name,
+        ))
+    return to_3d_cartoon(ThreeDCartoonReq(
+        session_id=req.session_id,
+        image_index=req.image_index,
+        custom_image=req.custom_image,
+    ))
+
+
+def _engine_failure_kind(status: int) -> str:
+    """How the shared breaker should remember a failed engine."""
+    if status == 402:
+        return "quota"
+    if status in (401, 403):
+        return "auth"
+    if status >= 500:
+        return "server"
+    return "unknown"
+
+
+@app.post("/api/3d_build")
+def to_3d_build(req: ThreeDBuildReq):
+    """Build the 3D model, walking the engine chain on the server.
+
+    Why this lives here and not in the browser: the chain can take five
+    minutes, and a browser-driven chain dies with the tab.  A refresh, a
+    sleeping laptop, a lost wifi or the chat watchdog all used to cancel a
+    build that the provider was still working on -- the visitor came back
+    to "生成失败" while the model was already being made.  On the server
+    the build keeps running; the page can be reloaded and the finished
+    model is picked up from the session.
+
+    The chain also uses the shared circuit breaker, so a provider that is
+    known to be down is skipped immediately instead of every visitor
+    waiting for the same timeout.
+    """
+    session_dir(req.session_id)
+    source_name = store_edited_preview(req.session_id, req.image_index, req.custom_image)
+    # Every engine needs the picture: without it the whole chain would
+    # fail one after another with a confusing error.
+    resolve_source_png(req.session_id, req.image_index, source_name)
+
+    attempts: List[Dict[str, Any]] = []
+    last_error: Optional[str] = None
+    last_status = 500
+    pg = _new_progress(req.session_id, "3d-build", reset=True)
+    pg.emit("queued", 2, "已经收到你的方案，马上开始制作…", "queued")
+
+    try:
+        for index, engine in enumerate(_BUILD_ENGINES):
+            key = engine["key"]
+            provider = engine["provider"]
+            # The chain already cleared the log when it started, so every
+            # engine appends to it: the events of the engine that failed
+            # stay visible and the progress bar never jumps back to zero.
+            _PROGRESS_RESET.reset = False
+
+            if not provider.startswith("local-"):
+                left = provider_health.remaining(provider)
+                if left > 0:
+                    print(f"[3d_build] {key}: {provider} is cooling down "
+                          f"({left:.0f}s left), skipping", flush=True)
+                    attempts.append({"engine": key, "skipped": True,
+                                     "reason": f"cooling_down_{int(left)}s"})
+                    continue
+
+            for attempt in range(2):
+                try:
+                    payload = _run_build_engine(key, req, source_name)
+                except HTTPException as exc:
+                    status = int(exc.status_code)
+                    detail = exc.detail
+                    if isinstance(detail, dict):
+                        detail = detail.get("error") or detail.get("hint") or ""
+                    last_status = status
+                    last_error = str(detail or f"HTTP {status}")
+                    print(f"[3d_build] {key} failed: HTTP {status} {last_error[:200]}",
+                          flush=True)
+
+                    if status == 404:
+                        # The picture is missing -- no other engine will do
+                        # better, so stop here instead of failing four times.
+                        attempts.append({"engine": key, "error": last_error, "status": status})
+                        raise
+                    if status == 501:
+                        # The engine is not installed on this machine.
+                        attempts.append({"engine": key, "skipped": True,
+                                         "reason": "not_installed"})
+                        break
+                    if not provider.startswith("local-"):
+                        provider_health.report_failure(
+                            provider, _engine_failure_kind(status), last_error)
+                    if status in (402, 401, 403):
+                        # The key is spent or rejected: trying again in a
+                        # second would only cost time.
+                        attempts.append({"engine": key, "error": last_error, "status": status})
+                        break
+                    if attempt == 0:
+                        # A provider that blinks gets one more go before
+                        # the chain moves on.
+                        pg.emit(f"{key}-retry", 8,
+                                "这一条生成通道刚刚出了点状况，正在继续…", "queued")
+                        time.sleep(ENGINE_RETRY_WAIT_S)
+                        continue
+                    attempts.append({"engine": key, "error": last_error, "status": status})
+                    break
+                except Exception as exc:
+                    traceback.print_exc()
+                    last_status = 500
+                    last_error = str(exc)
+                    if not provider.startswith("local-"):
+                        provider_health.report_failure(provider, "unknown", last_error)
+                    if attempt == 0:
+                        pg.emit(f"{key}-retry", 8,
+                                "这一条生成通道刚刚出了点状况，正在继续…", "queued")
+                        time.sleep(ENGINE_RETRY_WAIT_S)
+                        continue
+                    attempts.append({"engine": key, "error": last_error, "status": 500})
+                    break
+                else:
+                    if not provider.startswith("local-"):
+                        provider_health.report_success(provider)
+                    result = dict(payload)
+                    result["engine_chain"] = attempts + [{"engine": key, "ok": True}]
+                    print(f"[3d_build] done with {key} in "
+                          f"{result.get('elapsed_s', 0)}s", flush=True)
+                    return result
+    finally:
+        _PROGRESS_RESET.reset = True
+
+    pg.fail("这次没能生成出模型，请再试一次")
+    raise HTTPException(last_status if last_status >= 400 else 500,
+                        {"error": last_error or "3D 生成失败", "attempts": attempts})
 
 
 @app.get("/api/bambu")
@@ -2166,12 +2469,24 @@ def laser_card_generate(req: LaserCardReq):
         raise HTTPException(500, f"名片生成失败：{exc}") from exc
 
     sid = result["session_id"]
+    # The card keeps a stable file name for the session, so a second
+    # generation (the visitor typed a name and pressed the button again)
+    # would be answered from the browser's cache and the preview would
+    # keep showing the first card.  Stamp the URLs with the revision of
+    # the files that were just written, so the preview always shows what
+    # was actually produced.
+    revision = int(max(
+        os.path.getmtime(result["front_path"]),
+        os.path.getmtime(result["back_path"]),
+        os.path.getmtime(result["svg_path"]),
+    ) * 1000)
     return {
         "session_id": sid,
-        "svg_url": f"/api/data/laser/{sid}/card.svg",
-        "png_url": f"/api/data/laser/{sid}/card.png",
-        "front_url": f"/api/data/laser/{sid}/card_front.png",
-        "back_url": f"/api/data/laser/{sid}/card_back.png",
+        "svg_url": f"/api/data/laser/{sid}/card.svg?v={revision}",
+        "png_url": f"/api/data/laser/{sid}/card.png?v={revision}",
+        "front_url": f"/api/data/laser/{sid}/card_front.png?v={revision}",
+        "back_url": f"/api/data/laser/{sid}/card_back.png?v={revision}",
+        "revision": revision,
         "size_mm": result["size_mm"],
         "back_template": result["back_template"],
         "front_template": result.get("front_template") or "",
@@ -2809,6 +3124,12 @@ def _startup():
         except Exception:
             traceback.print_exc()
     threading.Thread(target=report_engines, daemon=True).start()
+
+    # The registry/shortcut lookup behind "检测本机软件" costs about ten
+    # seconds.  Doing it here means the first visitor who opens the 3D
+    # preview gets an instant answer instead of watching a button that
+    # looks like it is missing.
+    threading.Thread(target=software_integrations.warm_discovery_cache, daemon=True).start()
 # Frontend
 if os.path.isdir(FRONTEND):
     app.mount("/", StaticFiles(directory=FRONTEND, html=True), name="frontend")

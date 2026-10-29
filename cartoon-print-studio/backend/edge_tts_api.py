@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
+import os
 import re
 from typing import Any, Dict, List, Optional
 
@@ -54,6 +56,44 @@ _voice_cache: List[Dict[str, Any]] = []
 _voice_cache_at = 0.0
 VOICE_CACHE_TTL_S = 3600.0
 
+# The catalogue lives behind Microsoft's endpoint, which is not reachable
+# every time.  A copy of the last good list is kept next to the data
+# folder: when the network blinks the picker still shows the voices 宜小智
+# can speak with instead of an error.
+_ROOT = os.environ.get("CARTOON_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_VOICE_SNAPSHOT = os.path.join(_ROOT, "data", "edge_voices.json")
+
+
+def _load_voice_snapshot() -> List[Dict[str, Any]]:
+    try:
+        with open(_VOICE_SNAPSHOT, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return []
+    voices = data.get("voices") if isinstance(data, dict) else None
+    return [v for v in voices if isinstance(v, dict)] if isinstance(voices, list) else []
+
+
+def _save_voice_snapshot(voices: List[Dict[str, Any]]) -> None:
+    try:
+        os.makedirs(os.path.dirname(_VOICE_SNAPSHOT), exist_ok=True)
+        with open(_VOICE_SNAPSHOT, "w", encoding="utf-8") as fh:
+            json.dump({"voices": voices}, fh, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def _report_provider(name: str, kind: str, detail: str = "") -> None:
+    """Tell the shared circuit breaker how the provider is doing."""
+    try:
+        import provider_health
+        if kind == "ok":
+            provider_health.report_success(name)
+        else:
+            provider_health.report_failure(name, kind, detail)
+    except Exception:
+        pass
+
 
 def _edge_tts_module():
     try:
@@ -86,6 +126,14 @@ async def list_voices() -> List[Dict[str, Any]]:
     try:
         raw = await edge_tts.list_voices()
     except Exception as exc:
+        _report_provider("edge-tts", "network", str(exc)[:160])
+        # The list is served from the last good copy when Microsoft's
+        # endpoint is out of reach; only a machine that never managed to
+        # fetch the list at all has nothing to offer.
+        stale = _load_voice_snapshot()
+        if stale:
+            print(f"[edge-tts] catalogue unreachable ({exc}); using the saved copy", flush=True)
+            return stale
         raise RuntimeError(f"Edge 语音包不可用：{exc}") from exc
 
     wanted = []
@@ -94,6 +142,9 @@ async def list_voices() -> List[Dict[str, Any]]:
     # Keep the catalogue stable but bounded.
     _voice_cache = [_describe(v) for v in wanted][:60]
     _voice_cache_at = now
+    _report_provider("edge-tts", "ok")
+    if _voice_cache:
+        _save_voice_snapshot(_voice_cache)
     return _voice_cache
 
 
@@ -126,13 +177,19 @@ async def synthesize(
     )
 
     buffer = io.BytesIO()
-    async for chunk in communicator.stream():
-        if chunk.get("type") == "audio" and chunk.get("data"):
-            buffer.write(chunk["data"])
+    try:
+        async for chunk in communicator.stream():
+            if chunk.get("type") == "audio" and chunk.get("data"):
+                buffer.write(chunk["data"])
+    except Exception as exc:
+        _report_provider("edge-tts", "network", str(exc)[:160])
+        raise RuntimeError(f"Edge 语音包没有返回音频：{exc}") from exc
 
     data = buffer.getvalue()
     if not data:
+        _report_provider("edge-tts", "server", "empty audio")
         raise RuntimeError("Edge 语音包没有返回音频")
+    _report_provider("edge-tts", "ok")
     return data
 
 

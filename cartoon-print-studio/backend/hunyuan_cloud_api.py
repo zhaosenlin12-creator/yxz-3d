@@ -15,6 +15,7 @@ import hmac
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -119,8 +120,46 @@ def _sign(action: str, payload: Dict[str, Any], *, timeout: float = 15.0) -> Any
             "X-TC-Region": _REGION,
         },
     )
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = r.read().decode("utf-8")
+    # The handshake to Tencent Cloud now and then times out or the name
+    # server does not answer for a moment.  Both are over in a second or
+    # two, and neither means the job was rejected, so the call is worth
+    # repeating before the 3D chain gives up on this engine.
+    last_err: Optional[BaseException] = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = r.read().decode("utf-8")
+            try:
+                import provider_health
+                provider_health.report_success("hunyuan3d")
+            except Exception:
+                pass
+            break
+        except urllib.error.HTTPError:
+            try:
+                import provider_health
+                provider_health.report_failure(
+                    "hunyuan3d", "server", f"HTTP error on {action}")
+            except Exception:
+                pass
+            raise
+        except Exception as exc:  # URLError, socket timeout, DNS hiccup
+            last_err = exc
+            print(
+                f"[hunyuan3d] {action} attempt {attempt + 1}/3 "
+                f"{type(exc).__name__}: {str(exc)[:120]}",
+                flush=True,
+            )
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+    else:
+        try:
+            import provider_health
+            provider_health.report_failure(
+                "hunyuan3d", "network", f"{action}: {last_err}")
+        except Exception:
+            pass
+        raise RuntimeError(f"hunyuan3d {action} 网络不通：{last_err}")
     resp = json.loads(data)
     response = resp.get("Response", resp)
     if response.get("Error"):

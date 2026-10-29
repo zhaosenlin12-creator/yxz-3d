@@ -26,6 +26,7 @@ param(
     [switch]$Force,                     # 忽略缓存哨兵强制重装
     [switch]$SkipModels,                # 不下载 AI 模型权重（SD 1.5 / Hunyuan3D / TripoSR）
     [switch]$OnlyModels,                # 只下载 AI 模型权重
+    [string]$KeysSource = '',           # 一份填好的 keys.txt，直接装到这台机器
     [string]$PypiIndex = 'https://pypi.tuna.tsinghua.edu.cn/simple',
     [string]$NpmRegistry = 'https://registry.npmmirror.com'
 )
@@ -201,6 +202,19 @@ Ok "静态资源就绪"
 
 # ---- 5) 校验 ---------------------------------------------------------
 $key = Join-Path $backend 'keys.txt'
+
+# 密钥不进仓库（仓库是公开的），所以"另一台电脑要一模一样的体验"
+# 靠的是把填好的 keys.txt 带过去：-KeysSource 指向那份文件即可，
+# 后面三步（前端 .env.local、provider-seed.json、语音链）全部由它生成。
+if ($KeysSource) {
+    if (-not (Test-Path -LiteralPath $KeysSource)) {
+        Fail "找不到密钥文件：$KeysSource"
+        exit 1
+    }
+    Copy-Item -LiteralPath $KeysSource -Destination $key -Force
+    Ok "已安装密钥文件：$KeysSource"
+}
+
 if (Test-Path -LiteralPath $key) {
     $filled = (Get-Content -LiteralPath $key -Encoding UTF8 | Where-Object {
         $_ -match '^\s*[A-Za-z0-9_]+\s*[:：]\s*\S+' -and $_ -notmatch '^\s*#'
@@ -231,6 +245,27 @@ if (Test-Path -LiteralPath $genBootstrap) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $genBootstrap
 } else {
     Warn "缺少 gen-provider-bootstrap.ps1，前端可能没有 LLM / TTS 服务商"
+}
+
+# provider-seed.json 带着浏览器侧的对话 / TTS 凭据和语音链
+#（MiniMax 主 → 本地 Voicebox → Edge 免费兜底），是"换一台电脑还是
+# 同一套体验"的关键文件。它同样不入库，必须由 keys.txt 生成。
+$seedScript = Join-Path $root 'cartoon-print-studio\scripts\seed_provider_seed.py'
+$seedPy = Join-Path $root 'cartoon-print-studio\ai\forge-webui\venv\Scripts\python.exe'
+if ((Test-Path -LiteralPath $seedScript) -and (Test-Path -LiteralPath $seedPy)) {
+    & $seedPy $seedScript
+    if ($LASTEXITCODE -eq 0) { Ok "provider-seed.json 已生成（含语音链）" }
+    else { Warn "provider-seed.json 生成失败，前端可能没有服务商" }
+}
+else {
+    Warn "缺少 seed_provider_seed.py 或后端 venv，跳过 provider-seed.json 生成"
+}
+
+# ---- 7) 体检 ---------------------------------------------------------
+$verify = Join-Path $root 'verify-install.ps1'
+if (Test-Path -LiteralPath $verify) {
+    Write-Host ""
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $verify
 }
 
 Write-Host ""

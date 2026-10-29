@@ -24,8 +24,20 @@ const modelUrl = resolveYXZModelUrl(String(route.query.model ?? ''))
 const sessionId = String(route.query.sid ?? '').trim()
 // A preset model has no session; it lives in the project's preset folder.
 const presetName = String(route.query.preset ?? '').trim()
+// Inside the creation panel the page lives in a frame that is a good deal
+// smaller than a browser window.  The embedded layout gives the model
+// the whole frame instead of pushing it below the fold, so the visitor
+// sees the model right away and does not have to open a second window.
+const embedded = computed(() => route.query.embed === '1')
 const localSoftware = ref<YXZLocalSoftware[]>([])
 const softwareLoading = ref(false)
+/**
+ * The scan of the registry and the start menu takes seconds on a cold
+ * cache.  The button therefore stays visible and clickable the whole time
+ * -- a visitor must never wonder where the "检测本机软件" button went --
+ * and a click during the scan simply waits for the running one.
+ */
+let softwareDetection: Promise<void> | null = null
 const openingSoftwareId = ref<string>()
 const softwareMessage = ref('')
 const canOpenInSoftware = computed(() => Boolean(sessionId || presetName))
@@ -193,21 +205,27 @@ onBeforeUnmount(() => {
  * to whichever slicer is installed.
  */
 async function detectLocalSoftware() {
-  if (softwareLoading.value)
-    return
-  softwareLoading.value = true
-  softwareMessage.value = ''
-  try {
-    localSoftware.value = await detectYXZLocalSoftware()
-    const count = localSoftware.value.filter(tool => tool.available).length
-    softwareMessage.value = count ? `已找到 ${count} 个可用软件` : '暂未找到已安装的软件'
-  }
-  catch (error) {
-    softwareMessage.value = error instanceof Error ? error.message : '软件检测失败，请确认打印服务已启动'
-  }
-  finally {
-    softwareLoading.value = false
-  }
+  if (softwareDetection)
+    return softwareDetection
+
+  softwareDetection = (async () => {
+    softwareLoading.value = true
+    softwareMessage.value = '正在检测本机软件…'
+    try {
+      localSoftware.value = await detectYXZLocalSoftware()
+      const count = localSoftware.value.filter(tool => tool.available).length
+      softwareMessage.value = count ? `已找到 ${count} 个可用软件` : '暂未找到已安装的软件'
+    }
+    catch (error) {
+      softwareMessage.value = error instanceof Error ? error.message : '软件检测失败，请确认打印服务已启动'
+    }
+    finally {
+      softwareLoading.value = false
+      softwareDetection = null
+    }
+  })()
+
+  return softwareDetection
 }
 
 async function openInLocalSoftware(tool: YXZLocalSoftware) {
@@ -216,14 +234,19 @@ async function openInLocalSoftware(tool: YXZLocalSoftware) {
   openingSoftwareId.value = tool.id
   softwareMessage.value = ''
   try {
-    const resp = await openYXZExportInSoftware({
+    // The helper already returns the parsed body, so it must not be read
+    // as a Response again -- that used to throw and the visitor saw
+    // "打开软件失败" even though the slicer had been launched.
+    const raw = await openYXZExportInSoftware({
       softwareId: tool.id,
       sessionId: sessionId || undefined,
       format: 'stl',
       ...(presetName ? { path: `presets/models/${presetName}/model.stl` } : {}),
     })
-    const data = await resp.json().catch(() => ({})) as { message?: string }
-    softwareMessage.value = data?.message || `已打开 ${tool.name}，请在软件里确认参数后再打印`
+    const body = (raw as { data?: unknown })?.data ?? raw
+    const data = (body ?? {}) as Record<string, unknown>
+    const message = typeof data.message === 'string' ? data.message : ''
+    softwareMessage.value = message || `已打开 ${tool.name}，请在软件里确认参数后再打印`
   }
   catch (error) {
     softwareMessage.value = error instanceof Error ? error.message : '打开软件失败'
@@ -242,7 +265,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <main class="yxz-preview-page">
+  <main class="yxz-preview-page" :class="{ 'is-embedded': embedded }">
     <header class="yxz-preview-header">
       <div>
         <span>宜小智</span>
@@ -253,10 +276,11 @@ onMounted(() => {
           v-if="canOpenInSoftware"
           type="button"
           class="yxz-preview-button"
-          :disabled="softwareLoading"
+          :class="{ busy: softwareLoading }"
+          :aria-busy="softwareLoading"
           @click="detectLocalSoftware"
         >
-          {{ softwareLoading ? '检测中…' : '检测本机软件' }}
+          检测本机软件
         </button>
         <a
           v-if="modelUrl"
@@ -332,6 +356,8 @@ onMounted(() => {
 }
 .yxz-preview-button:hover:not(:disabled) { background: #086a99; border-color: #086a99; }
 .yxz-preview-button:disabled { opacity: .55; cursor: progress; }
+/* The scan is still running, but the button stays usable. */
+.yxz-preview-button.busy { opacity: .72; cursor: progress; }
 .yxz-preview-button.ghost {
   border-color: #7db9d4;
   background: transparent;
@@ -360,6 +386,10 @@ onMounted(() => {
   box-shadow: 0 18px 50px rgba(25, 110, 150, .14);
 }
 .yxz-preview-viewer canvas { display: block; width: 100%; height: 100%; }
+.yxz-preview-page.is-embedded { padding: .6rem .7rem; }
+.yxz-preview-page.is-embedded .yxz-preview-header { margin-bottom: .4rem; }
+.yxz-preview-page.is-embedded .yxz-preview-software { margin-bottom: .4rem; }
+.yxz-preview-page.is-embedded .yxz-preview-viewer { height: calc(100dvh - 7.5rem); min-height: 220px; }
 .yxz-preview-state { position: absolute; inset: 50% auto auto 50%; transform: translate(-50%, -50%); color: #52758a; }
 .yxz-preview-state.error { color: #b34646; }
 .yxz-preview-viewer small { position: absolute; right: 1rem; bottom: .8rem; left: 1rem; overflow: hidden; color: #6b8798; text-overflow: ellipsis; white-space: nowrap; }

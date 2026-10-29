@@ -12,6 +12,70 @@
 
 const KEY_SEPARATOR = /[\s,;]+/
 
+/**
+ * How long a key stays benched after it refused to work.
+ *
+ * An exhausted Token Plan does not recover on its own, so every request
+ * that walks the list again would pay for one more doomed round trip --
+ * and every one of them leaves a red 429 in the browser console, which
+ * looks like a broken app to the visitor.
+ */
+export const MINIMAX_DEAD_KEY_COOLDOWN_MS = 60 * 60 * 1000
+
+/** key -> the moment it may be tried again */
+const deadKeys = new Map<string, number>()
+
+/** Remember that this key cannot serve requests for now. */
+export function markMinimaxKeyDead(key: string, cooldownMs = MINIMAX_DEAD_KEY_COOLDOWN_MS): void {
+  if (!key)
+    return
+  deadKeys.set(key, Date.now() + Math.max(1000, cooldownMs))
+}
+
+/** True while the key is benched. */
+export function isMinimaxKeyDead(key: string, now = Date.now()): boolean {
+  const until = deadKeys.get(key)
+  if (until === undefined)
+    return false
+  if (until <= now) {
+    deadKeys.delete(key)
+    return false
+  }
+  return true
+}
+
+/** Forget every benched key -- used when the plan was topped up. */
+export function resetMinimaxDeadKeys(): void {
+  deadKeys.clear()
+}
+
+/** How many keys are currently benched (for diagnostics). */
+export function countMinimaxDeadKeys(): number {
+  for (const [key, until] of [...deadKeys]) {
+    if (until <= Date.now())
+      deadKeys.delete(key)
+  }
+  return deadKeys.size
+}
+
+/**
+ * A key is "spent" when MiniMax says the Token Plan or the balance ran
+ * out.  That is different from a wrong credential: the key was fine
+ * yesterday, so it deserves a bench rather than a permanent blacklist.
+ */
+function isMinimaxQuotaMessage(message: string): boolean {
+  const low = message.toLowerCase()
+  return low.includes('token plan')
+    || low.includes('rate_limit')
+    || low.includes('rate limit')
+    || low.includes('quota')
+    || low.includes('insufficient')
+    || low.includes('用量上限')
+    || low.includes('额度')
+    || low.includes('余额')
+    || low.includes('欠费')
+}
+
 /** Split a provider API key field into individual, non-empty keys. */
 export function splitApiKeys(raw: unknown): string[] {
   if (typeof raw !== 'string')
@@ -84,11 +148,19 @@ function parseMinimaxPayload(text: string): unknown {
  * status code alone cannot tell a working key from a dead one.
  */
 export function createMinimaxKeyRotatingFetch(keys: string[]): typeof globalThis.fetch {
-  const candidates = keys.filter(Boolean)
+  const all = keys.filter(Boolean)
 
   return async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (candidates.length === 0)
+    if (all.length === 0)
       return globalThis.fetch(input, init)
+
+    // A benched key is skipped; if that leaves nothing, the plan was
+    // probably topped up in the meantime, so forget the bench and retry.
+    let candidates = all.filter(key => !isMinimaxKeyDead(key))
+    if (candidates.length === 0) {
+      resetMinimaxDeadKeys()
+      candidates = all
+    }
 
     let lastError: Error | undefined
 
@@ -101,6 +173,7 @@ export function createMinimaxKeyRotatingFetch(keys: string[]): typeof globalThis
       if (!response.ok) {
         // 401 / 403 / 429 mean this key cannot serve the request.
         if (response.status === 401 || response.status === 403 || response.status === 429) {
+          markMinimaxKeyDead(key)
           lastError = new Error(`MiniMax rejected the key (HTTP ${response.status})`)
           continue
         }
@@ -119,6 +192,8 @@ export function createMinimaxKeyRotatingFetch(keys: string[]): typeof globalThis
       if (message && !first.done) {
         // The key is rejected: drop this response and try the next key.
         await reader.cancel().catch(() => {})
+        if (isMinimaxQuotaMessage(message))
+          markMinimaxKeyDead(key)
         lastError = new Error(message)
         continue
       }

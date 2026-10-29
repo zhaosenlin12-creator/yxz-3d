@@ -113,6 +113,27 @@ _JOJO_DEAD_KEYS: set = set()
 _JOJO_DEAD_UNTIL: dict = {}
 _AIXJ_DEAD_KEYS: set = set()
 
+# MiniMax answers HTTP 200 with a business error when the account runs out
+# of credits ("status_code": 2056, "已达到 Token Plan 上限").  Without a
+# breaker every single picture first burns a doomed call on that key before
+# the second key picks the work up, so the batch pays for the outage twice.
+_MINIMAX_DEAD_KEYS: set = set()
+_MINIMAX_DEAD_UNTIL: dict = {}
+
+#: Business codes that mean "this key is out of credit" rather than
+#: "this request was bad".  Everything else stays retryable.
+_MINIMAX_QUOTA_CODES = (2056, 1004, 1008, 1027, 2013)
+
+
+def _minimax_quota_error(base: dict) -> bool:
+    """True when a MiniMax business error means the key is spent."""
+    code = base.get("status_code")
+    if code in _MINIMAX_QUOTA_CODES:
+        return True
+    msg = str(base.get("status_msg") or "").lower()
+    return any(x in msg for x in
+               ("token plan", "quota", "insufficient", "余额", "额度", "欠费", "已达上限"))
+
 # Every visitor on the network can ask for preview images at the same time.
 # Firing N users x N prompts straight at the provider makes it rate-limit
 # us, and every call then burns its full timeout before failing -- that is
@@ -199,6 +220,23 @@ def _download_with_retry(url: str, ua: str = "", attempts: int = 3,
     return None
 
 
+def _report_provider(name: str, kind: str, detail: str = "") -> None:
+    """Tell the shared circuit breaker how the provider is doing.
+
+    "ok" closes the circuit; every other kind opens it for a while, so the
+    next request skips a provider that is known to be down instead of
+    waiting for the same timeout again.
+    """
+    try:
+        import provider_health
+        if kind == "ok":
+            provider_health.report_success(name)
+        else:
+            provider_health.report_failure(name, kind, detail)
+    except Exception:
+        pass
+
+
 def _aixj_image_call(prompt, *, n=1, size="1024x1024", model=AIXJ_IMAGE_MODEL,
                      timeout=90, sid=None) -> Optional[List[bytes]]:
     """Call AIXJ images/generations (OpenAI-compatible) with per-key retry.
@@ -242,11 +280,14 @@ def _aixj_image_call(prompt, *, n=1, size="1024x1024", model=AIXJ_IMAGE_MODEL,
                 x in low for x in ("quota", "balance", "insufficient")
             ) or "invalid" in low:
                 _AIXJ_DEAD_KEYS.add(key)
+                _report_provider("aixj", "quota", f"HTTP {e.code}")
                 print(f"[aixj] key {ki+1}/{n_keys} DEAD (HTTP {e.code}): {err[:120]}", flush=True)
                 continue
+            _report_provider("aixj", "server", f"HTTP {e.code}")
             print(f"[aixj] key {ki+1}/{n_keys} HTTP {e.code}: {err[:160]}")
             continue
         except Exception as e:
+            _report_provider("aixj", "network", f"{type(e).__name__}: {str(e)[:120]}")
             print(f"[aixj] key {ki+1}/{n_keys} {type(e).__name__}: {str(e)[:160]}")
             continue
         out = []
@@ -267,6 +308,7 @@ def _aixj_image_call(prompt, *, n=1, size="1024x1024", model=AIXJ_IMAGE_MODEL,
                 if blob is not None:
                     out.append(blob)
         if out:
+            _report_provider("aixj", "ok")
             return out
         print(f"[aixj] key {ki+1}/{n_keys} returned no images")
     return None
@@ -318,13 +360,16 @@ def _jojo_call(prompt: str, *, n: int = 1, size: str = "1024x1024",
             ) or any(x in err for x in ("\u4f59\u989d", "\u4f59\u989d\u4e0d\u8db3")):
                 _JOJO_DEAD_KEYS.add(key)
                 _JOJO_DEAD_UNTIL[key] = _t.time() + 3600
+                _report_provider("jojo", "quota", f"HTTP {e.code}")
                 print(f"[jojo] key {ki+1}/{n_keys} DEAD (HTTP {e.code}): {err[:120]} - skipping rest of run", flush=True)
                 if sid:
                     _pg.Progress(sid, "previews").emit("jojo-key-dead", 5, "某个出图服务暂时不可用，正在跳过…")
                 continue
+            _report_provider("jojo", "server", f"HTTP {e.code}")
             print(f"[jojo] key {ki+1}/{n_keys} HTTP {e.code}: {err[:160]}")
             continue
         except Exception as e:
+            _report_provider("jojo", "network", f"{type(e).__name__}: {str(e)[:120]}")
             print(f"[jojo] key {ki+1}/{n_keys} {type(e).__name__}: {str(e)[:160]}")
             continue
         out = []
@@ -334,6 +379,7 @@ def _jojo_call(prompt: str, *, n: int = 1, size: str = "1024x1024",
             try: out.append(base64.b64decode(b64))
             except Exception: pass
         if out:
+            _report_provider("jojo", "ok")
             return out
         print(f"[jojo] key {ki+1}/{n_keys} returned no images")
     return None
@@ -370,6 +416,12 @@ def _minimax_image_call(prompt, *, n=1, size="1024x1024", model="image-01",
     n_keys = len(MINIMAX_IMAGE_KEYS)
     for ki, key in enumerate(MINIMAX_IMAGE_KEYS):
         if not key: continue
+        # Skip a key that is known to be out of credit until its cooldown
+        # expires -- retrying it only slows the pictures that still work.
+        if key in _MINIMAX_DEAD_KEYS:
+            if _MINIMAX_DEAD_UNTIL.get(key, 0) >= time.time():
+                continue
+            _MINIMAX_DEAD_KEYS.discard(key)
         if sid:
             _pg.Progress(sid, "previews").emit(
                 "minimax-trying", 5, f"正在准备预览图（{ki+1}/{n_keys}）…")
@@ -387,16 +439,31 @@ def _minimax_image_call(prompt, *, n=1, size="1024x1024", model="image-01",
                 except Exception: err = str(e.reason)
                 # invalid api key -> abandon this key, jump to next
                 if e.code in (401, 403) or "2049" in err or "invalid" in err.lower():
+                    _report_provider("minimax", "auth", f"HTTP {e.code}")
                     print(f"[minimax-image] key {ki+1}/{n_keys} rejected: {err[:120]}")
                     break
+                _report_provider("minimax", "server", f"HTTP {e.code}")
                 print(f"[minimax-image] key {ki+1}/{n_keys} HTTP {e.code} {ep}: {err[:120]}")
                 continue
             except Exception as e:
+                _report_provider("minimax", "network", f"{type(e).__name__}: {str(e)[:120]}")
                 print(f"[minimax-image] key {ki+1}/{n_keys} {ep} {type(e).__name__}: {str(e)[:120]}")
                 continue
             base = payload.get("base_resp") or {}
             if base.get("status_code", 0) != 0 and base.get("status_msg"):
                 print(f"[minimax-image] {base}")
+                if _minimax_quota_error(base):
+                    # The account is spent: black the key so the remaining
+                    # pictures go straight to a key that can still pay.
+                    _MINIMAX_DEAD_KEYS.add(key)
+                    _MINIMAX_DEAD_UNTIL[key] = time.time() + 3600
+                    _report_provider("minimax", "quota", str(base.get("status_msg"))[:120])
+                    print(f"[minimax-image] key {ki+1}/{n_keys} out of credit - "
+                          f"skipping it for the next hour", flush=True)
+                    if sid:
+                        _pg.Progress(sid, "previews").emit(
+                            "minimax-key-dead", 5, "某个出图服务额度已用完，正在换一条…")
+                    break
                 continue
             urls = (payload.get("image_urls")
                     or payload.get("images")
@@ -408,6 +475,7 @@ def _minimax_image_call(prompt, *, n=1, size="1024x1024", model="image-01",
                 if blob is not None:
                     out.append(blob)
             if out:
+                _report_provider("minimax", "ok")
                 return out
     return None
 
@@ -684,6 +752,8 @@ def health():
         "jojo_key_loaded": bool(JOJO_KEY),
         "jojo_key_preview": (JOJO_KEY[:14] + "...") if JOJO_KEY else None,
         "minimax_image_keys": len(MINIMAX_IMAGE_KEYS),
+        "minimax_dead_keys": len(_MINIMAX_DEAD_KEYS),
+        "minimax_alive_keys": max(0, len(MINIMAX_IMAGE_KEYS) - len(_MINIMAX_DEAD_KEYS)),
         "chain": " > ".join(
             f"{name}-image" for name in _provider_chain("auto") if name != "local"
         ) + " > local-sd",

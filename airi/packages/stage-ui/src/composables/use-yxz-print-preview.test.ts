@@ -112,6 +112,27 @@ describe('YXZ print preview adapter', () => {
     expect(progress.some(value => value.message === '构建浮雕' && value.percent === 40)).toBe(true)
   })
 
+  it('lets the backend run the whole engine chain', async () => {
+    const urls: string[] = []
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = String(input)
+      urls.push(url)
+      if (url.includes('/api/progress/'))
+        return new Response(JSON.stringify({ events: [] }), { status: 200 })
+      return new Response(JSON.stringify({
+        session_id: 'abc123',
+        model_url: '/api/data/abc123/model/mesh.glb',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    })
+
+    const result = await createYXZCartoonModel({ sessionId: 'abc123', imageIndex: 0 }, fetcher)
+    expect(result.sessionId).toBe('abc123')
+    // The build is one request: the engines are walked on the server, so a
+    // refresh or a lost connection cannot kill a model that is being made.
+    expect(urls.some(url => url.includes('/api/3d_build'))).toBe(true)
+    expect(urls.some(url => url.includes('/api/3d_tripo'))).toBe(false)
+  })
+
   it('sends a canvas-edited image when creating the printable model', async () => {
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
       if (String(input).includes('/api/progress/'))
@@ -159,19 +180,32 @@ describe('YXZ print preview adapter', () => {
 
     const result = await createYXZCartoonModel({ sessionId: 'abc123', imageIndex: 0 }, fetcher)
     expect(result.sessionId).toBe('abc123')
-    // Same engine, not the next one: the transport broke, the engine did not.
+    // Same build, not a different one: the transport broke, the backend did not.
     expect(endpoints).toHaveLength(2)
     expect(endpoints[1]).toBe(endpoints[0])
   })
 
-  it('moves on to the next engine when the model itself is rejected', async () => {
+  it('reports a build the backend refused', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      if (String(input).includes('/api/progress/'))
+        return new Response(JSON.stringify({ events: [] }), { status: 200 })
+      return new Response('{"detail":"模型不合格"}', { status: 400 })
+    })
+
+    await expect(createYXZCartoonModel({ sessionId: 'abc123', imageIndex: 0 }, fetcher))
+      .rejects.toThrow('模型不合格')
+  })
+
+  it('falls back to the browser chain when the backend has no server-side build', async () => {
     const endpoints: string[] = []
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input) => {
       const url = String(input)
       if (url.includes('/api/progress/'))
         return new Response(JSON.stringify({ events: [] }), { status: 200 })
       endpoints.push(url)
-      if (endpoints.length === 1)
+      if (url.includes('/api/3d_build'))
+        return new Response('{"detail":"Not Found"}', { status: 404 })
+      if (endpoints.length === 2)
         return new Response('{"detail":"模型不合格"}', { status: 400 })
       return new Response(JSON.stringify({
         session_id: 'abc123',
@@ -181,7 +215,8 @@ describe('YXZ print preview adapter', () => {
 
     const result = await createYXZCartoonModel({ sessionId: 'abc123', imageIndex: 0 }, fetcher)
     expect(result.sessionId).toBe('abc123')
-    expect(endpoints).toHaveLength(2)
-    expect(endpoints[0]).not.toBe(endpoints[1])
+    // The old chain walks the engines one after another.
+    expect(endpoints.some(url => url.includes('/api/3d_tripo'))).toBe(true)
+    expect(endpoints.some(url => url.includes('/api/3d_hycloud'))).toBe(true)
   })
 })

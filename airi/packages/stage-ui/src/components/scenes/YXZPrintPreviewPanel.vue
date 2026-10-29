@@ -53,6 +53,8 @@ const isModelLoading = ref(false)
 const localSoftware = ref<Awaited<ReturnType<typeof detectYXZLocalSoftware>>>([])
 const softwareLoading = ref(false)
 const softwareMessage = ref('')
+/** The running scan, so a click during it waits instead of doing nothing. */
+let softwareDetection: Promise<void> | null = null
 const openingSoftwareId = ref<string>()
 const controller = ref<AbortController>()
 const chatMessageId = ref<string>()
@@ -209,21 +211,31 @@ function clearRequirementMemory() {
 }
 
 async function detectLocalSoftware() {
-  if (softwareLoading.value)
-    return
-  softwareLoading.value = true
-  softwareMessage.value = ''
-  try {
-    localSoftware.value = await detectYXZLocalSoftware()
-    const count = localSoftware.value.filter(tool => tool.available).length
-    softwareMessage.value = count ? `已找到 ${count} 个可用软件` : '暂未找到已安装的软件'
-  }
-  catch (error) {
-    softwareMessage.value = error instanceof Error ? error.message : '软件检测失败，请确认打印服务已启动'
-  }
-  finally {
-    softwareLoading.value = false
-  }
+  // The scan of the registry and the start menu takes seconds on a cold
+  // cache.  The button stays visible and clickable the whole time, and a
+  // click during the scan waits for the running one instead of doing
+  // nothing -- a visitor must never wonder where the button went.
+  if (softwareDetection)
+    return softwareDetection
+
+  softwareDetection = (async () => {
+    softwareLoading.value = true
+    softwareMessage.value = '正在检测本机软件…'
+    try {
+      localSoftware.value = await detectYXZLocalSoftware()
+      const count = localSoftware.value.filter(tool => tool.available).length
+      softwareMessage.value = count ? `已找到 ${count} 个可用软件` : '暂未找到已安装的软件'
+    }
+    catch (error) {
+      softwareMessage.value = error instanceof Error ? error.message : '软件检测失败，请确认打印服务已启动'
+    }
+    finally {
+      softwareLoading.value = false
+      softwareDetection = null
+    }
+  })()
+
+  return softwareDetection
 }
 
 async function openInLocalSoftware(tool: Awaited<ReturnType<typeof detectYXZLocalSoftware>>[number]) {
@@ -491,8 +503,14 @@ onUnmounted(() => controller.value?.abort())
         </div>
         <div v-if="model" class="yxz-print-model-result">
           <span>3D 模型已生成，可打开预览、下载或交给本机软件继续处理。</span>
-          <button type="button" class="yxz-print-tool-detect" :disabled="softwareLoading" @click="detectLocalSoftware">
-            {{ softwareLoading ? '检测中…' : '检测本机软件' }}
+          <button
+            type="button"
+            class="yxz-print-tool-detect"
+            :class="{ busy: softwareLoading }"
+            :aria-busy="softwareLoading"
+            @click="detectLocalSoftware"
+          >
+            检测本机软件
           </button>
           <div v-if="localSoftware.some(tool => tool.available)" class="yxz-print-tools" aria-label="本机软件">
             <button
@@ -853,6 +871,12 @@ onUnmounted(() => controller.value?.abort())
 .yxz-print-tool:disabled {
   cursor: wait;
   opacity: .6;
+}
+
+/* The scan is still running, but the button stays usable. */
+.yxz-print-tool-detect.busy {
+  cursor: wait;
+  opacity: .72;
 }
 
 .yxz-print-tools {

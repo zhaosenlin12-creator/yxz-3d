@@ -663,6 +663,30 @@ class ModelTransportError extends Error {
   }
 }
 
+/**
+ * The engine answered with a server error.  That is often a provider that
+ * blinked (a DNS answer that did not come back, a TLS handshake that
+ * timed out) rather than a model that cannot be made, so the same engine
+ * is worth one more try before the chain moves on.
+ */
+class ModelServerError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message)
+    this.name = 'ModelServerError'
+  }
+}
+
+/**
+ * The engine is not installed on this machine at all.  Trying it again
+ * cannot help, so the chain moves on to the next engine straight away.
+ */
+class ModelEngineUnavailableError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ModelEngineUnavailableError'
+  }
+}
+
 async function fetchLatestProgressTs(sessionId: string, fetcher: typeof fetch): Promise<number> {
   try {
     const response = await fetcher(`${getYXZPrintApiBase()}/api/progress/${encodeURIComponent(sessionId)}?since=9999999999999`)
@@ -689,6 +713,118 @@ export async function createYXZCartoonModel(request: YXZModelRequest, fetcher: t
   linked.signal.addEventListener('abort', onAbort, { once: true })
   const baseline = await fetchLatestProgressTs(request.sessionId, fetcher)
   const progressTask = pollYXZModelProgress(request.sessionId, progressController.signal, request.onProgress, fetcher, baseline)
+
+  // The backend owns the engine chain.  A build can take five minutes, and
+  // a chain that lives in the browser dies with the tab: a refresh, a
+  // sleeping laptop, a lost wifi or the chat watchdog all used to cancel a
+  // model that the provider was still making.  On the server the build
+  // keeps running and the finished model is waiting in the session.
+  try {
+    try {
+      return await buildYXZModelOnServer(request, linked, fetcher)
+    }
+    catch (error) {
+      if (error instanceof YXZBuildEndpointMissingError) {
+        // An older backend without the server-side chain: fall back to
+        // walking the engines from here.
+        return await buildYXZModelInBrowser(request, linked, fetcher)
+      }
+      throw error
+    }
+  }
+  finally {
+    progressController.abort()
+    linked.signal.removeEventListener('abort', onAbort)
+    linked.dispose()
+    await progressTask.catch(() => undefined)
+  }
+}
+
+/** The backend does not know the server-side build endpoint yet. */
+class YXZBuildEndpointMissingError extends Error {
+  constructor() {
+    super('这个后端还没有服务端建模通道')
+    this.name = 'YXZBuildEndpointMissingError'
+  }
+}
+
+async function buildYXZModelOnServer(
+  request: YXZModelRequest,
+  linked: ReturnType<typeof createRequestSignal>,
+  fetcher: typeof fetch,
+): Promise<YXZModelResponse> {
+  const body = JSON.stringify({
+    session_id: request.sessionId,
+    image_index: request.imageIndex,
+    ...(request.customImage ? { custom_image: request.customImage } : {}),
+  })
+
+  let response: Response | undefined
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      response = await fetcher(`${getYXZPrintApiBase()}/api/3d_build`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        signal: linked.signal,
+      })
+    }
+    catch (error) {
+      if (linked.timedOut())
+        throw new Error('3D 生成超过 10 分钟仍未完成，请稍后重试')
+      // The backend itself was unreachable -- it was restarting, or the
+      // connection was cut.  Wait for it and send the very same build
+      // again; the visitor should not see an error for that.
+      if (attempt === 0 && !linked.signal.aborted) {
+        request.onProgress?.({ percent: 8, message: '生成服务正在重启，稍等一下马上继续…', step: 'building', stage: 'queued' })
+        const back = await waitForYXZBackend(yxzBackendRecovery.waitMs, fetcher, linked.signal)
+        if (back && !linked.signal.aborted)
+          continue
+      }
+      throw error
+    }
+    break
+  }
+  if (!response)
+    throw new Error('3D 生成服务暂时不可用')
+
+  if (response.status === 404) {
+    const raw = await response.json().catch(() => undefined)
+    const detail = isRecord(raw) && typeof raw.detail === 'string' ? raw.detail : ''
+    // A missing picture is a real answer, not a missing endpoint.
+    if (detail.includes('preview') || detail.includes('预览'))
+      throw new Error(detail)
+    throw new YXZBuildEndpointMissingError()
+  }
+
+  const raw: unknown = await response.json().catch(() => undefined)
+  if (!response.ok) {
+    let detail = ''
+    if (isRecord(raw)) {
+      const d = raw.detail
+      detail = typeof d === 'string' ? d : isRecord(d) && typeof d.error === 'string' ? d.error : ''
+    }
+    throw new Error(detail || `3D 生成服务暂时不可用（HTTP ${response.status}）`)
+  }
+
+  if (!isRecord(raw) || typeof raw.session_id !== 'string' || typeof raw.model_url !== 'string')
+    throw new Error('3D 生成服务返回的数据格式无法识别')
+
+  request.onProgress?.({ percent: 100, message: '3D 模型已经做好啦，可以预览和下载了', step: 'done', stage: 'done' })
+  return {
+    sessionId: raw.session_id,
+    modelUrl: absolutePrintApiUrl(raw.model_url),
+    glbUrl: absolutePrintApiUrl(`/api/export/${raw.session_id}/glb`),
+    stlUrl: absolutePrintApiUrl(`/api/export/${raw.session_id}/stl`),
+    engine: typeof raw.engine === 'string' ? raw.engine : '3d',
+  }
+}
+
+async function buildYXZModelInBrowser(
+  request: YXZModelRequest,
+  linked: ReturnType<typeof createRequestSignal>,
+  fetcher: typeof fetch,
+): Promise<YXZModelResponse> {
 
   // Quality-first engine chain: Tripo3D cloud PBR (primary) ->
   // Tencent Cloud Hunyuan3D 专业版 (second, auto-switch when Tripo unreachable) ->
@@ -760,8 +896,13 @@ export async function createYXZCartoonModel(request: YXZModelRequest, fetcher: t
             }
             catch { /* ignore */ }
             const message = `3D 生成服务暂时不可用（HTTP ${response.status}）${detail ? `：${detail}` : ''}`
+            if (response.status === 501) {
+              throw new ModelEngineUnavailableError(detail || '这条建模引擎没有安装')
+            }
             if ([502, 503, 504].includes(response.status))
               throw new ModelTransportError(message)
+            if (response.status >= 500)
+              throw new ModelServerError(message, response.status)
             throw new Error(message)
           }
 
@@ -791,10 +932,26 @@ export async function createYXZCartoonModel(request: YXZModelRequest, fetcher: t
           }
           lastError = error instanceof Error ? error : new Error(String(error))
 
+          if (error instanceof ModelEngineUnavailableError) {
+            request.onProgress?.({ percent: 5, message: '本机没装这条建模引擎，正在换一条云端通道…', step: 'building', stage: 'queued' })
+            break
+          }
+
           if (error instanceof ModelTransportError && attempt === 0) {
             request.onProgress?.({ percent: 8, message: '生成服务正在重启，稍等一下马上继续…', step: 'building', stage: 'queued' })
             const back = await waitForYXZBackend(yxzBackendRecovery.waitMs, fetcher, linked.signal)
             if (back && !linked.signal.aborted)
+              continue
+          }
+
+          if (error instanceof ModelServerError && attempt === 0) {
+            // The engine itself hiccuped.  Give the very same engine one
+            // more go before the chain drops to the next one: falling all
+            // the way down to the local relief model is what makes the
+            // result look nothing like the drawing.
+            request.onProgress?.({ percent: 5, message: '这条生成通道刚刚出了点状况，正在原地重试…', step: 'building', stage: 'queued' })
+            await waitForYXZBackend(2500, fetcher, linked.signal)
+            if (!linked.signal.aborted)
               continue
           }
 
@@ -805,10 +962,7 @@ export async function createYXZCartoonModel(request: YXZModelRequest, fetcher: t
     }
   }
   finally {
-    progressController.abort()
-    linked.signal.removeEventListener('abort', onAbort)
-    linked.dispose()
-    await progressTask.catch(() => undefined)
+    // The caller owns the progress poller and the abort wiring.
   }
 
   request.onProgress?.({ percent: 0, message: lastError?.message ?? '3D 生成失败，请重试', step: 'failed', stage: 'failed' })

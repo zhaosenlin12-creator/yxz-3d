@@ -149,7 +149,7 @@ def _rotate_key() -> str:
 # and the global one live in different networks, so one of them being
 # blocked must not silence the other.
 _UNREACHABLE_UNTIL: Dict[str, float] = {}
-_UNREACHABLE_COOLDOWN = 120.0
+_UNREACHABLE_COOLDOWN = 45.0
 
 
 def provider_unreachable(base: Optional[str] = None) -> bool:
@@ -159,6 +159,14 @@ def provider_unreachable(base: Optional[str] = None) -> bool:
 
 def _mark_unreachable(base: str) -> None:
     _UNREACHABLE_UNTIL[base] = time.time() + _UNREACHABLE_COOLDOWN
+    # The shared breaker remembers this for every caller, so a provider
+    # that just went dark is skipped straight away instead of costing
+    # every visitor a timeout.
+    try:
+        import provider_health
+        provider_health.report_failure("tripo3d", "network", f"host {base} unreachable")
+    except Exception:
+        pass
 
 
 def _mark_reachable(base: str) -> None:
@@ -219,9 +227,15 @@ def _request(method: str, path_key: str, *, path_args: Optional[Dict[str, Any]] 
             if tried + 1 < len(candidates):
                 tried += 1
                 continue
-            raise RuntimeError(
-                "Tripo 当前网络不可达（刚刚连接失败），请检查网络或改用其他引擎"
-            )
+            # Every candidate is parked.  The network is very likely back
+            # by now — a parked host only means "it failed a moment ago" —
+            # so start the ladder over instead of failing the whole 3D
+            # chain and dropping the visitor onto the low quality local
+            # fallback.
+            _mark_reachable(base)
+            tried = 0
+            version, key = candidates[0]
+            base = _base_for(version)
         url = base + _path(version, path_key).format(**(path_args or {}))
         payload = body_for(version) if body_for is not None else body
         h["Authorization"] = "Bearer " + key
@@ -230,6 +244,11 @@ def _request(method: str, path_key: str, *, path_args: Optional[Dict[str, Any]] 
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 raw = r.read().decode("utf-8", "ignore")
             _mark_reachable(base)
+            try:
+                import provider_health
+                provider_health.report_success("tripo3d")
+            except Exception:
+                pass
             # This platform accepted the key: remember it for the next call.
             _set_version(version)
             try:
@@ -255,14 +274,45 @@ def _request(method: str, path_key: str, *, path_args: Optional[Dict[str, Any]] 
                 )
                 continue
             if 400 <= e.code < 500:
+                try:
+                    import provider_health
+                    kind = "quota" if e.code in (402, 429) else (
+                        "auth" if e.code in (401, 403) else "unknown")
+                    provider_health.report_failure(
+                        "tripo3d", kind, f"HTTP {e.code} on {method} {path_key}")
+                except Exception:
+                    pass
                 raise RuntimeError(f"Tripo HTTP {e.code} on {method} {path_key}: {err[:400]}")
             last_err = RuntimeError(f"Tripo HTTP {e.code} on {method} {path_key}: {err[:200]}")
+            try:
+                import provider_health
+                provider_health.report_failure(
+                    "tripo3d", "server", f"HTTP {e.code} on {method} {path_key}")
+            except Exception:
+                pass
             print(f"[tripo] attempt {attempt+1}/{retries+1} got {e.code}, retrying in {backoff:.1f}s", flush=True)
         except Exception as e:
             last_err = RuntimeError(f"Tripo {method} {path_key} failed: {e}")
-            if _is_connection_failure(e):
-                _mark_unreachable(base)
             print(f"[tripo] attempt {attempt+1}/{retries+1} {type(e).__name__}: {str(e)[:160]}", flush=True)
+            if _is_connection_failure(e):
+                # A DNS answer that did not come back and a TLS handshake
+                # that timed out are over in a second or two.  Retrying the
+                # same host first is what keeps one bad moment from
+                # throwing the whole request down to the low quality
+                # local fallback.  The host is only parked once its own
+                # retries are used up.
+                if attempt < retries:
+                    time.sleep(min(backoff * (attempt + 1), 4.0))
+                    attempt += 1
+                    continue
+                # A caller that asked for no retries (the background health
+                # probe) must not park the host for everybody else.
+                if retries > 0:
+                    _mark_unreachable(base)
+                if tried + 1 < len(candidates):
+                    tried += 1
+                    continue
+                break
             if provider_unreachable(base):
                 break
         if attempt < retries:
