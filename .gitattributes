@@ -1,0 +1,9 @@
+# .bat 必须存成 CRLF：cmd.exe 逐字节读批处理，LF 换行的多行 if 块
+# （比如一键部署并启动.bat 里的 if errorlevel 1 (...)）会被解析错。
+# 有人 clone 时 core.autocrlf=false，光靠仓库里的 LF 存不下正确换行，
+# 所以在这里钉死。
+*.bat text eol=crlf
+
+# .ps1 一律 UTF-8 + CRLF。带 BOM 是为了让 Windows PowerShell 5.1
+# 正确认出中文（5.1 默认按 ANSI 读无 BOM 的文件）。
+*.ps1 text eol=crlf

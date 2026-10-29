@@ -65,7 +65,10 @@ if (-not $SkipInstall) {
         Write-Host ""
         Warn "检测到依赖缺失，正在自动安装（已装过的部分会跳过）..."
         Write-Host ""
-        & pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'install-new-pc.ps1')
+        # 目标机器可能只有 Windows PowerShell 5.1，没有 pwsh。
+        $psExe = Get-YxzPowerShell
+        if (-not $psExe) { Fail "找不到 PowerShell，无法自动安装依赖"; exit 1 }
+        & $psExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'install-new-pc.ps1')
         if ($LASTEXITCODE -ne 0) { Fail "自动安装未完成，请手动运行 install-new-pc.ps1"; exit 1 }
         Write-Host ""
     }
