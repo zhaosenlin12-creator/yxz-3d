@@ -1,9 +1,11 @@
-import bpy, bmesh, numpy as np, sys
+import bpy, bmesh, numpy as np, os, sys
 from mathutils import Vector
-sys.path.insert(0, r"C:\kaifa_senlin\airi\scripts")
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _SCRIPT_DIR)
 from repair_yxz_holes import boundary_loops, rim_order
 bpy.ops.wm.read_factory_settings(use_empty=True)
-bpy.ops.import_scene.gltf(filepath=r"C:\kaifa_senlin\airi\docs\yxz-variants\v16\lit.glb")
+bpy.ops.import_scene.gltf(filepath=os.path.normpath(
+    os.path.join(_SCRIPT_DIR, "..", "docs", "yxz-variants", "v16", "lit.glb")))
 body = max((o for o in bpy.context.scene.objects if o.type=="MESH"), key=lambda o: len(o.data.vertices))
 bm = bmesh.new(); bm.from_mesh(body.data)
 bm.verts.ensure_lookup_table(); bm.edges.ensure_lookup_table(); bm.faces.ensure_lookup_table()

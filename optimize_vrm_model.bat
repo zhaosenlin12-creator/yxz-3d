@@ -7,7 +7,7 @@ echo 🚀 宜小智 VRM 模型优化工具
 echo ========================================
 echo.
 
-set MODEL_DIR=C:\kaifa_senlin\pingdou\pingdou-workstation-final\airi\packages\stage-ui-three\src\assets\vrm\models
+set "MODEL_DIR=%~dp0airi\packages\stage-ui-three\src\assets\vrm\models"
 set ORIGINAL_MODEL=%MODEL_DIR%\yxz.vrm
 set BACKUP_MODEL=%MODEL_DIR%\yxz-original-backup.vrm
 set OPTIMIZED_MODEL=%MODEL_DIR%\yxz-optimized.vrm

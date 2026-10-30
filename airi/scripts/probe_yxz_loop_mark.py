@@ -1,9 +1,11 @@
-import bpy, bmesh, sys
+import bpy, bmesh, os, sys
 from mathutils import Vector
-sys.path.insert(0, r"C:\kaifa_senlin\airi\scripts")
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _SCRIPT_DIR)
 from repair_yxz_holes import boundary_loops, rim_order
 bpy.ops.wm.read_factory_settings(use_empty=True)
-bpy.ops.import_scene.gltf(filepath=r"C:\kaifa_senlin\airi\docs\yxz-variants\v16\lit.glb")
+bpy.ops.import_scene.gltf(filepath=os.path.normpath(
+    os.path.join(_SCRIPT_DIR, "..", "docs", "yxz-variants", "v16", "lit.glb")))
 body = max((o for o in bpy.context.scene.objects if o.type=="MESH"), key=lambda o: len(o.data.vertices))
 bm = bmesh.new(); bm.from_mesh(body.data)
 bm.verts.ensure_lookup_table(); bm.edges.ensure_lookup_table(); bm.faces.ensure_lookup_table()
@@ -42,7 +44,8 @@ bpy.context.scene.camera = cam
 k = bpy.data.lights.new("k", type="SUN"); k.energy=3.0
 ko = bpy.data.objects.new("k", k); bpy.context.scene.collection.objects.link(ko); ko.rotation_euler=(0.9,0.2,0.4)
 bpy.context.scene.render.resolution_x=900; bpy.context.scene.render.resolution_y=900
-bpy.context.scene.render.filepath=r"C:\kaifa_senlin\airi\docs\yxz-audit\h31\loop999.png"
+bpy.context.scene.render.filepath=os.path.normpath(
+    os.path.join(_SCRIPT_DIR, "..", "docs", "yxz-audit", "h31", "loop999.png"))
 bpy.context.scene.render.image_settings.file_format="PNG"
 bpy.ops.render.render(write_still=True)
 print("DONE")

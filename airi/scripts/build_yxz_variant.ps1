@@ -50,8 +50,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+$repoRoot = Split-Path -Parent $root
 $blender = 'C:\Program Files\Blender Foundation\Blender 5.2\blender.exe'
-$source = 'C:\kaifa_senlin\pingdou\cartoon-print-studio\data\yxz_character_tripo_jpg\model\model_web.glb'
+$source = Join-Path $repoRoot 'cartoon-print-studio\data\yxz_character_tripo_jpg\model\model_web.glb'
 $work = Join-Path $root "docs\yxz-variants\$Tag"
 
 New-Item -ItemType Directory -Force -Path $work | Out-Null

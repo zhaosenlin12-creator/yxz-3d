@@ -1,11 +1,12 @@
-import subprocess, os, shutil, time
+import subprocess, os, shutil, sys, time
 print("kill")
 subprocess.run(["taskkill", "/F", "/IM", "CartoonPrintStudio.exe", "/T"], capture_output=True)
 subprocess.run(["taskkill", "/F", "/IM", "python.exe", "/T"], capture_output=True)
 time.sleep(3)
 print("wipe")
-target = r"C:\kaifa_senlin\delivery_test"
-src = r"C:\kaifa_senlin\pingdou\cartoon-print-studio\dist\CartoonPrintStudio"
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+target = sys.argv[1] if len(sys.argv) > 1 else os.path.join(root, "dist", "delivery_test")
+src = os.path.join(root, "dist", "CartoonPrintStudio")
 if os.path.isdir(target):
     shutil.rmtree(target)
 os.makedirs(target)

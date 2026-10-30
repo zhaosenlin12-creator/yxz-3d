@@ -19,7 +19,7 @@
 
 ```bash
 # 1. 打开终端（Windows Terminal 或 Git Bash）
-cd C:\kaifa_senlin\pingdou\pingdou-workstation-final
+cd <本项目目录>    # 里面是 .git 和 start-all.ps1 的那一层
 
 # 2. 检查状态
 git status

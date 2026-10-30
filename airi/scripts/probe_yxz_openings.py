@@ -11,12 +11,13 @@ Usage: blender -b -P scripts/probe_yxz_openings.py -- <glb> [--weld 0.0006]
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 import bmesh
 import bpy
 
-sys.path.insert(0, "C:/kaifa_senlin/airi/scripts")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from repair_yxz_holes import boundary_loops, loop_is_closed, loop_span, rim_order
 
 

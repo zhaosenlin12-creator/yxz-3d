@@ -2,7 +2,7 @@
 REM Cartoon Print Studio - detached backend launcher
 REM Used because PowerShell 5.1 Start-Process crashes when env has both Path and PATH.
 setlocal
-set "ROOT=C:\kaifa_senlin\pingdou\cartoon-print-studio"
+set "ROOT=%~dp0.."
 set "HF_ENDPOINT=https://hf-mirror.com"
 set "HF_HUB_OFFLINE=0"
 set "PYTHONUNBUFFERED=1"
