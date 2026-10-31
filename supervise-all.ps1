@@ -84,9 +84,17 @@ if (-not $SkipRuntime) {
         -Starter { param($p) Start-YxzRuntime -Port $p }
 }
 if (-not $NoVoicebox) {
-    $services += New-YxzService -Name 'voicebox' -Label '本地语音包' -Port $VoiceboxPort `
-        -ReadyTest { param($p) Test-YxzVoiceboxReady -Port $p } `
-        -Starter { param($p) Start-YxzVoicebox -Port $p -FrontendPort $FrontendPort }
+    # 本地语音包 Voicebox 是个可选组件：没装这台机器就没有。
+    # 之前不管在不在都会去拉，每 8 秒失败一次，日志刷满、还让人以为
+    # 系统坏了。这里先探一次，找不到就整段跳过，只留一句提示。
+    if (Get-YxzVoiceboxRoot) {
+        $services += New-YxzService -Name 'voicebox' -Label '本地语音包' -Port $VoiceboxPort `
+            -ReadyTest { param($p) Test-YxzVoiceboxReady -Port $p } `
+            -Starter { param($p) Start-YxzVoicebox -Port $p -FrontendPort $FrontendPort }
+    }
+    else {
+        Write-SupervisorLog "本地语音包 Voicebox 没装（这台机器没有这个组件），跳过；TTS 走 MiniMax → Edge"
+    }
 }
 
 # ---- 启动单个服务 ----------------------------------------------------

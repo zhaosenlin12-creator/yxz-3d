@@ -204,11 +204,19 @@ if (-not $NoServerRuntime) {
     else { Warn "server-runtime 未就绪（WS 通道不可用，主界面仍可使用）" }
 }
 if (-not $NoVoicebox) {
-    Step "等待本地语音包就绪 ..."
-    $vbReady = Wait-YxzReady -Label '本地语音包' -Test { Test-YxzVoiceboxReady -Port $VoiceboxPort } `
-        -TimeoutSec 180 -LogHint (Get-YxzLogHint -Name 'voicebox' -Port $VoiceboxPort)
-    if ($vbReady) { Ok "本地语音包就绪 http://127.0.0.1:$VoiceboxPort" }
-    else { Warn "本地语音包未就绪（宜小智会退回 Edge 免费语音）" }
+    # 这台机器没装 Voicebox 组件时不要干等 180 秒：直接跳过，
+    # TTS 退回 MiniMax → Edge 即可（功能和体验都不受影响）。
+    if (Get-YxzVoiceboxRoot) {
+        Step "等待本地语音包就绪 ..."
+        $vbReady = Wait-YxzReady -Label '本地语音包' -Test { Test-YxzVoiceboxReady -Port $VoiceboxPort } `
+            -TimeoutSec 180 -LogHint (Get-YxzLogHint -Name 'voicebox' -Port $VoiceboxPort)
+        if ($vbReady) { Ok "本地语音包就绪 http://127.0.0.1:$VoiceboxPort" }
+        else { Warn "本地语音包未就绪（宜小智会退回 Edge 免费语音）" }
+    }
+    else {
+        $vbReady = $false
+        Warn "本机没装本地语音包 Voicebox，跳过（TTS 走 MiniMax → Edge）"
+    }
 }
 
 # ---- 4) 汇总 + 自动开浏览器 -----------------------------------------
@@ -226,7 +234,9 @@ if (-not $NoServerRuntime) {
     if ($rtReady) { Ok "WS通道  ws://127.0.0.1:$RuntimePort/ws" } else { Warn "WS通道  未就绪 (: $RuntimePort)" }
 }
 if (-not $NoVoicebox) {
-    if ($vbReady) { Ok "本地语音  http://127.0.0.1:$VoiceboxPort" } else { Warn "本地语音  未就绪 (: $VoiceboxPort)" }
+    if ($vbReady) { Ok "本地语音  http://127.0.0.1:$VoiceboxPort" }
+    elseif (Get-YxzVoiceboxRoot) { Warn "本地语音  未就绪 (: $VoiceboxPort)" }
+    else { Say "本地语音  未安装（本机没有 Voicebox 组件，TTS 走 MiniMax → Edge）" 'DarkGray' }
 }
 $elapsed = [int]((Get-Date) - $startAt).TotalSeconds
 Say "  用时 ${elapsed}s" 'DarkGray'
