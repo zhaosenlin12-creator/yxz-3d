@@ -30,19 +30,33 @@ const emit = defineEmits<{
   (e: 'redescribeCreation'): void
 }>()
 
+// Internal stage direction (`[ACT:{"emotion":...}]`) drives the avatar and
+// must never leak into the bubble.  The model sometimes emits it without the
+// closing bracket, so fall back to dropping the whole leading line.
+function stripAct(text: string): string {
+  let out = text.replace(/^\s*\[ACT[\s\S]*?\]\s*/, '')
+  if (/^\s*\[ACT/.test(out))
+    out = out.replace(/^\s*\[ACT.*(?:\r?\n|$)/, '')
+  return out.replace(/^\s*\n/, '')
+}
+
 const resolvedSlices = computed<ChatSlices[]>(() => {
   if (props.message.slices?.length) {
-    return props.message.slices
+    return props.message.slices.map((slice) => {
+      if (slice.type === 'text' && typeof slice.text === 'string')
+        return { ...slice, text: stripAct(slice.text) }
+      return slice
+    })
   }
 
   if (typeof props.message.content === 'string' && props.message.content.trim()) {
-    return [{ type: 'text', text: props.message.content } satisfies ChatSlicesText]
+    return [{ type: 'text', text: stripAct(props.message.content) } satisfies ChatSlicesText]
   }
 
   if (Array.isArray(props.message.content)) {
     const textPart = props.message.content.find(part => 'type' in part && part.type === 'text') as { text?: string } | undefined
     if (textPart?.text)
-      return [{ type: 'text', text: textPart.text } satisfies ChatSlicesText]
+      return [{ type: 'text', text: stripAct(textPart.text) } satisfies ChatSlicesText]
   }
 
   return []

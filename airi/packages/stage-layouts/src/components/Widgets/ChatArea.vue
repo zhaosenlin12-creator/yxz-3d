@@ -49,6 +49,28 @@ const quickStartPrompts = [
   '帮我把一个环保创意做成 3D 作品',
 ] as const
 
+// ---- Blueprint 工作模式（并入宜小智对话，不另开应用） ----
+const BP_BASE = 'http://127.0.0.1:9418'
+const WORK_MODES = [
+  { key: 'yxz', label: '宜小智' },
+  { key: 'blueprint', label: '设计蓝图' },
+  { key: 'course', label: '项目课' },
+] as const
+const blueprintPrompts = [
+  '校园纪念徽章：齿轮 + 校徽，直径 60mm',
+  '桌面小摆件：白色宇航服小机器人，手掌大小',
+  '科学课模型：可拆的太阳系八大行星摆件',
+] as const
+const workMode = useLocalStorage<string>('ui/chat/work-mode', 'yxz')
+const courseStudioUrl = `${BP_BASE}/studio?mode=course`
+const inputPlaceholder = computed(() =>
+  workMode.value === 'blueprint'
+    ? '说说你要做的东西：给谁用、多大、什么风格…'
+    : workMode.value === 'course'
+      ? '问项目课的下一步，或说说想先看哪一步…'
+      : t('stage.message'),
+)
+
 const { askPermission } = useSettingsAudioDevice()
 const { selectedAudioInput, audioInputs } = storeToRefs(useSettingsAudioDevice())
 const chatOrchestrator = useChatOrchestratorStore()
@@ -545,8 +567,34 @@ watch(sendMode, () => {
         'bg-primary-200/20 dark:bg-primary-400/20',
       ]"
     >
+      <!-- 工作模式：宜小智 / 设计蓝图（Blueprint）/ 项目课 -->
+      <div class="flex flex-wrap items-center gap-1.5 border-b border-primary-200/30 px-3 py-2">
+        <span class="text-[10px] tracking-[0.12em] text-primary-600/70 dark:text-primary-200/70">工作模式</span>
+        <button
+          v-for="m in WORK_MODES"
+          :key="m.key"
+          type="button"
+          class="rounded-full px-2.5 py-1 text-[11px] transition"
+          :class="workMode === m.key
+            ? 'bg-primary-600 text-white shadow-sm'
+            : 'border border-primary-300/50 bg-white/70 text-primary-700 hover:bg-white dark:border-primary-500/40 dark:bg-neutral-900/70 dark:text-primary-200'"
+          @click="workMode = m.key"
+        >
+          {{ m.label }}
+        </button>
+        <a
+          v-if="workMode === 'course'"
+          :href="courseStudioUrl"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="ml-auto text-[11px] text-primary-700 underline decoration-dotted dark:text-primary-200"
+        >
+          打开项目课 →
+        </a>
+      </div>
+
       <div
-        v-if="isYXZExhibition && !messageInput.trim()"
+        v-if="isYXZExhibition && workMode === 'yxz' && !messageInput.trim()"
         class="flex flex-wrap gap-1.5 border-b border-primary-200/30 px-3 pb-2 pt-2"
         aria-label="宜小智体验示例"
       >
@@ -567,6 +615,23 @@ watch(sendMode, () => {
         >
           宜小智正在思考，请稍候…
         </span>
+      </div>
+
+      <div
+        v-if="workMode === 'blueprint' && !messageInput.trim()"
+        class="flex flex-wrap gap-1.5 border-b border-primary-200/30 px-3 pb-2"
+        aria-label="蓝图示例"
+      >
+        <span class="w-full pt-2 text-xs text-primary-600/75 dark:text-primary-200/80">蓝图示例（点一下填入，直接发送就让宜小智出设计稿）：</span>
+        <button
+          v-for="prompt in blueprintPrompts"
+          :key="prompt"
+          type="button"
+          class="border border-primary-300/50 rounded-full bg-white/80 px-2.5 py-1 text-xs text-primary-700 shadow-sm backdrop-blur transition active:scale-95 dark:border-primary-500/40 dark:bg-neutral-900/70 dark:text-primary-200 hover:bg-white"
+          @click="messageInput = prompt"
+        >
+          {{ prompt }}
+        </button>
       </div>
 
       <!-- Uploaded photo chip: the camera capture result that the agent can use -->
@@ -594,7 +659,7 @@ watch(sendMode, () => {
       <BasicTextarea
         v-model="messageInput"
         :submit-on-enter="false"
-        :placeholder="t('stage.message')"
+        :placeholder="inputPlaceholder"
         text="primary-600 dark:primary-100  placeholder:primary-500 dark:placeholder:primary-200"
         bg="transparent"
         min-h="[100px]" max-h="[300px]" w-full

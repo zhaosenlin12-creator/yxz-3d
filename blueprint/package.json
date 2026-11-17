@@ -1,0 +1,12 @@
+{
+  "name": "blueprint-workbench",
+  "private": true,
+  "type": "module",
+  "description": "Blueprint 智造工作台：项目蓝图、3D 工坊与课程模式",
+  "scripts": {
+    "start": "node server/server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

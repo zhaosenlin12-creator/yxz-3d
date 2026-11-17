@@ -42,8 +42,29 @@ const YXZ_SYSTEM_GUIDANCE = `你是“宜小智AI智能创造系统”的宜小�
 6. 激光切割卡片：用户想做卡片/名片/桌牌等平面切割物料时，先用 yxz_generatePreview 把他的作品做成预览图，再问清姓名、身份、学校和联系方式，最后调用 yxz_laserCard，并把 yxz_generatePreview 返回的 sessionId 作为 previewSessionId 传进去。卡片尺寸固定、背面是活动主视觉背景图、正面是他的作品预览图。生成后告诉他三条路：预览卡里下载切割 SVG、用 xTool 打开切割、或点「打开创作面板」继续编辑并产出 3D 效果。
 7. 3D 打印件与激光卡片是同一条链路：对话确定需求 → 生成预览图 → 3D 模型 → 下载 STL 交给切片软件。不要跳过预览直接给模型。`
 
-interface SendOptions {
-  model: string
+// 当前工作模式注入：设计蓝图 / 项目课 用各自的话术推进，避免所有模式都聊成同一套。
+function yxzWorkModeGuidance() {
+  try {
+    const mode = localStorage.getItem('ui/chat/work-mode') || 'yxz'
+    if (mode === 'blueprint') {
+      return `
+【当前工作模式：设计蓝图】
+- 按 Blueprint 的链路推进：先用一句话复述需求 → 只问一个最关键的问题（用途 / 尺寸 / 风格三选一）→ 信息足够就直接调用 yxz_generatePreview 出 4 张 2D 设计稿。
+- 预览卡出现后，用一句话告诉用户「点卡片上的打开创作面板，可进入工作台继续 3D / STL」，不要让用户再手动点生成。
+- 用户提修改时，把修改点合并进 prompt 再重新出图；不要跳过预览直接做 3D。`
+    }
+    if (mode === 'course') {
+      return `
+【当前工作模式：项目课】
+- 把当前项目拆成 概览 → 接线 → 结构 → 零件 → 组装 → 3D 产出 六步；每一步只讲一个可执行动作，并说明对应的页面标签。
+- 用户问「下一步」时，给出下一步动作和验收标准；需要看画面时提示点课程里的预览跳转，不要臆造页面内容。`
+    }
+  }
+  catch {}
+  return ''
+}
+
+interface SendOptions {  model: string
   chatProvider: ChatProvider
   providerId?: string
   providerConfig?: Record<string, unknown>
@@ -362,11 +383,12 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       })
 
       if (useSettingsStageModel().stageModelSelected === 'preset-yxz') {
+        const modeGuidance = yxzWorkModeGuidance()
         const first = newMessages[0]
         if (first?.role === 'system')
-          newMessages[0] = { ...first, content: `${first.content}\n${YXZ_SYSTEM_GUIDANCE}` }
+          newMessages[0] = { ...first, content: `${first.content}\n${YXZ_SYSTEM_GUIDANCE}${modeGuidance}` }
         else
-          newMessages.unshift({ role: 'system', content: YXZ_SYSTEM_GUIDANCE })
+          newMessages.unshift({ role: 'system', content: `${YXZ_SYSTEM_GUIDANCE}${modeGuidance}` })
       }
 
       const contextsSnapshot = chatContext.getContextsSnapshot()

@@ -92,7 +92,8 @@ $providers['voicebox-local'] = @{
 # 免费的 Edge 神经语音作为最后一道兜底：没有 key、不依赖本地语音包，
 # 由本地后端渲染（edge-tts），永远保证宜小智能开口。
 $providers['edge-tts-free'] = @{
-    baseUrl = 'http://127.0.0.1:8000'
+    # 本机 8000 被其它项目占用，宜小智后端在本项目里跑 8100
+    baseUrl = 'http://127.0.0.1:8100'
     model   = 'edge-tts'
     voice   = 'zh-CN-XiaoxiaoNeural'
     rate    = '+0%'

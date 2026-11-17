@@ -1,8 +1,8 @@
-﻿# =====================================================================
+# =====================================================================
 #  宜小智工作台 —— 一键启动
 #
 #  针对“用起来太麻烦”的优化：
-#    1. 端口自动腾挪：8000 被别的程序占用时自动顺延到 8001/8002，
+#    1. 端口自动腾挪：8100 被别的程序占用时自动顺延到 8101/8102，
 #       并把真实端口注入前端（VITE_CARTOON_PRINT_API）
 #    2. 已在运行就直接复用，不重复拉起
 #    3. 依赖自检 → 缺失时自动调 install-new-pc.ps1（带断点续装）
@@ -17,7 +17,7 @@
 #    powershell -NoProfile -ExecutionPolicy Bypass -File start-all.ps1 -NoSupervisor
 # =====================================================================
 param(
-    [int]$BackendPort = 8000,
+    [int]$BackendPort = 8100,
     [int]$FrontendPort = 5199,
     [int]$RuntimePort = 6121,
     [int]$VoiceboxPort = 17493,
@@ -81,10 +81,10 @@ if (-not $SkipInstall) {
 }
 
 # ---- 1) 端口规划 -----------------------------------------------------
-# 先全端口扫描：只要本项目的后端还在跑（哪怕在 8001/8002）就直接复用，
+# 先全端口扫描：只要本项目的后端还在跑（哪怕在 8101/8102）就直接复用，
 # 避免反复双击启动脚本时堆出一串僵尸后端。
 if (-not $NoBackend) {
-    $existing = Find-ProjectBackend -From 8000 -To 8030
+    $existing = Find-ProjectBackend -From 8100 -To 8130
     if ($existing) {
         $BackendPort = $existing
         Ok "后端已在运行（: $BackendPort），直接复用"

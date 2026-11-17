@@ -47,8 +47,8 @@ pingdou-workstation-final/
 ## 🌐 访问地址
 
 - **前端界面**: http://localhost:5199
-- **后端 API**: http://localhost:8000
-- **API 文档**: http://localhost:8000/docs
+- **后端 API**: http://localhost:8100
+- **API 文档**: http://localhost:8100/docs
 
 ---
 
@@ -66,7 +66,7 @@ pingdou-workstation-final/
 A: 运行 `INSTALL-FIRST-TIME.bat` 重新安装依赖
 
 ### Q: 端口被占用？
-A: 关闭占用 5199 或 8000 端口的程序
+A: 关闭占用 5199 或 8100 端口的程序
 
 ### Q: 3D 模型加载慢？
 A: 见 `MODEL-OPTIMIZATION-GUIDE.md` 优化模型文件

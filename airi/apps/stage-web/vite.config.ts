@@ -144,6 +144,10 @@ export default defineConfig({
   },
   build: {
     sourcemap: true,
+    // UnoCSS can emit `!container` with a duplicated `!important`, which
+    // lightningcss rejects at minify time. Keeping the CSS unminified is
+    // cheap for this desktop bundle and keeps `vite build` reproducible.
+    cssMinify: false,
   },
   worker: {
     format: 'es',

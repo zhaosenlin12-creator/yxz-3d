@@ -24,6 +24,7 @@ const status = ref<YXZStatus>('idle')
 const action = ref<YXZPetFlourish | ''>('')
 const speakingLevel = ref(0)
 const paused = ref(false)
+const showPanel = ref(false)
 const mountState = ref<'pending' | 'loading' | 'mounted'>('pending')
 const loadError = ref('')
 
@@ -82,12 +83,23 @@ function playAction(name: YXZPetFlourish) {
         @error="loadError = String($event)"
       />
     </section>
-    <aside class="yxz-avatar-panel">
+    <button
+      v-if="!showPanel"
+      type="button"
+      class="yxz-avatar-toggle"
+      @click="showPanel = true"
+    >
+      调试面板
+    </button>
+    <aside v-else class="yxz-avatar-panel">
       <div class="row">
         <span class="key">状态</span>
         <span class="value">{{ STATUS_LABELS[status] }}</span>
         <button type="button" @click="cycleStatus">
           切换
+        </button>
+        <button type="button" class="panel-collapse" @click="showPanel = false">
+          收起
         </button>
       </div>
       <div class="row">
@@ -131,6 +143,26 @@ function playAction(name: YXZPetFlourish) {
   flex: 1;
   min-width: 0;
 }
+
+.yxz-avatar-toggle {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 10;
+  padding: .45rem .85rem;
+  border: 1px solid #8fcbe4;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .82);
+  color: #087eae;
+  cursor: pointer;
+  font: inherit;
+  font-size: .8rem;
+  backdrop-filter: blur(8px);
+}
+
+.yxz-avatar-toggle:hover { background: #e6f6fd; }
+
+.panel-collapse { margin-left: auto; }
 
 .yxz-avatar-panel {
   display: flex;

@@ -1,0 +1,9 @@
+# 运行数据与密钥（绝对不要提交）
+server/data/*.json
+server/config.json
+server/rest-debug.log
+
+# 本地运行产物
+run/
+e2e-results/
+*.log

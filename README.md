@@ -3,7 +3,8 @@
 一个「对话 → 创作预览 → 画布编辑 → 3D 模型 / 激光切割名片 → 打开本机软件」的完整工作台。
 
 - **airi**：对话前端（Vue3 + 3D 宜小智），dev 端口 `5199`
-- **cartoon-print-studio**：后端能力服务（FastAPI），端口 `8000`，提供生图预览、3D 建模、激光名片 SVG、本机软件检测与打开
+- **cartoon-print-studio**：后端能力服务（FastAPI），端口 `8100`，提供生图预览、3D 建模、激光名片 SVG、本机软件检测与打开
+- **blueprint**：智造工作台（Node.js，端口 `9418`），提供项目蓝图、3D 工坊、课程模式；对话右侧「设计蓝图 / 项目课」模式使用它
 
 ---
 
@@ -81,12 +82,12 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File verify-install.ps1
 
 | 检查项 | 方法 | 期望 |
 |---|---|---|
-| 后端 | 浏览器打开 `http://127.0.0.1:8000/api/software/detect` | 返回 JSON（`tools` 数组） |
+| 后端 | 浏览器打开 `http://127.0.0.1:8100/api/software/detect` | 返回 JSON（`tools` 数组） |
 | 前端 | 浏览器打开 `http://127.0.0.1:5199` | 看到宜小智对话界面 + 会动的宜小智形象 |
-| 预制模型 | `http://127.0.0.1:8000/api/presets/models` | 返回 3 个 pose_* 模型 |
-| 日志 | `.run\backend-8000.err.log`、`.run\frontend-5199.err.log` | 无致命报错 |
+| 预制模型 | `http://127.0.0.1:8100/api/presets/models` | 返回 3 个 pose_* 模型 |
+| 日志 | `.run\backend-8100.err.log`、`.run\frontend-5199.err.log` | 无致命报错 |
 
-> 端口 8000 被别的程序占用时，脚本会**自动顺延**到 8001/8002 并把真实端口注入前端，日志里会写明。
+> 端口 8100 被别的程序占用时，脚本会**自动顺延**到 8101/8102 并把真实端口注入前端，日志里会写明。
 
 ---
 
@@ -115,6 +116,25 @@ pwsh -File start-all.ps1 -NoVoicebox     # 不起本地语音包
 pwsh -File start-all.ps1 -BackendPort 8100
 ```
 
+### Blueprint 智造工作台（独立进程）
+
+Blueprint 在 `blueprint/`，是单独的 Node 服务，端口 `9418`。首次使用：
+
+```powershell
+# 1) 配置（可选；不配也能用内置演示模板）
+Copy-Item blueprint\config.example.json blueprint\config.json
+# 编辑 blueprint\config.json，填 llm/apiKey 等；密钥不要提交
+
+# 2) 启动（会自动复用 cartoon-print-studio\keys.txt 的 DeepSeek key）
+pwsh -NoProfile -ExecutionPolicy Bypass -File start-blueprint.ps1
+```
+
+打开 `http://127.0.0.1:9418/studio`。完整配置字段、优先级、数据目录和 API 自检见
+[`blueprint/README.md`](blueprint/README.md)。
+
+> 桌面版 `BLUEAI.exe` 会把 `5199 / 8100 / 9418` 三个服务一起拉起；仓库源码方式启动时，
+> `start-all.ps1` 负责 `5199 + 8100`，`start-blueprint.ps1` 负责 `9418`。
+
 ---
 
 ## 三、目录里的脚本
@@ -138,7 +158,7 @@ pwsh -File start-all.ps1 -BackendPort 8100
 | 双击后窗口一闪就关 | 直接双击了 .ps1 | 双击 `.bat`；或在终端里 `pwsh -File start-all.ps1` 看报错 |
 | 安装很慢 / 卡在 aiohttp | pip 解析器指数级回溯 | 装 `uv`（`pip install uv`）后重跑，解析从 10 分钟降到 5 秒 |
 | torch 下载卡住不动 | pip 走 download.pytorch.org 会零字节卡死 | 脚本已改为先落到本地 wheel 缓存再离线安装；缓存目录见 `YXZ_CACHE_DIR` |
-| 提示「端口 8000 被其它程序占用」 | 别的服务占了 8000 | 脚本会自动顺延到 8001，**不需要**手动处理 |
+| 提示「端口 8100 被其它程序占用」 | 别的服务占了 8100 | 脚本会自动顺延到 8001，**不需要**手动处理 |
 | 页面打开但对话/生图报错 | `keys.txt` 缺失或 key 失效 | 确认 `cartoon-print-studio\keys.txt` 存在（见下） |
 | 本地生图不可用 | SD 1.5 权重没下全 | 跑 `pwsh -File fetch-models.ps1 -Only sd`，看 `.run` 下日志 |
 | 本地 3D 生成不可用 | Hunyuan3D / TripoSR 权重缺失 | `pwsh -File fetch-models.ps1 -Only hunyuan` / `-Only triposr` |
@@ -161,7 +181,7 @@ pwsh -File start-all.ps1 -BackendPort 8100
 | 生图策略 | 后端 `backend/api_image.py` | aixj 优先 → minimax 备用 → 本地 SD 兜底；失败自动切换 |
 | LLM 策略 | 后端 `backend/llm_client.py` | MiniMax(.com) → DeepSeek → 本地规则 兜底 |
 | 3D 引擎 | 后端 `backend/` tripo/hunyuan runner | Tripo → 混元3D → 本地彩色 三级自动切换 |
-| 前端 API 地址 | 环境变量 `VITE_CARTOON_PRINT_API` | 默认 `http://127.0.0.1:8000`（start-all.ps1 自动注入实际端口） |
+| 前端 API 地址 | 环境变量 `VITE_CARTOON_PRINT_API` | 默认 `http://127.0.0.1:8100`（start-all.ps1 自动注入实际端口） |
 | 软件路径 | 自动检测注册表/快捷方式/常见路径；修正存 `data/software_paths.json` | Bambu Studio、xTool Studio、LightBurn、LaserGRBL、Orca/Prusa/Cura、Blender |
 
 ---

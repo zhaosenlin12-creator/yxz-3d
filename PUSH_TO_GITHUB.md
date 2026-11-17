@@ -137,7 +137,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File start-all.ps1
 ```
 
 **预期行为**:
-- 后端启动在 http://127.0.0.1:8000
+- 后端启动在 http://127.0.0.1:8100
 - 前端启动在 http://127.0.0.1:5199
 - 浏览器自动打开前端页面
 
@@ -176,7 +176,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File start-all.ps1
 ## ⚠️ 常见问题
 
 ### 问题 1: 端口被占用
-**症状**: 启动时提示 "端口 8000 或 5199 被占用"
+**症状**: 启动时提示 "端口 8100 或 5199 被占用"
 
 **解决**:
 ```bash

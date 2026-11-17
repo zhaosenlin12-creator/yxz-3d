@@ -1,4 +1,4 @@
-﻿# =====================================================================
+# =====================================================================
 #  宜小智工作台 —— 停止全部服务
 #
 #  做三件事：
@@ -12,7 +12,7 @@
 #  用法： pwsh -NoProfile -ExecutionPolicy Bypass -File stop-all.ps1
 # =====================================================================
 param(
-    [int]$BackendPort = 8000,
+    [int]$BackendPort = 8100,
     [int]$FrontendPort = 5199,
     [int]$RuntimePort = 6121,
     [int]$VoiceboxPort = 17493,
@@ -119,8 +119,8 @@ function Stop-ProjectInstances {
 if ($OnlyPort -eq 0 -or ($OnlyPort -ge 5199 -and $OnlyPort -le 5230)) {
     Stop-ProjectInstances -From 5199 -To 5230 -Label '前端' -IsOurs { param($p) Test-FrontendIdentity "http://127.0.0.1:$p" }
 }
-if ($OnlyPort -eq 0 -or ($OnlyPort -ge 8000 -and $OnlyPort -le 8030)) {
-    Stop-ProjectInstances -From 8000 -To 8030 -Label '后端' -IsOurs { param($p) Test-BackendIdentity "http://127.0.0.1:$p" }
+if ($OnlyPort -eq 0 -or ($OnlyPort -ge 8100 -and $OnlyPort -le 8130)) {
+    Stop-ProjectInstances -From 8100 -To 8130 -Label '后端' -IsOurs { param($p) Test-BackendIdentity "http://127.0.0.1:$p" }
 }
 if ($OnlyPort -eq 0 -or ($OnlyPort -ge 6121 -and $OnlyPort -le 6130)) {
     Stop-ProjectInstances -From 6121 -To 6130 -Label 'WS通道' -IsOurs { param($p) Test-ServerRuntimeIdentity -Port $p }

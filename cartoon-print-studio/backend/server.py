@@ -104,6 +104,13 @@ def _log_normal_exit():
 atexit.register(_log_normal_exit)
 
 import sd_client, triposr_runner, bambu, llm_client, api_image, hunyuan_runner, mesh_postprocess, tripo_api, scene_jobs
+import local_preview
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+
+# Cloud image calls can hang for a minute when a key is out of quota.  The chat
+# card must appear promptly, so we give the cloud chain a short budget and fall
+# back to the local concept board instead of letting the turn time out.
+_PREVIEW_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="preview")
 import mesh_isolation
 import software_integrations
 import progress
@@ -1106,6 +1113,42 @@ def get_progress(sid: str, since: float = 0.0):
     events = progress.read(sid, since_ts=since)
     latest = events[-1] if events else progress.latest(sid)
     return {"sid": sid, "events": events, "latest": latest}
+def _english_render_prompt(text: str) -> str:
+    """Cloud image models draw Chinese glyphs as gibberish posters.
+
+    Translate the product idea into one English sentence first.  If the LLM is
+    unavailable, fall back to a keyword-derived English phrase rather than
+    sending Chinese to the image model.
+    """
+    if not any("\u4e00" <= c <= "\u9fff" for c in text):
+        return text
+    try:
+        out = llm_client.llm_call(
+            "Translate the following product idea into ONE concise English sentence "
+            "for an image model. Describe only the object's shape, material, colors "
+            "and style. Output English only, no quotes, no explanation, no Chinese.\n"
+            f"Idea: {text}", timeout=18,
+        )
+        if out:
+            line = out.strip().splitlines()[0].strip().strip('"').strip("'")
+            if line and not any("\u4e00" <= c <= "\u9fff" for c in line):
+                return line
+    except Exception:
+        pass
+    p = text.lower()
+    if any(k in p for k in ("齿轮", "徽章", "badge", "gear")):
+        return ("A round gear badge with a glowing gear at the center, thick rim, "
+                "metallic and translucent blue materials, cute product design")
+    if any(k in p for k in ("机器人", "robot", "宇航", "太空")):
+        return ("A cute white astronaut robot figurine, round helmet with glowing blue "
+                "visor, small wings, glossy plastic and metal, product design")
+    if any(k in p for k in ("太阳系", "行星", "planet", "宇宙")):
+        return ("A miniature solar system model with a glowing sun and eight colorful "
+                "planets on thin orbit rings, clean educational product design")
+    return ("A cute educational desktop object, rounded shapes, blue and white palette, "
+            "clean product design")
+
+
 @app.post("/api/previews")
 def previews(req: PreviewsReq):
     """Generate previews by walking the configured image chain.
@@ -1118,18 +1161,71 @@ def previews(req: PreviewsReq):
     sd = session_dir(sid)
     pdir = os.path.join(sd, "previews")
     os.makedirs(pdir, exist_ok=True)
+    if os.environ.get("BLUEAI_LOCAL_PREVIEW", "").lower() in ("1", "true", "yes"):
+        # Desktop build: cloud image credits are not guaranteed.  Draw the
+        # concept board locally and return quickly instead of making the
+        # conversation wait on a quota-limited provider.
+        src, results = local_preview.render_previews(req.prompt, pdir, req.n)
+        items = []
+        for i, (blob, tag) in enumerate(results):
+            path = os.path.join(pdir, f"img_{i}.png")
+            with open(path, "wb") as f:
+                f.write(blob)
+            items.append({
+                "index": i, "seed": i, "tag": tag, "source": src,
+                "path": f"/api/data/{sid}/previews/img_{i}.png",
+            })
+        progress.Progress(sid, "previews").done(f"已生成 {len(items)} 张本地概念稿")
+        return {"session_id": sid, "previews": items, "prompt": req.prompt, "source": src}
     pg = progress.Progress(sid, "previews")
-    try:
-        # Run n copies of the same prompt through the chain
-        prompts = [req.prompt] * req.n
-        src, results = api_image.generate_previews(
-            prompts, prefer=req.prefer or "auto",
-            size="1024x1024", sid=sid,
+    # MiniMax renders Chinese-only prompts as text posters ("thinking process")
+    # instead of the object.  Add an English product-render suffix so every
+    # preview is a single centered object on a clean background.
+    render_prompt = _english_render_prompt(req.prompt.strip())
+    if "product design render" not in render_prompt.lower():
+        render_prompt += (
+            " Product design render, single object centered, plain white background,"
+            " soft studio lighting, no text, no letters, no diagram, no infographic,"
+            " no chart, photorealistic"
         )
+    try:
+        # Four genuinely different views, not the same image four times.
+        variants = [
+            "front view, symmetrical composition",
+            "three-quarter view, slight perspective",
+            "close-up detail of the center, shallow depth of field",
+            "alternate colorway, matte finish",
+        ]
+        prompts = [f"{render_prompt} {variants[i % len(variants)]}" for i in range(req.n)]
+        future = _PREVIEW_POOL.submit(
+            lambda: api_image.generate_previews(
+                prompts, prefer=req.prefer or "auto",
+                size="1024x1024", sid=sid,
+            )
+        )
+        try:
+            src, results = future.result(timeout=18)
+        except FutureTimeout:
+            print("[previews] cloud image timed out after 18s", flush=True)
+            src, results = [], []
     except Exception as e:
-        traceback.print_exc()
-        pg.fail("这次没能生成出预览图，请再试一次")
-        raise HTTPException(500, "这次没能生成出预览图，请再试一次")
+        # No cloud credits / no local SD: draw an on-theme concept board so the
+        # conversation can still hand off to the workbench.  This is explicitly
+        # labelled "本地概念稿", never passed off as a provider render.
+        print(f"[previews] cloud image chain failed ({e}); using local design render", flush=True)
+        try:
+            src, results = local_preview.render_previews(req.prompt, pdir, req.n)
+        except Exception as e2:
+            traceback.print_exc()
+            pg.fail("这次没能生成出预览图，请再试一次")
+            raise HTTPException(500, f"preview render failed: {e2}")
+    if not results or all(blob is None for blob, _tag in results):
+        print("[previews] no usable cloud image; using local design render", flush=True)
+        try:
+            src, results = local_preview.render_previews(req.prompt, pdir, req.n)
+        except Exception:
+            traceback.print_exc()
+            results = []
     if not results:
         pg.fail("这次没能生成出预览图，请再试一次")
         raise HTTPException(500, "这次没能生成出预览图，请再试一次")
@@ -1296,7 +1392,9 @@ def to_3d_cartoon(req: ThreeDCartoonReq):
     if not os.path.isfile(src):
         pg.fail("这次没能找到预览图，请再试一次")
         raise HTTPException(404, "preview not found")
-    out = os.path.join(sd, "model")
+    # Keep the AI-reconstructed and relief meshes apart: the relief is a
+    # fallback and must never overwrite a real Tripo model in the same session.
+    out = os.path.join(sd, "model_relief")
     os.makedirs(out, exist_ok=True)
     pg.emit("layer", 40, f"正在把设计稿叠成 {req.layers} 层立体浮雕…", "geometry")
     try:
@@ -1322,7 +1420,7 @@ def to_3d_cartoon(req: ThreeDCartoonReq):
     return {
         "session_id": req.session_id,
         **info,
-        "model_url": f"/api/data/{req.session_id}/model/mesh.glb",
+        "model_url": f"/api/data/{req.session_id}/model_relief/mesh.glb",
     }
 @app.post("/api/print")
 def to_print(req: PrintReq):
@@ -1695,7 +1793,7 @@ def to_3d_tripo(req: ThreeDTripoReq):
     credits: int | None = None
     if isinstance(bal, dict) and bal.get("ok"):
         credits = int(bal.get("balance", 0))
-        if credits < 30:
+        if credits < 5:
             pg.fail("生成额度暂时用完了，请稍后再试一次")
             raise HTTPException(402, "3D 生成额度暂时用完了，请稍后再试一次")
     # A cold cache means the balance is simply unknown, not zero.  The
@@ -1707,6 +1805,13 @@ def to_3d_tripo(req: ThreeDTripoReq):
     src = resolve_source_png(req.session_id, req.image_index, req.source_png)
     out = os.path.join(sd, "model")
     os.makedirs(out, exist_ok=True)
+
+    # Tripo charges extra for texture/PBR and refuses the task when the
+    # balance cannot cover it.  Geometry alone is what a 3D print needs, so
+    # paint only when the balance is clearly enough and known.
+    want_texture = credits is not None and credits >= 30
+    if not want_texture:
+        pg.emit("no-texture", 8, "额度有限，先生成可打印的立体结构（不上色）", "queued")
 
     def on_poll(t):
         try:
@@ -1729,7 +1834,7 @@ def to_3d_tripo(req: ThreeDTripoReq):
         result = tripo_api.image_to_model(
             src, out,
             model_version=req.model_version,
-            texture=True, pbr=True,
+            texture=want_texture, pbr=want_texture,
             texture_quality=req.texture_quality,
             face_limit=req.face_limit,
             max_wait=300.0,
@@ -1800,6 +1905,7 @@ def to_3d_tripo(req: ThreeDTripoReq):
         "extents_mm": extents_mm,
         "elapsed_s": round(time.time() - t0, 1),
         "credits_remaining": credits,
+        "textured": bool(want_texture),
         "tripo_result": {k: v for k, v in result.items() if k not in ("raw",)},
     }
 
@@ -3086,10 +3192,13 @@ def _startup():
     # takes a few seconds to read the weights off the disk, and doing that
     # while the first student is already talking makes the button feel
     # broken.
-    try:
-        asr_api.warm_up()
-    except Exception:
-        traceback.print_exc()
+    # 桌面发布包默认跳过语音模型预热：首次启动要下载几百 MB，
+    # 会把本地对话和预览的首屏拖慢；用户真点麦克风时再按需加载。
+    if os.environ.get("BLUEAI_SKIP_ASR", "").lower() not in ("1", "true", "yes"):
+        try:
+            asr_api.warm_up()
+        except Exception:
+            traceback.print_exc()
 
     # The local diffusion stacks (SD 1.5, TripoSR, Hunyuan3D-2 mini) are
     # several GB of VRAM/RAM each and they are only fallback engines: the

@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BLUEAI 智造工作台</title>
+<link rel="stylesheet" href="/studio/style.css" />
+<script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js" crossorigin="anonymous"></script>
+</head>
+<body class="lean" data-view="make">
+<div class="bg-grid"></div>
+<header class="topbar">
+  <div class="brand">
+    <div class="mark">B</div>
+    <div class="brand-text">
+      <strong>BLUEAI</strong>
+      <span>智造工作台</span>
+    </div>
+  </div>
+  <nav class="tabs">
+    <button class="tab active" data-view="make">3D 智造</button>
+    <button class="tab" data-view="course">课程模式</button>
+    <button class="tab" data-view="projects">项目库</button>
+  </nav>
+  <div class="status">
+    <span class="dot" id="svc-dot"></span>
+    <span id="svc-text">连接中…</span>
+    <button class="ghost" id="btn-lean" aria-pressed="true">简洁模式</button>
+    <a class="ghost" href="/">返回蓝图首页</a>
+  </div>
+</header>
+
+<main>
+  <!-- ============ 3D 智造 ============ -->
+  <section class="view active" id="view-make">
+    <div class="make-grid">
+      <aside class="steps">
+        <h2>智造流水线</h2>
+        <ol class="pipeline">
+          <li class="active" data-step="1"><b>01</b><span>描述想法</span><em>一句话说清要做什么</em></li>
+          <li data-step="2"><b>02</b><span>生成预览</span><em>4 张设计稿挑一张</em></li>
+          <li data-step="3"><b>03</b><span>生成 3D 模型</span><em>云端建模，输出 GLB/STL</em></li>
+          <li data-step="4"><b>04</b><span>产出与打印</span><em>名片 SVG / 打开本机软件</em></li>
+        </ol>
+        <div class="presets-mini">
+          <h3>宜小智预制摆件</h3>
+          <p>点开直接旋转预览、下载 STL</p>
+          <div id="preset-mini" class="preset-mini-list"></div>
+        </div>
+      </aside>
+
+      <section class="workspace">
+        <div class="session-banner" id="session-banner" style="display:none">
+          <span>来自宜小智对话 · 会话 <b id="session-banner-id">—</b></span>
+          <a href="http://127.0.0.1:5199/" target="_blank" rel="noopener noreferrer">回到对话修改 →</a>
+        </div>
+        <div class="prompt-card">
+          <label for="prompt">你要做什么？</label>
+          <textarea id="prompt" rows="3" placeholder="例：一个白色宇航服小机器人，双手叉腰，圆润卡通造型，适合 3D 打印"></textarea>
+          <div class="chips" id="chips">
+            <button data-p="白色宇航服小机器人，双手叉腰，圆润卡通，适合 3D 打印">宇航服小机器人</button>
+            <button data-p="赛博朋克风格的机械齿轮徽章，深蓝配青色发光线条">机械齿轮徽章</button>
+            <button data-p="一只坐着的太空猫，戴透明头盔，造型简洁可爱">太空猫</button>
+            <button data-p="带姓名牌的六自由度机械臂摆件，工业风">机械臂摆件</button>
+          </div>
+          <div class="prompt-actions">
+            <button class="primary" id="btn-preview">生成设计稿预览</button>
+            <span class="hint" id="preview-hint">云端生图：MiniMax / aixj 自动切换</span>
+          </div>
+        </div>
+
+        <div class="canvas-card" id="canvas-card">
+          <div class="canvas-head">
+            <span>设计稿</span>
+            <span class="small" id="session-label"></span>
+          </div>
+          <div class="preview-grid" id="preview-grid">
+            <div class="empty">
+              <div class="empty-mark">◇</div>
+              <p>生成预览后，这里会出现 4 张设计稿</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="model-card" id="model-card">
+          <div class="model-head">
+            <div>
+              <span class="label">3D 模型</span>
+              <h3 id="model-title">等待生成</h3>
+            </div>
+            <div class="model-actions">
+              <button class="primary" id="btn-3d" disabled>生成 3D 模型</button>
+              <button class="ghost" id="btn-fallback" style="display:none">生成 2.5D 浮雕（可打印）</button>
+              <a class="ghost" id="btn-stl" style="display:none" download>下载 STL</a>
+              <a class="ghost" id="btn-glb" style="display:none" download>下载 GLB</a>
+            </div>
+          </div>
+          <p class="engine-hint" id="engine-hint">正在检查 3D 引擎…</p>
+          <div class="model-body">
+            <div class="model-view" id="model-view">
+              <div class="empty">
+                <div class="empty-mark">◈</div>
+                <p>模型生成后在这里旋转查看</p>
+              </div>
+            </div>
+            <div class="model-meta" id="model-meta">
+              <div class="meta-row"><span>引擎</span><b id="m-engine">—</b></div>
+              <div class="meta-row"><span>面数</span><b id="m-faces">—</b></div>
+              <div class="meta-row"><span>尺寸</span><b id="m-size">—</b></div>
+              <div class="meta-row"><span>耗时</span><b id="m-time">—</b></div>
+              <div class="progress"><div id="m-bar"></div></div>
+              <p class="progress-text" id="m-progress">等待开始</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="output-card">
+          <div class="output-head"><span class="label">产出</span><h3>激光切割名片 & 本机打印</h3></div>
+          <div class="output-grid">
+            <div class="field">
+              <label>姓名</label><input id="card-name" placeholder="张小明" />
+            </div>
+            <div class="field"><label>身份 / 学校</label><input id="card-title" placeholder="乐启享创客社团" /></div>
+            <div class="field"><label>联系方式</label><input id="card-contact" placeholder="微信 / 电话" /></div>
+            <div class="field"><label>标语</label><input id="card-slogan" placeholder="把想法做成实物" /></div>
+          </div>
+          <div class="output-actions">
+            <button id="btn-card">导出切割名片</button>
+            <a class="ghost" id="btn-card-png" style="display:none" target="_blank">查看名片 PNG</a>
+            <a class="ghost" id="btn-card-svg" style="display:none" target="_blank">打开切割 SVG</a>
+          </div>
+          <div class="software-row">
+            <span class="label">本机软件</span>
+            <div id="software-list" class="software-list"><em>检测中…</em></div>
+          </div>
+        </div>
+      </section>
+
+      <aside class="copilot">
+        <div class="copilot-head">
+          <div class="avatar">智</div>
+          <div><strong>宜小智</strong><span>3D 智造助手</span></div>
+          <button class="ghost panel-close" id="btn-assist-close" type="button">收起</button>
+        </div>
+        <div class="chat-log" id="make-chat">
+          <div class="msg bot">说一句你想做的东西，我帮你变成可打印的 3D 模型。也可以直接问我：模型为什么倒着、STL 怎么进切片软件。</div>
+        </div>
+        <div class="chat-input">
+          <input id="make-input" placeholder="问问宜小智…" />
+          <button id="make-send">发送</button>
+        </div>
+      </aside>
+      <button class="float-tab left" id="btn-steps" type="button">流水线 / 摆件</button>
+      <button class="float-tab right" id="btn-assist" type="button">宜小智</button>
+    </div>
+  </section>
+
+  <!-- ============ 课程模式 ============ -->
+  <section class="view" id="view-course">
+    <div class="course-grid">
+      <aside class="course-list">
+        <h2>选一个项目开始上课</h2>
+        <div id="course-projects" class="proj-list"></div>
+        <div class="level-box">
+          <span class="label">学段</span>
+          <div class="seg" id="level-seg">
+            <button data-level="primary">小学</button>
+            <button data-level="middle" class="on">初中</button>
+            <button data-level="high">高中</button>
+          </div>
+          <button class="primary wide" id="btn-generate" disabled>生成项目课</button>
+          <p class="hint">课程内容 = 这个项目的真实链路：接线 → 结构 → 零件 → 组装 → 3D 产出</p>
+        </div>
+      </aside>
+      <section class="course-main">
+        <div class="course-head" id="course-head">
+          <div>
+            <span class="label">项目课</span>
+            <h2 id="course-title">还没选项目</h2>
+            <p id="course-sub">左侧选一个项目，点「生成项目课」</p>
+          </div>
+          <div class="course-stats">
+            <div><b id="stat-chapters">—</b><span>章</span></div>
+            <div><b id="stat-steps">—</b><span>步</span></div>
+            <div><b id="stat-done">0%</b><span>完成</span></div>
+          </div>
+        </div>
+        <div id="chapters" class="chapters">
+          <div class="empty big"><div class="empty-mark">▤</div><p>课程会按章节展开：每步都有目标、动手任务、检查点，以及「预览」直达项目里对应的画面。</p></div>
+        </div>
+      </section>
+
+      <aside class="copilot course-copilot">
+        <div class="copilot-head">
+          <div class="avatar">导</div>
+          <div><strong>项目导师</strong><span>陪你把课做完</span></div>
+          <button class="ghost panel-close" id="btn-course-assist-close" type="button">收起</button>
+        </div>
+        <div class="chat-log" id="course-chat">
+          <div class="msg bot">选好项目和学段，我就按这个项目的接线、结构、零件、组装和 3D 产出，一步步带你做。哪里卡住直接问。</div>
+        </div>
+        <div class="chat-input">
+          <input id="course-input" placeholder="问接线、问装配、说「简化一点」…" />
+          <button id="course-send">发送</button>
+        </div>
+      </aside>
+      <button class="float-tab left" id="btn-projlist" type="button">换项目</button>
+      <button class="float-tab right" id="btn-course-assist" type="button">项目导师</button>
+    </div>
+  </section>
+
+  <!-- ============ 项目库 ============ -->
+  <section class="view" id="view-projects">
+    <div class="projects-head">
+      <h2>我的项目</h2>
+      <p>每个项目都能一键变成课程，也能进入 3D 工坊做实物。</p>
+    </div>
+    <div id="project-grid" class="project-grid"></div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+<script src="/studio/app.js"></script>
+</body>
+</html>

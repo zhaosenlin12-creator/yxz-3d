@@ -1,4 +1,4 @@
-﻿# =====================================================================
+# =====================================================================
 #  pingdou-workstation 共用工具函数
 #  被 install-new-pc.ps1 / start-all.ps1 dot-source 引用。
 # =====================================================================
@@ -343,7 +343,7 @@ function Get-WheelCacheDir {
 
 # ---- 找一个空闲端口 ----------------------------------------------------
 function Get-FreePort {
-    param([int]$Preferred = 8000, [int]$MaxTry = 60)
+    param([int]$Preferred = 8100, [int]$MaxTry = 60)
     $listening = Get-ListeningPorts
     for ($i = 0; $i -lt $MaxTry; $i++) {
         $p = $Preferred + $i
@@ -433,10 +433,10 @@ function Get-RemoteFileResumable {
     return $false
 }
 # ---- 找出本项目已经在跑的实例（跨端口扫描）---------------------------
-# 只看“首选端口”不够：用户多双击几次就会在 8001/8002/... 上留下
+# 只看“首选端口”不够：用户多双击几次就会在 8101/8102/... 上留下
 # 一堆僵尸后端。这里按端口区间扫描，用 openapi 里的项目标识认人。
 function Find-ProjectBackend {
-    param([int]$From = 8000, [int]$To = 8030)
+    param([int]$From = 8100, [int]$To = 8130)
     $listening = Get-ListeningPorts
     for ($p = $From; $p -le $To; $p++) {
         if (-not $listening.Contains($p)) { continue }

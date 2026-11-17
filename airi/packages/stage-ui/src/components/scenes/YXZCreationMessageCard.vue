@@ -47,16 +47,21 @@ const lightboxOpen = ref(false)
 const lightboxIndex = ref(0)
 
 function openStudio() {
-  const item = gallery.value[lightboxIndex.value]
-  if (!item || !props.sessionId)
+  if (!props.sessionId)
     return
-  const index = (props.previews?.length ? props.previews?.findIndex(p => p.src === item.src) : 0) ?? 0
-  const url = new URL('/yxz-studio', typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:5199')
+  // 合并后的主应用只有一个创作工作台：卡片永远带同一会话进 9418，
+  // 不依赖 localStorage 里当前选的是哪个模式，避免“点了没反应”。
+  const url = new URL('http://127.0.0.1:9418/studio')
   url.searchParams.set('session', props.sessionId)
-  url.searchParams.set('image', String(Math.max(0, index)))
-  url.searchParams.set('src', item.src)
-  url.searchParams.set('caption', item.caption || props.caption)
-  window.open(url.toString(), '_blank', 'noopener,noreferrer')
+  url.searchParams.set('mode', '3d')
+  url.searchParams.set('n', String(props.previews?.length || 4))
+  url.searchParams.set('prompt', props.caption || '')
+  url.hash = '3d'
+  const win = window.open(url.toString(), '_blank', 'noopener,noreferrer')
+  // A popup blocker (or an embedded shell) can return null; don't leave the
+  // click doing nothing at all.
+  if (!win)
+    window.location.assign(url.toString())
 }
 
 function openLightbox(index: number) {
@@ -172,6 +177,18 @@ async function copyPreviewAddress() {
       </button>
       <span v-if="gallery.length > 1">共 {{ gallery.length }} 张</span>
     </div>
+    <div v-if="gallery.length > 1" class="yxz-creation-card-thumbs">
+      <button
+        v-for="(item, index) in gallery"
+        :key="item.src"
+        type="button"
+        class="yxz-creation-card-thumb"
+        :class="{ 'is-active': index === lightboxIndex }"
+        @click="openLightbox(index)"
+      >
+        <img :src="item.src" :alt="item.caption || `设计稿 ${index + 1}`">
+      </button>
+    </div>
     <p v-if="description" class="yxz-creation-card-description">
       {{ description }}
     </p>
@@ -283,9 +300,38 @@ async function copyPreviewAddress() {
 .yxz-creation-card-image {
   display: block;
   width: 100%;
-  max-height: 15rem;
+  height: 12rem;
   border-radius: .7rem;
-  object-fit: cover;
+  background: #fff;
+  object-fit: contain;
+}
+
+.yxz-creation-card-thumbs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: .35rem;
+  margin-top: .45rem;
+}
+
+.yxz-creation-card-thumb {
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid rgba(126, 176, 202, .35);
+  border-radius: .45rem;
+  background: #fff;
+  cursor: pointer;
+}
+
+.yxz-creation-card-thumb.is-active {
+  border-color: #2f8fca;
+  box-shadow: 0 0 0 1px rgba(47, 143, 202, .45);
+}
+
+.yxz-creation-card-thumb img {
+  display: block;
+  width: 100%;
+  height: 2.6rem;
+  object-fit: contain;
 }
 
 .yxz-creation-card-description {

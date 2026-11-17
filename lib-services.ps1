@@ -1,4 +1,4 @@
-﻿# =====================================================================
+# =====================================================================
 #  pingdou-workstation 服务层
 #
 #  四个服务（后端 / 前端 / WS通道 / 本地语音包）的统一定义与启停。
@@ -177,7 +177,7 @@ function Wait-YxzPortOpen {
 
 # ---- 就绪判定 --------------------------------------------------------
 function Test-YxzBackendReady {
-    param([int]$Port = 8000)
+    param([int]$Port = 8100)
     # /api/ping 是零 I/O 的探针。之前用 /api/software/detect，它冷缓存要
     # 扫注册表和开始菜单（约 10 秒），3 秒超时必然失败 —— 守护脚本会把
     # 完全健康的后端误判成卡死然后杀掉它。
@@ -217,7 +217,7 @@ function Test-YxzVoiceboxIdentity {
 
 # ---- 启动函数 --------------------------------------------------------
 function Start-YxzBackend {
-    param([int]$Port = 8000)
+    param([int]$Port = 8100)
     $venvPy = Join-Path $script:YXZBackendRoot 'ai\forge-webui\venv\Scripts\python.exe'
     if (-not (Test-Path -LiteralPath $venvPy)) {
         Write-Host "  [WARN] 后端 venv 不存在，跳过" -ForegroundColor Yellow
@@ -236,7 +236,7 @@ function Start-YxzBackend {
 }
 
 function Start-YxzFrontend {
-    param([int]$Port = 5199, [int]$BackendPort = 8000)
+    param([int]$Port = 5199, [int]$BackendPort = 8100)
     $vite = Join-Path $script:YXZFrontendRoot 'node_modules\vite\bin\vite.js'
     if (-not (Test-Path -LiteralPath $vite)) {
         Write-Host "  [WARN] 未找到 vite，跳过前端" -ForegroundColor Yellow

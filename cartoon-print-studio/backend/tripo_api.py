@@ -29,8 +29,10 @@ BASE_V2 = "https://api.tripo3d.ai/v2/openapi"
 
 #: Which platform the current key belongs to. Flipped automatically when a
 #: key is rejected by the active host, and remembered for the next call.
-_api_version = "v3"
-BASE = BASE_V3
+#: This deployment's tsk_ key is a Tripo v2 key (v3 answers 401), and v2
+#: also accepts it for task creation, so v2 is tried first.
+_api_version = os.environ.get("TRIPO_API_VERSION", "v2").strip() or "v2"
+BASE = _base_for(_api_version) if "_base_for" in globals() else BASE_V2
 
 
 def _base_for(version: str) -> str:
@@ -205,6 +207,11 @@ def _request(method: str, path_key: str, *, path_args: Optional[Dict[str, Any]] 
     h = {}
     if headers:
         h.update(headers)
+    # Tripo's v2 gateway answers 403 to Python's default urllib User-Agent
+    # even with a valid key; a browser UA is accepted.  Without this header
+    # every health probe and task call failed and the 3D chain fell back to
+    # the flat local relief.
+    h.setdefault("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
     last_err = None
     attempt = 0
     # Candidate list = every (platform version, key) pair.  The order is
@@ -260,11 +267,31 @@ def _request(method: str, path_key: str, *, path_args: Optional[Dict[str, Any]] 
                 err = e.read().decode("utf-8", "ignore")
             except Exception:
                 err = str(e.reason)
-            # A key the host does not accept (401), or an endpoint the host
+            # Tripo reports "not enough credit" as HTTP 403 with code 2010.
+            # That is a quota problem, not a bad key: switching to the other
+            # platform would only turn it into a confusing 401.
+            quota_hit = False
+            try:
+                _j = json.loads(err)
+                _msg = str(_j.get("message") or "")
+                quota_hit = _j.get("code") in (2010, 2011) or "credit" in _msg.lower()
+            except Exception:
+                quota_hit = False
+            if quota_hit:
+                try:
+                    import provider_health
+                    provider_health.report_failure(
+                        "tripo3d", "quota", f"HTTP {e.code} on {method} {path_key}")
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"Tripo 额度不足（需要更多积分才能生成带贴图的模型）: {err[:200]}")
+            # A key the host does not accept (401/403), or an endpoint the host
             # does not have (404 — the two platforms use different paths),
             # is recoverable: move to the next platform/key candidate.
-            # Switching must not consume one of the caller's retries.
-            if e.code in (401, 404) and tried + 1 < len(candidates):
+            # Tripo v3 answers 403 for a key that is valid on v2, so 403 must
+            # rotate to the other platform instead of aborting the 3D chain.
+            if e.code in (401, 403, 404) and tried + 1 < len(candidates):
                 tried += 1
                 nxt_v, nxt_k = candidates[tried]
                 print(
@@ -435,15 +462,19 @@ def create_image_to_model(image_token: str, *,
         body2: Dict[str, Any] = {
             "type": "image_to_model",
             "file": {"type": "png", "file_token": image_token},
-            "model_version": model_version,
             "texture": texture,
             "pbr": pbr,
-            "texture_quality": texture_quality,
-            "quad": quad,
-            "auto_size": auto_size,
         }
+        # v2 picks its own default model when model_version is omitted; the
+        # v3 model ids are rejected there (code 2017 "version value invalid").
+        if not str(model_version).startswith("v3"):
+            body2["model_version"] = model_version
         if face_limit:
             body2["face_limit"] = face_limit
+        if quad:
+            body2["quad"] = True
+        if auto_size:
+            body2["auto_size"] = True
         return json.dumps(body2).encode("utf-8")
 
     j = _request("POST", "create", body_for=_body_for,

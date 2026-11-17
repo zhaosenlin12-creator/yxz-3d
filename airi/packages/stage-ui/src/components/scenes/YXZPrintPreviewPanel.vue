@@ -540,7 +540,9 @@ onUnmounted(() => controller.value?.abort())
   font-family: inherit;
 }
 
-.yxz-print-launch,
+/* 对话里统一由预览卡提供入口，旧的悬浮按钮会挡住输入框，隐藏掉。 */
+.yxz-print-launch { display: none; }
+
 .yxz-print-submit {
   display: inline-flex;
   align-items: center;
