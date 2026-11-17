@@ -1749,7 +1749,14 @@ def to_3d_hy(req: ThreeDHYReq):
         )
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(500, "这次没能生成出模型，请再试一次")
+        raw = str(e)
+        if "torch" in raw.lower():
+            msg = "本机混元 3D 模型未安装（缺少 PyTorch）；可继续用本地浮雕，或配置腾讯云混元 3D"
+        elif "显存" in raw or "vram" in raw.lower():
+            msg = "本机显存不足，混元 3D 模型未加载；可继续用本地浮雕，或配置腾讯云混元 3D"
+        else:
+            msg = "混元 3D 这次没有生成出模型，可继续用本地浮雕，或检查模型/密钥配置"
+        raise HTTPException(503, msg)
     # Re-export cleaned mesh: drop debris, keep largest body, sit on z=0, add base.
     try:
         import trimesh
@@ -1777,7 +1784,7 @@ def to_3d_tripo(req: ThreeDTripoReq):
     Pipeline: upload preview -> POST /task -> poll -> download PBR GLB ->
     convert to STL/OBJ/GLB for printing + viewing.
     """
-    if not tripo_api.API_KEY:
+    if not tripo_api.API_KEY and not getattr(tripo_api, "API_KEYS", []):
         raise HTTPException(503, "3D 生成服务暂时不可用，请检查服务端密钥配置")
     pg = _new_progress(req.session_id, "3d-tripo", reset=True)
     # Only the cached balance is read here.  The probe itself runs in the
@@ -1856,15 +1863,23 @@ def to_3d_tripo(req: ThreeDTripoReq):
             # visitor, who should just see a friendly retry hint.
             print(f"[tripo3d] recoverable task_id={recovered['task_id']}", flush=True)
         pg.fail("这次没能生成出模型，请再试一次")
+        raw_err = str(e)
+        auth_err = "401" in raw_err or "Invalid API key" in raw_err
+        hint = (
+            "Tripo 国产平台返回 Invalid API key：当前 tsk_ 密钥只适用原全球平台，"
+            "请换国产 v3 密钥；在此之前可点「生成 2.5D 浮雕」"
+            if auth_err else
+            "网络/SSL 抖动,或 Tripo 服务端暂不可用；可点「生成 2.5D 浮雕」"
+        )
         raise HTTPException(
-            status_code=500,
+            status_code=503 if auth_err else 500,
             detail={
                 "error": f"tripo3d error: {e}",
                 "engine": "tripo3d",
                 "fallback_suggested": "3d_multi or 3d_cartoon",
                 "task_id": (recovered or {}).get("task_id"),
                 "image_token": (recovered or {}).get("image_token"),
-                "hint": "网络/SSL 抖动,或 Tripo 服务端暂不可用",
+                "hint": hint,
             },
         )
     finally:

@@ -35,6 +35,12 @@
   }
   function token() {
     try {
+      const local = localStorage.getItem("blueai-studio-auth");
+      if (local) {
+        const v = JSON.parse(local);
+        if (v && v.access_token) return v.access_token;
+        if (v && v.session && v.session.access_token) return v.session.access_token;
+      }
       for (const k of Object.keys(localStorage)) {
         if (!k.includes("auth-token")) continue;
         const v = JSON.parse(localStorage.getItem(k));
@@ -66,7 +72,11 @@
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
     if (!r.ok) {
-      const err = new Error((data && (data.msg || data.error || data.detail)) || ("HTTP " + r.status));
+      let msg = (data && (data.msg || data.error || data.detail)) || ("HTTP " + r.status);
+      if (data && data.detail && typeof data.detail === "object") {
+        msg = data.detail.error || data.detail.message || data.detail.detail || JSON.stringify(data.detail);
+      }
+      const err = new Error(msg);
       err.status = r.status;
       err.data = data;
       throw err;
@@ -294,6 +304,12 @@
     state.progressTimer = null;
   }
 
+  function scrollToModel() {
+    const card = $("#model-card");
+    if (!card) return;
+    const top = card.getBoundingClientRect().top + window.scrollY - 24;
+    window.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+  }
   function showModel(url) {
     const host = $("#model-view");
     // Always mount the element: model-viewer is loaded as an async module,
@@ -416,6 +432,7 @@
   // ---------------- 课程 ----------------
   async function loadProjects() {
     try {
+      if (!token()) await ensureLocalSession();
       const r = await api("/api/studio/projects");
       state.projects = r.projects || [];
       renderCourseProjects();
@@ -660,6 +677,28 @@
       $("#btn-fallback").style.display = "none";
       showModel(existingGlb);
       setPipeline(4);
+      setTimeout(scrollToModel, 500);
+    }).catch(() => {});
+    // If this session only has the local 2.5D relief, show it too instead of
+    // asking the user to generate the same model again.
+    const existingRelief = PX + "/api/data/" + sid + "/model_relief/mesh.glb";
+    fetch(existingRelief, { method: "HEAD" }).then((res) => {
+      if (!res.ok || state.model) return;
+      state.model = { model_url: existingRelief, engine: "cartoon" };
+      $("#model-title").textContent = "浮雕模型已生成";
+      $("#m-engine").textContent = "本地浮雕";
+      $("#m-progress").textContent = "完成 · 可下载 STL / GLB";
+      $("#m-bar").style.width = "100%";
+      $("#btn-glb").style.display = "";
+      $("#btn-glb").href = existingRelief;
+      $("#btn-glb").setAttribute("download", "model.glb");
+      $("#btn-stl").style.display = "";
+      $("#btn-stl").href = PX + "/api/data/" + sid + "/model_relief/mesh.stl";
+      $("#btn-stl").setAttribute("download", "model.stl");
+      $("#btn-fallback").style.display = "none";
+      showModel(existingRelief);
+      setPipeline(4);
+      setTimeout(scrollToModel, 500);
     }).catch(() => {});
     const view = document.getElementById("view-make");
     if (view) view.classList.add("reveal-preview");
@@ -677,8 +716,15 @@
     renderPreviews();
     refreshStatus();
     loadPresets();
-    loadProjects();
+    await loadProjects();
     applySessionHandoff();
+    const mode = new URLSearchParams(location.search).get("mode");
+    if (mode === "course") {
+      const tab = document.querySelector('.tab[data-view="course"]');
+      if (tab) tab.click();
+      const pid = new URLSearchParams(location.search).get("project");
+      if (pid) selectProject(pid);
+    }
     setInterval(refreshStatus, 20000);
     if (location.hash === "#3d") { /* 默认就在 3D 视图 */ }
   }

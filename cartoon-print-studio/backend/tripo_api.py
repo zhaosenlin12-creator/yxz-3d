@@ -8,8 +8,11 @@ Tripo runs two regional platforms with different hosts and API versions:
       GET  /tasks/{task_id}            poll status
       GET  /account/balance            credits
 
-  v2  https://api.tripo3d.ai/v2/openapi   (global console)
+  v2  https://api.tripo3d.com/v2/openapi  (China v2 gateway; api.tripo3d.com is CN-reachable)
       POST /upload, POST /task, GET /task/{task_id}, GET /user/balance
+
+  Global console (api.tripo3d.ai) is kept only as an explicit opt-in, because
+  some networks cannot reach it.
 
 An API key belongs to exactly one of the two platforms: a CN key answers
 401 on the global host and a global key answers 401 on the CN host. The
@@ -25,7 +28,8 @@ import os, re, time, json, base64, urllib.request, urllib.error, urllib.parse
 from typing import Optional, Dict, Any, List
 
 BASE_V3 = "https://openapi.tripo3d.com/v3"
-BASE_V2 = "https://api.tripo3d.ai/v2/openapi"
+BASE_V2 = "https://api.tripo3d.com/v2/openapi"
+BASE_V2_GLOBAL = "https://api.tripo3d.ai/v2/openapi"
 
 #: Which platform the current key belongs to. Flipped automatically when a
 #: key is rejected by the active host, and remembered for the next call.
