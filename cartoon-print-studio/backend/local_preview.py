@@ -141,6 +141,49 @@ def _default(draw: ImageDraw.ImageDraw, cx: float, cy: float, r: float, accent):
     draw.ellipse([cx - r * .3, cy - r * .3, cx + r * .3, cy + r * .3], fill=accent + (255,))
 
 
+def _dinosaur(draw: ImageDraw.ImageDraw, cx: float, cy: float, r: float, accent):
+    """Cute long-neck sauropod silhouette (腕龙) for local concept boards."""
+    blue = (112, 190, 228, 255)
+    deep = (54, 132, 184, 255)
+    belly = (214, 240, 250, 255)
+    # tail
+    draw.polygon([
+        (cx + r * .05, cy + r * .35),
+        (cx - r * 1.02, cy + r * .18),
+        (cx - r * 1.08, cy + r * .34),
+        (cx + r * .12, cy + r * .62),
+    ], fill=deep)
+    # legs (behind body)
+    for dx in (-.35, .05, .38):
+        draw.rounded_rectangle(
+            [cx + dx * r - r * .10, cy + r * .52, cx + dx * r + r * .10, cy + r * 1.10],
+            radius=int(r * .07), fill=deep,
+        )
+    # body
+    draw.ellipse([cx - r * .62, cy + r * .02, cx + r * .62, cy + r * .78], fill=blue)
+    # neck: thick curved tube
+    neck = [
+        (cx + r * .48, cy + r * .40),
+        (cx + r * .38, cy + r * .00),
+        (cx + r * .42, cy - r * .48),
+        (cx + r * .55, cy - r * .90),
+    ]
+    draw.line(neck, fill=blue, width=int(r * .20), joint="curve")
+    # head
+    draw.ellipse([cx + r * .38, cy - r * 1.10, cx + r * .72, cy - r * .78], fill=blue)
+    draw.ellipse([cx + r * .63, cy - r * 1.02, cx + r * .80, cy - r * .88], fill=deep)
+    # belly
+    draw.ellipse([cx - r * .42, cy + r * .28, cx + r * .42, cy + r * .72], fill=belly)
+    # spots
+    for dx, dy, rr in ((-.26, .22, .07), (-.02, .14, .055), (.22, .24, .06), (.36, .10, .045)):
+        draw.ellipse([cx + r * dx - r * rr, cy + r * dy - r * rr,
+                      cx + r * dx + r * rr, cy + r * dy + r * rr], fill=deep)
+    # eye
+    draw.ellipse([cx + r * .58, cy - r * 1.03, cx + r * .64, cy - r * .97], fill=(22, 48, 70, 255))
+    # tiny smile
+    draw.arc([cx + r * .60, cy - r * .96, cx + r * .69, cy - r * .89], 10, 150, fill=deep, width=int(r * .015))
+
+
 def _pick(prompt: str) -> str:
     p = prompt.lower()
     if any(k in p for k in ("齿轮", "gear", "徽章", "badge", "奖牌", "logo")):
@@ -149,6 +192,8 @@ def _pick(prompt: str) -> str:
         return "robot"
     if any(k in p for k in ("太阳系", "planet", "行星", "宇宙", "星空")):
         return "system"
+    if any(k in p for k in ("恐龙", "腕龙", "霸王龙", "三角龙", "dinosaur", "dino", "雷龙")):
+        return "dino"
     return "default"
 
 
@@ -170,7 +215,7 @@ def render_previews(prompt: str, out_dir: str, n: int = 4) -> Tuple[str, List[Tu
         d = ImageDraw.Draw(layer)
         cx, cy = W * S * .5, H * S * .43
         r = W * S * .24
-        fn = {"gear": _gear, "robot": _robot, "system": _system, "badge": _badge}.get(kind, _default)
+        fn = {"gear": _gear, "robot": _robot, "system": _system, "badge": _badge, "dino": _dinosaur}.get(kind, _default)
         if kind == "gear":
             _badge(d, cx, cy, r, accent)
         else:
