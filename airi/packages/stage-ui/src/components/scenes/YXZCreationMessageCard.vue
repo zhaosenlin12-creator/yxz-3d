@@ -330,8 +330,9 @@ async function copyPreviewAddress() {
 .yxz-creation-card-thumb img {
   display: block;
   width: 100%;
-  height: 2.6rem;
-  object-fit: contain;
+  height: 3.6rem;
+  object-fit: cover;
+  object-position: center;
 }
 
 .yxz-creation-card-description {

@@ -74,7 +74,7 @@
     if (!r.ok) {
       let msg = (data && (data.msg || data.error || data.detail)) || ("HTTP " + r.status);
       if (data && data.detail && typeof data.detail === "object") {
-        msg = data.detail.error || data.detail.message || data.detail.detail || JSON.stringify(data.detail);
+        msg = data.detail.hint || data.detail.error || data.detail.message || data.detail.detail || JSON.stringify(data.detail);
       }
       const err = new Error(msg);
       err.status = r.status;
