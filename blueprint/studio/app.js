@@ -44,6 +44,19 @@
     } catch {}
     return null;
   }
+  async function ensureLocalSession() {
+    if (token()) return;
+    try {
+      const r = await fetch("/auth/v1/local", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-BlueAI-Studio": "1" },
+        body: "{}",
+      });
+      if (!r.ok) return;
+      const s = await r.json();
+      if (s && s.access_token) localStorage.setItem("blueai-studio-auth", JSON.stringify(s));
+    } catch {}
+  }
   async function api(path, opts = {}) {
     const headers = { "Content-Type": "application/json" };
     const t = token();
@@ -660,6 +673,7 @@
   }
 
   async function init() {
+    await ensureLocalSession();
     renderPreviews();
     refreshStatus();
     loadPresets();

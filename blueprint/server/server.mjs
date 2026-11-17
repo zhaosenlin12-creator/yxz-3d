@@ -241,6 +241,27 @@ async function handleAuth(req, res, url, path, method) {
     res.end(JSON.stringify(session(nu)));
     return;
   }
+  // 桌面工作台从宜小智对话跳转过来时没有 9418 域下的登录态；
+  // 允许本机 studio 页面用固定本地账号换取 token，避免“点开工作台后预览 401”。
+  if (method === "POST" && path.endsWith("/local")) {
+    const ip = req.socket.remoteAddress || "";
+    const loopback = ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+    if (!loopback || req.headers["x-blueai-studio"] !== "1") {
+      res.statusCode = 403;
+      res.end(JSON.stringify({ error: "forbidden", msg: "本地工作台专用入口" }));
+      return;
+    }
+    const us = users();
+    let u = us.find((x) => x.email === "studio@local.blueai");
+    if (!u) {
+      u = { id: uuid(), email: "studio@local.blueai", password: sha("studio-local"), username: "宜小智本地用户", bio: "", profileColor: null, createdAt: now() };
+      us.push(u);
+      saveUsers(us);
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(session(u)));
+    return;
+  }
   if (method === "POST" && path.includes("/token")) {
     const b = await body(req);
     const gt = url.searchParams.get("grant_type") || "password";

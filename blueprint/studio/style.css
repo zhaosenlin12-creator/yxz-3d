@@ -447,3 +447,72 @@ body.lean .course-list.open + .course-main{margin-left:310px}
 .engine-hint { margin: 0; padding: 8px 18px 0; font-size: 12px; color: #6b7770; }
 .engine-hint.ok { color: #0f8a4f; }
 .engine-hint.warn { color: #b26a00; }
+
+/* ---------------- BlueAI light-blue theme (final override) ---------------- */
+:root{
+  --bg:#f7fbff;
+  --panel:#ffffff;
+  --panel-2:#f1f7fd;
+  --line:#dbe8f5;
+  --line-2:#b9d4e8;
+  --text:#16324a;
+  --muted:#5f7791;
+  --accent:#2f8fca;
+  --accent-dim:#e8f4fd;
+  --shadow:0 6px 20px rgba(36,98,143,.08);
+}
+body{background:var(--bg);color:var(--text)}
+.session-banner{border-color:#cfe4f5;background:#eef7ff;color:#1d4f72}
+.session-banner a{color:#2f8fca;border-bottom-color:#9cc9e8}
+.bg-grid{background:var(--bg);background-image:none;mask-image:none}
+.topbar{background:rgba(255,255,255,.94);border-bottom:1px solid #dbe8f5;box-shadow:0 1px 0 rgba(36,98,143,.04)}
+.mark{background:linear-gradient(135deg,#2f8fca,#7cc7f2);color:#fff;box-shadow:0 6px 16px rgba(47,143,202,.24);background-image:linear-gradient(135deg,#2f8fca,#7cc7f2)}
+.brand-text strong{color:#16324a}
+.tab{color:#5f7791;border-color:transparent}
+.tab:hover{background:#f1f7fd;color:#1f6fa8}
+.tab.active{background:#e8f4fd;color:#1f6fa8;border-color:#cfe4f5;font-weight:600;background-image:none;box-shadow:inset 0 -2px 0 #2f8fca}
+.dot{background:#c6d8e6;box-shadow:none}
+.dot.ok{background:#2f8fca;box-shadow:0 0 0 3px rgba(47,143,202,.12)}
+.ghost{background:#fff;border-color:#cfe4f5;color:#1f6fa8}
+.ghost:hover{background:#f1f7fd;border-color:#b9d4e8;color:#1f6fa8}
+textarea,input{background:#f8fbff;border-color:#cfe0ee;color:#16324a;border-radius:8px}
+textarea:focus,input:focus{border-color:#2f8fca;box-shadow:0 0 0 3px rgba(47,143,202,.12)}
+.primary{background:#2f8fca;color:#fff;box-shadow:0 6px 16px rgba(47,143,202,.18);border-radius:8px;background-image:none}
+.primary:hover{filter:none;background:#2679ae;transform:none}
+.primary:disabled{background:#eef5fb;color:#9db3c5;border:1px solid #dbe8f5;box-shadow:none}
+.chips button{background:#f8fbff;border:1px solid #dbe8f5;color:#5f7791;border-radius:999px}
+.chips button:hover{background:#e8f4fd;border-color:#b9d4e8;color:#1f6fa8}
+.preview-item{background:#f8fbff;border-color:#dbe8f5}
+.preview-item:hover{border-color:#b9d4e8}
+.preview-item.on{border-color:#2f8fca;box-shadow:0 0 0 2px rgba(47,143,202,.22)}
+.preview-item img{object-fit:contain;background:#fff}
+.preview-item .tag{background:rgba(22,50,74,.78);color:#fff}
+.preview-item .pick{background:#2f8fca;color:#fff}
+.empty-mark{color:#b9d4e8}
+.model-view{background:#f5faff;border-color:#dbe8f5;background-image:none}
+.progress{background:#e6f0f8}
+.progress div{background:#2f8fca}
+.preset-mini-item img{background:#eef5fb}
+.output-actions button,.sw,.proj,.step,.preset-mini-item{background:#fff;border-color:#dbe8f5;color:#16324a}
+.output-actions button:hover,.sw.ok:hover{background:#f1f7fd;border-color:#b9d4e8;color:#1f6fa8}
+.proj.on,.seg button.on{background:#e8f4fd;border-color:#b9d4e8;color:#1f6fa8}
+.avatar{background:#e8f4fd;color:#1f6fa8;box-shadow:none}
+.msg.bot{background:#f4f8fc;border-color:#dbe8f5;color:#16324a}
+.msg.user{background:#e8f4fd;border-color:#b9d4e8;color:#1d4f72}
+.chat-input button{background:#2f8fca;border-color:#2f8fca;color:#fff}
+.chat-input button:hover{background:#2679ae}
+.check{background:#fff;border-color:#b9d4e8}
+.check.on{background:#e8f4fd;border-color:#2f8fca;color:#1f6fa8}
+.chapter-head:hover{background:#f1f7fd}
+.chapter-tag{color:#1f6fa8;border-color:#b9d4e8;background:#e8f4fd}
+.caret{color:#5f7791}
+.float-tab{background:#fff;color:#1f6fa8;border-color:#cfe4f5;box-shadow:0 6px 18px rgba(36,98,143,.14);background-image:none}
+.float-tab:hover{background:#e8f4fd}
+body.lean .copilot.open,body.lean .course-list.open,body.lean .steps.open{background:#fff;border-color:#dbe8f5;box-shadow:0 16px 40px rgba(36,98,143,.14)}
+#btn-lean[aria-pressed="true"]{background:#e8f4fd;color:#1f6fa8;border-color:#b9d4e8}
+.step-body .detail,.list-block ul{color:#3d5a73}
+.list-block{background:#f8fbff;border-color:#dbe8f5}
+.toast{background:#fff;border-color:#b9d4e8;color:#16324a;box-shadow:0 10px 30px rgba(36,98,143,.16)}
+.engine-hint{color:#5f7791}
+.engine-hint.ok{color:#1f6fa8}
+.engine-hint.warn{color:#a15c00}
