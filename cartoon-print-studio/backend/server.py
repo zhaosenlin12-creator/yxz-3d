@@ -1161,7 +1161,8 @@ def previews(req: PreviewsReq):
     sd = session_dir(sid)
     pdir = os.path.join(sd, "previews")
     os.makedirs(pdir, exist_ok=True)
-    if os.environ.get("BLUEAI_LOCAL_PREVIEW", "").lower() in ("1", "true", "yes"):
+    if (os.environ.get("BLUEAI_LOCAL_PREVIEW", "").lower() in ("1", "true", "yes")
+            and not api_image.has_cloud_image_keys()):
         # Desktop build: cloud image credits are not guaranteed.  Draw the
         # concept board locally and return quickly instead of making the
         # conversation wait on a quota-limited provider.
@@ -1204,9 +1205,9 @@ def previews(req: PreviewsReq):
             )
         )
         try:
-            src, results = future.result(timeout=18)
+            src, results = future.result(timeout=max(30.0, float(os.environ.get("BLUEAI_PREVIEW_TIMEOUT", "90"))))
         except FutureTimeout:
-            print("[previews] cloud image timed out after 18s", flush=True)
+            print("[previews] cloud image timed out; keeping the local concept fallback", flush=True)
             src, results = [], []
     except Exception as e:
         # No cloud credits / no local SD: draw an on-theme concept board so the

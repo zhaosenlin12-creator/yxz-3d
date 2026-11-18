@@ -106,6 +106,11 @@ MINIMAX_IMAGE_KEYS = [k for k in MINIMAX_IMAGE_KEYS if k]
 JOJO_KEY = JOJO_KEYS[0] if JOJO_KEYS else ""
 AIXJ_IMAGE_KEY = AIXJ_IMAGE_KEYS[0] if AIXJ_IMAGE_KEYS else ""
 
+
+def has_cloud_image_keys() -> bool:
+    """True when at least one cloud image provider has a key loaded."""
+    return bool(AIXJ_IMAGE_KEYS or MINIMAX_IMAGE_KEYS or JOJO_KEYS)
+
 # Per-key circuit breaker. When a key returns 401/402/403 or quota /
 # balance text, we blacklist it for the rest of this process so we
 # don't waste 60s * N retrying a known-dead provider. Reset on restart.
