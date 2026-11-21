@@ -181,7 +181,9 @@ function Test-YxzBackendReady {
     # /api/ping 是零 I/O 的探针。之前用 /api/software/detect，它冷缓存要
     # 扫注册表和开始菜单（约 10 秒），3 秒超时必然失败 —— 守护脚本会把
     # 完全健康的后端误判成卡死然后杀掉它。
-    return (Test-HttpOk "http://127.0.0.1:$Port/api/ping")
+    # 探针超时放到 8 秒：后端忙起来（出图 / 解析网格）时响应会慢，
+    # 3 秒太紧，容易把只是忙的后端当成卡死。
+    return (Test-HttpOk "http://127.0.0.1:$Port/api/ping" -TimeoutSec 8)
 }
 
 function Test-YxzFrontendReady {

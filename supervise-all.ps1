@@ -49,7 +49,8 @@ function New-YxzService {
         [string]$Label,
         [int]$Port,
         [scriptblock]$ReadyTest,
-        [scriptblock]$Starter
+        [scriptblock]$Starter,
+        [int]$HungFails = 6
     )
     return [pscustomobject]@{
         Name = $Name
@@ -61,6 +62,9 @@ function New-YxzService {
         StartedAt = [datetime]::MinValue
         LastCheck = [datetime]::MinValue
         Fails = 0
+        # 连续多少次探不到才算「卡死」。后端偶尔会忙（出图、解析网格），
+        # 一次没响应就重启等于自己把服务杀了，所以后端给到 12 次（约 1 分钟）。
+        HungFails = $HungFails
         Restarts = @()
         ReadyTest = $ReadyTest
         Starter = $Starter
@@ -71,7 +75,8 @@ $services = @()
 if (-not $SkipBackend) {
     $services += New-YxzService -Name 'backend' -Label '后端' -Port $BackendPort `
         -ReadyTest { param($p) Test-YxzBackendReady -Port $p } `
-        -Starter { param($p) Start-YxzBackend -Port $p }
+        -Starter { param($p) Start-YxzBackend -Port $p } `
+        -HungFails 12
 }
 if (-not $SkipFrontend) {
     $services += New-YxzService -Name 'frontend' -Label '前端' -Port $FrontendPort `
@@ -223,7 +228,7 @@ while ($true) {
                 }
                 else {
                     $svc.Fails += 1
-                    $hung = $svc.Ready -and ($svc.Fails -ge 6)
+                    $hung = $svc.Ready -and ($svc.Fails -ge $svc.HungFails)
                     $neverStarted = (-not $svc.Ready) -and (($now - $svc.StartedAt).TotalSeconds -gt 150)
                     if ($hung -or $neverStarted) {
                         Write-SupervisorLog "$($svc.Label) 端口 $($svc.Port) 没响应，重启它"

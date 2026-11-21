@@ -247,8 +247,31 @@ if ($OnlyModels) {
         # uv 会为每个包去 extra 源查一次索引，该源在国内极慢，会把 1 分钟的
         # 安装拖成十几分钟。torch 已由上面的本地 wheel 装好，
         # `torch==2.5.1+cu121` 这条 pin 会被已安装的发行版直接满足。
-        $rc = Install-Packages -VenvPy $venvPy -Requirement @('-r', $reqFiltered) -IndexUrl $PypiIndex
-        if ($rc -ne 0) { Fail "依赖安装失败（uv exit=$rc）"; exit 1 }
+        # 镜像偶尔会把某一个包的索引页卡掉（实测 pooch / sympy 都中过招），
+        # 所以这里按镜像列表轮着试，每个源再来两次重试，别让整台机器卡死在这一步。
+        $depIndexes = @($PypiIndex)
+        if (-not $SlowNetwork) {
+            $depIndexes += 'https://mirrors.aliyun.com/pypi/simple'
+            $depIndexes += 'https://pypi.org/simple'
+        }
+        $rc = 1
+        foreach ($idx in $depIndexes) {
+            for ($try = 1; $try -le 3; $try++) {
+                $rc = Install-Packages -VenvPy $venvPy -Requirement @('-r', $reqFiltered) -IndexUrl $idx
+                if ($rc -eq 0) { break }
+                if ($try -lt 3) {
+                    Warn "第 $try 次安装失败（源：$idx），10 秒后重试"
+                    Start-Sleep -Seconds 10
+                }
+            }
+            if ($rc -eq 0) { break }
+            Warn "源 $idx 装不全，换下一个镜像"
+        }
+        if ($rc -ne 0) {
+            Fail "依赖安装失败（uv exit=$rc）"
+            Fail "网络恢复后重跑本脚本即可，已装好的部分会自动跳过"
+            exit 1
+        }
 
         # --- 2.3 open-clip-torch：pin protobuf<4，与 onnxruntime/protobuf 冲突，
         #     后端运行期不 import open_clip，因此单独 --no-deps 安装 ---

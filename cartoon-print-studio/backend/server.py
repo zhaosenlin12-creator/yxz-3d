@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 # Resolve paths: env override (packaged mode) > sibling of backend/ (source mode)
 _ROOT = (
@@ -289,6 +290,51 @@ def store_edited_preview(session_id: str, image_index: int, custom_image: Option
     return name
 
 
+def _normalise_image_file(img_path: str, max_side: int = 4096) -> tuple:
+    """Decode / re-encode an uploaded picture and return (width, height).
+
+    This runs in a worker thread (see ``upload_image``): PIL is a blocking
+    C extension, and doing it inline would freeze the whole event loop.
+    """
+    from PIL import Image as PILImage
+
+    with PILImage.open(img_path) as decoded:
+        decoded.load()
+        if max(decoded.size) > max_side:
+            raise ValueError("图片尺寸过大，请使用 %dx%d 以下的图片" % (max_side, max_side))
+        if decoded.mode not in ("RGBA", "RGB"):
+            decoded = decoded.convert("RGBA")
+        decoded.save(img_path, "PNG")
+        return decoded.size
+
+
+def _inspect_image_file(path: str) -> tuple:
+    """Return (format, width, height) for an uploaded picture (thread worker)."""
+    from PIL import Image
+
+    with Image.open(path) as decoded:
+        image_format = (decoded.format or "").upper()
+        width, height = decoded.size
+        decoded.verify()
+    return image_format, width, height
+
+
+def _validate_edited_mesh(stl_path: str) -> tuple:
+    """Load and sanity-check an edited STL (thread worker).
+
+    trimesh parsing a big mesh takes seconds; running it inline would block
+    the event loop exactly like the picture path did.
+    """
+    import trimesh
+
+    mesh = trimesh.load(stl_path, force="mesh")
+    if not len(mesh.faces) or not len(mesh.vertices) or not all(
+        map(lambda value: value == value and abs(value) < 1e7, mesh.extents)
+    ):
+        raise ValueError("STL 网格为空或尺寸无效")
+    return mesh
+
+
 @app.post("/api/upload-image", status_code=201)
 async def upload_image(image: UploadFile = File(...), source: str = Form("camera"),
                        prompt: str = Form("")):
@@ -314,18 +360,14 @@ async def upload_image(image: UploadFile = File(...), source: str = Form("camera
     img_path = os.path.join(previews, "img_0.png")
     size = await _save_uploaded_file(image, img_path, 15 * 1024 * 1024)
 
+    # 图像解码和后面的「看图说话」都是阻塞调用，必须丢到线程池里跑。
+    # 之前直接写在 async 函数里，一次上传能把整个事件循环冻住三四十秒，
+    # 守护进程探不到 /api/ping 就把后端杀掉重启 —— 表现出来就是
+    # 「对话/生成到一半突然断掉」。
     try:
-        from PIL import Image as PILImage
-        with PILImage.open(img_path) as decoded:
-            decoded.load()
-            if max(decoded.size) > 4096:
-                raise HTTPException(413, "图片尺寸过大，请使用 4096x4096 以下的图片")
-            if decoded.mode not in ("RGBA", "RGB"):
-                decoded = decoded.convert("RGBA")
-            decoded.save(img_path, "PNG")
-            width, height = decoded.size
-    except HTTPException:
-        raise
+        width, height = await run_in_threadpool(_normalise_image_file, img_path)
+    except ValueError as exc:
+        raise HTTPException(413, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(400, f"图片无法读取：{exc}") from exc
 
@@ -345,7 +387,7 @@ async def upload_image(image: UploadFile = File(...), source: str = Form("camera
             vision_prompt = (
                 "请用一句话描述这张图片的主要内容，重点说明适合制作什么样的创意作品，控制在20字以内。"
             )
-        reply = llm_client.vision_chat(vision_prompt, img_base64)
+        reply = await run_in_threadpool(llm_client.vision_chat, vision_prompt, img_base64)
         if reply:
             description = reply.strip()
     except Exception as vision_err:
@@ -389,11 +431,7 @@ async def upload_project_media(project_id: str, image: UploadFile = File(...)):
     temporary = media_dir / f".upload-{uuid.uuid4().hex}.tmp"
     try:
         await _save_uploaded_file(image, str(temporary), 15 * 1024 * 1024)
-        from PIL import Image
-        with Image.open(temporary) as decoded:
-            image_format = (decoded.format or "").upper()
-            width, height = decoded.size
-            decoded.verify()
+        image_format, width, height = await run_in_threadpool(_inspect_image_file, str(temporary))
         if image_format not in {"PNG", "JPEG", "WEBP"} or width > 12000 or height > 12000:
             raise HTTPException(415, "仅支持小于 12000 × 12000 的 PNG、JPEG 或 WebP 图片")
         extension = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}[image_format]
@@ -501,10 +539,7 @@ async def save_edited_model(
         if "v " not in obj_text or "f " not in obj_text:
             raise HTTPException(422, "导出的 OBJ 缺少顶点或三角面")
         try:
-            import trimesh
-            mesh = trimesh.load(targets["stl"], force="mesh")
-            if not len(mesh.faces) or not len(mesh.vertices) or not all(map(lambda value: value == value and abs(value) < 1e7, mesh.extents)):
-                raise ValueError("STL 网格为空或尺寸无效")
+            mesh = await run_in_threadpool(_validate_edited_mesh, str(targets["stl"]))
         except Exception as exc:
             raise HTTPException(422, f"STL 网格验证失败：{exc}") from exc
         for fmt, destination in (("stl", model_dir / "mesh.stl"), ("obj", model_dir / "mesh.obj"), ("glb", model_dir / "mesh.glb")):
