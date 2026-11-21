@@ -152,8 +152,9 @@ _MINIMAX_DEAD_KEYS: set = set()
 _MINIMAX_DEAD_UNTIL: dict = {}
 
 #: Business codes that mean "this key is out of credit" rather than
-#: "this request was bad".  Everything else stays retryable.
-_MINIMAX_QUOTA_CODES = (2056, 1004, 1008, 1027, 2013)
+#: "this request was bad".  Everything else stays retryable.  2013 is a
+#: bad-request code ("unsupported model"), so it must never retire a key.
+_MINIMAX_QUOTA_CODES = (2056, 1004, 1008, 1027)
 
 
 def _minimax_quota_error(base: dict) -> bool:
@@ -467,77 +468,226 @@ def _jojo_call(prompt: str, *, n: int = 1, size: str = "1024x1024",
 
 # ---------------------------------------------------------------------------
 # MiniMax (Hailuo) image API - fallback provider
+#
+# Two model lines answer behind the same key:
+#   * MiniMax-H3-Image -- the current line.  It lives on the OpenAI
+#     compatible endpoints POST /v1/images/generations (text to picture)
+#     and POST /v1/images/edits (picture to picture), and answers with
+#     {"data": [{"revised_prompt": ..., "size": ..., "url": "..."}]}.
+#   * image-01 -- the older line on /v1/image_generation, answering with
+#     {"data": {"image_urls": [...]}}.
+# H3 is tried first because it is the sharper model; image-01 stays behind
+# it as the safety net so a H3 outage never means "no preview picture".
 # ---------------------------------------------------------------------------
+MINIMAX_IMAGE_BASE = (
+    os.environ.get("MINIMAX_IMAGE_BASE", "https://api.minimaxi.com")
+    or "https://api.minimaxi.com"
+).rstrip("/")
 MINIMAX_IMAGE_ENDPOINTS = [
-    "https://api.minimaxi.com/v1/image_generation",
+    MINIMAX_IMAGE_BASE + "/v1/image_generation",
 ]
+MINIMAX_H3_MODEL = os.environ.get("MINIMAX_IMAGE_MODEL", "MiniMax-H3-Image")
+MINIMAX_H3_FAST_MODEL = "MiniMax-H3-Image-Highspeed"
+MINIMAX_H3_GENERATIONS = MINIMAX_IMAGE_BASE + "/v1/images/generations"
+MINIMAX_H3_EDITS = MINIMAX_IMAGE_BASE + "/v1/images/edits"
 
 
-def _minimax_image_call(prompt, *, n=1, size="1024x1024", model="image-01",
+def _aspect_for(size: str) -> str:
+    """Map a pixel size onto the aspect ratio the legacy line expects."""
+    text = (size or "").lower().replace("*", "x").replace("×", "x")
+    if text in ("1536x1024",):
+        return "16:9"
+    if text in ("1024x1536",):
+        return "9:16"
+    return "1:1"
+
+
+def _h3_size(size: str) -> str:
+    """Normalise a size into the "WxH" form H3 accepts.
+
+    H3 refuses anything outside 655,360 - 20,000,000 pixels and outside a
+    1:3 .. 3:1 aspect ratio, so a strange size is nudged back to the safe
+    square instead of burning the request on a 400.
+    """
+    text = (size or "").lower().replace("*", "x").replace("×", "x")
+    match = re.match(r"^\s*(\d{2,5})\s*x\s*(\d{2,5})\s*$", text)
+    if not match:
+        return "1024x1024"
+    width, height = int(match.group(1)), int(match.group(2))
+    pixels = width * height
+    if pixels < 655360 or pixels > 20000000:
+        return "1024x1024"
+    ratio = width / float(height or 1)
+    if ratio < (1 / 3) or ratio > 3:
+        return "1024x1024"
+    return "%dx%d" % (width, height)
+
+
+def _minimax_routes(has_reference: bool):
+    """Ordered MiniMax fallbacks: sharpest model first, oldest line last."""
+    if has_reference:
+        return (
+            ("h3-edit", MINIMAX_H3_EDITS, MINIMAX_H3_MODEL, "edits"),
+            ("h3-edit-fast", MINIMAX_H3_EDITS, MINIMAX_H3_FAST_MODEL, "edits"),
+            ("image-01-ref", MINIMAX_IMAGE_ENDPOINTS[0], "image-01", "legacy"),
+        )
+    return (
+        ("h3", MINIMAX_H3_GENERATIONS, MINIMAX_H3_MODEL, "generations"),
+        ("h3-fast", MINIMAX_H3_GENERATIONS, MINIMAX_H3_FAST_MODEL, "generations"),
+        ("image-01", MINIMAX_IMAGE_ENDPOINTS[0], "image-01", "legacy"),
+    )
+
+
+def _minimax_body(style: str, model: str, prompt: str, n: int, size: str,
+                   reference: Optional[bytes]):
+    """Build the request body for one MiniMax route (None when unusable)."""
+    if style == "legacy":
+        body = {"model": model, "prompt": prompt,
+                "aspect_ratio": _aspect_for(size), "n": n}
+        # subject_reference turns the old line into an image-to-image
+        # provider: the picture becomes the subject the prompt describes.
+        if reference:
+            small = _prepare_reference(reference)
+            if small:
+                body["subject_reference"] = [{
+                    "type": "character",
+                    "image_file": "data:image/jpeg;base64,"
+                                  + base64.b64encode(small).decode(),
+                }]
+        return body
+
+    body = {"model": model, "prompt": prompt, "size": _h3_size(size), "n": n}
+    if style == "edits" and reference:
+        small = _prepare_reference(reference)
+        if not small:
+            return None
+        body["images"] = [{
+            "image_url": "data:image/jpeg;base64," + base64.b64encode(small).decode(),
+        }]
+    return body
+
+
+def _minimax_images_from_payload(payload: dict, n: int):
+    """Pull the pictures out of any MiniMax response shape.
+
+    H3 answers {"data": [{"url": ...}]}; the old line answers
+    {"data": {"image_urls": [...]}}; some gateways send b64_json instead.
+    """
+    blobs, urls = [], []
+    data = payload.get("data")
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            b64 = item.get("b64_json") or item.get("b64")
+            if b64:
+                blobs.append(b64)
+                continue
+            url = item.get("url") or item.get("image_url")
+            if url:
+                urls.append(url)
+    elif isinstance(data, dict):
+        for url in (data.get("image_urls") or []):
+            if isinstance(url, str):
+                urls.append(url)
+        for item in (data.get("images") or []):
+            if isinstance(item, str):
+                urls.append(item)
+            elif isinstance(item, dict):
+                b64 = item.get("b64_json") or item.get("b64")
+                if b64:
+                    blobs.append(b64)
+                else:
+                    url = item.get("url") or item.get("image_url")
+                    if url:
+                        urls.append(url)
+    for url in (payload.get("image_urls") or []):
+        if isinstance(url, str):
+            urls.append(url)
+
+    out = []
+    for b64 in blobs:
+        try:
+            out.append(base64.b64decode(b64))
+        except Exception:
+            pass
+    for url in urls[:max(0, n - len(out))]:
+        blob = _download_with_retry(url, ua=_DL_UA, timeout=30.0)
+        if blob is not None:
+            out.append(blob)
+    return out
+
+
+def _minimax_image_call(prompt, *, n=1, size="1024x1024", model=None,
     timeout=120, sid=None, reference=None):
-    """Call MiniMax image API with per-key retry + per-attempt timeout.
+    """Call the MiniMax image API with per-key retry + per-attempt timeout.
 
-    Endpoint shape: POST {base}/v1/image_generation
-    Request body: {"model": "image-01", "prompt": "...", "aspect_ratio": "1:1"}
-    Response: {"base_resp": {...}, "image_urls": ["https://..."]}
+    Routes, in order:
+      1. MiniMax-H3-Image on POST /v1/images/generations
+      2. MiniMax-H3-Image-Highspeed on the same endpoint
+      3. the older image-01 line on POST /v1/image_generation
+    With a reference picture the first two routes move to
+    POST /v1/images/edits and carry the picture as ``images``.
 
-    Iterates over every key, then every endpoint. Stops on first success.
-    Key rejection (HTTP 401/403 / code 2049) skips to the next key.
-    Any other failure (timeout, network) also skips to the next endpoint.
+    Every route walks every key, so a single spent key never costs the whole
+    batch: the second key picks the work up.  Key rejection (HTTP 401/403 /
+    code 2049) retires that key for the rest of the process.
     """
     if not MINIMAX_IMAGE_KEYS:
         return None
-    if size in ("1024x1024", "1024*1024"): aspect = "1:1"
-    elif size in ("1536x1024", "1536*1024"): aspect = "16:9"
-    elif size in ("1024x1536", "1024*1536"): aspect = "9:16"
-    else: aspect = "1:1"
-    body = {"model": model, "prompt": prompt, "aspect_ratio": aspect, "n": n}
-    # subject_reference turns MiniMax into a real image-to-image provider:
-    # the picture becomes the subject the prompt keeps describing.  The
-    # reference has to be a small base64 image, so it is downscaled first.
-    if reference:
-        small = _prepare_reference(reference)
-        if small:
-            body["subject_reference"] = [
-                {"type": "character",
-                 "image_file": "data:image/jpeg;base64," + base64.b64encode(small).decode()},
-            ]
-    data = json.dumps(body).encode("utf-8")
+    routes = _minimax_routes(bool(reference))
+    if model:
+        routes = (("custom", MINIMAX_H3_GENERATIONS, model, "generations"),) + routes
     n_keys = len(MINIMAX_IMAGE_KEYS)
-    for ki, key in enumerate(MINIMAX_IMAGE_KEYS):
-        if not key: continue
-        # Skip a key that is known to be out of credit until its cooldown
-        # expires -- retrying it only slows the pictures that still work.
-        if key in _MINIMAX_DEAD_KEYS:
-            if _MINIMAX_DEAD_UNTIL.get(key, 0) >= time.time():
+    for route_name, url, route_model, style in routes:
+        body = _minimax_body(style, route_model, prompt, n, size, reference)
+        if body is None:
+            continue
+        data = json.dumps(body).encode("utf-8")
+        for ki, key in enumerate(MINIMAX_IMAGE_KEYS):
+            if not key:
                 continue
-            _MINIMAX_DEAD_KEYS.discard(key)
-        if sid:
-            _pg.Progress(sid, "previews").emit(
-                "minimax-trying", 5, f"正在准备预览图（{ki+1}/{n_keys}）…")
-        for ep in MINIMAX_IMAGE_ENDPOINTS:
+            # Skip a key that is known to be out of credit until its cooldown
+            # expires -- retrying it only slows the pictures that still work.
+            if key in _MINIMAX_DEAD_KEYS:
+                if _MINIMAX_DEAD_UNTIL.get(key, 0) >= time.time():
+                    continue
+                _MINIMAX_DEAD_KEYS.discard(key)
+            if sid:
+                _pg.Progress(sid, "previews").emit(
+                    "minimax-trying", 5, f"正在准备预览图（{ki+1}/{n_keys}）…")
             try:
                 req = urllib.request.Request(
-                    ep, data=data, method="POST",
+                    url, data=data, method="POST",
                     headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
                 )
                 with _OutboundSlot(_MINIMAX_SEMAPHORE):
                     with urllib.request.urlopen(req, timeout=timeout) as r:
                         payload = json.loads(r.read().decode("utf-8", "ignore"))
             except urllib.error.HTTPError as e:
-                try: err = e.read().decode("utf-8", "ignore")
-                except Exception: err = str(e.reason)
+                try:
+                    err = e.read().decode("utf-8", "ignore")
+                except Exception:
+                    err = str(e.reason)
                 # invalid api key -> abandon this key, jump to next
-                if e.code in (401, 403) or "2049" in err or "invalid" in err.lower():
+                if e.code in (401, 403) or "2049" in err or "invalid api key" in err.lower():
                     _report_provider("minimax", "auth", f"HTTP {e.code}")
                     print(f"[minimax-image] key {ki+1}/{n_keys} rejected: {err[:120]}")
                     break
+                if e.code == 402:
+                    # No balance left on this account: retire the key so the
+                    # remaining pictures go straight to a key that can pay.
+                    print(f"[minimax-image] key {ki+1}/{n_keys} out of balance")
+                    _MINIMAX_DEAD_KEYS.add(key)
+                    _MINIMAX_DEAD_UNTIL[key] = time.time() + 3600
+                    _report_provider("minimax", "quota", "HTTP 402")
+                    break
                 _report_provider("minimax", "server", f"HTTP {e.code}")
-                print(f"[minimax-image] key {ki+1}/{n_keys} HTTP {e.code} {ep}: {err[:120]}")
+                print(f"[minimax-image] key {ki+1}/{n_keys} HTTP {e.code} {route_name}: {err[:120]}")
                 continue
             except Exception as e:
                 _report_provider("minimax", "network", f"{type(e).__name__}: {str(e)[:120]}")
-                print(f"[minimax-image] key {ki+1}/{n_keys} {ep} {type(e).__name__}: {str(e)[:120]}")
+                print(f"[minimax-image] key {ki+1}/{n_keys} {route_name} {type(e).__name__}: {str(e)[:120]}")
                 continue
             base = payload.get("base_resp") or {}
             if base.get("status_code", 0) != 0 and base.get("status_msg"):
@@ -548,25 +698,31 @@ def _minimax_image_call(prompt, *, n=1, size="1024x1024", model="image-01",
                     _MINIMAX_DEAD_KEYS.add(key)
                     _MINIMAX_DEAD_UNTIL[key] = time.time() + 3600
                     _report_provider("minimax", "quota", str(base.get("status_msg"))[:120])
-                    print(f"[minimax-image] key {ki+1}/{n_keys} out of credit - "
-                          f"skipping it for the next hour", flush=True)
+                    print(f"[minimax-image] key {ki+1}/{n_keys} out of credit, retiring it for an hour", flush=True)
                     if sid:
                         _pg.Progress(sid, "previews").emit(
                             "minimax-key-dead", 5, "某个出图服务额度已用完，正在换一条…")
                     break
                 continue
-            urls = (payload.get("image_urls")
-                    or payload.get("images")
-                    or (payload.get("data") or {}).get("image_urls")
-                    or [])
-            out = []
-            for url in urls[:n]:
-                blob = _download_with_retry(url, timeout=20.0)
-                if blob is not None:
-                    out.append(blob)
+            # The OpenAI shaped endpoints report failures as {"error": {...}}.
+            error = payload.get("error")
+            if isinstance(error, dict) and error.get("message"):
+                message = str(error.get("message"))
+                low = message.lower()
+                if any(x in low for x in ("balance", "quota", "insufficient", "余额", "额度")):
+                    print(f"[minimax-image] key {ki+1}/{n_keys} out of credit ({route_name})")
+                    _MINIMAX_DEAD_KEYS.add(key)
+                    _MINIMAX_DEAD_UNTIL[key] = time.time() + 3600
+                    _report_provider("minimax", "quota", message[:120])
+                    break
+                print(f"[minimax-image] {route_name} key {ki+1}/{n_keys} error: {message[:160]}")
+                continue
+            out = _minimax_images_from_payload(payload, n)
             if out:
                 _report_provider("minimax", "ok")
+                print(f"[minimax-image] {route_name} ok with key {ki+1}/{n_keys}")
                 return out
+            print(f"[minimax-image] {route_name} key {ki+1}/{n_keys} returned no images")
     return None
 
 def _make_local_fallback():
@@ -844,6 +1000,7 @@ def health():
         "minimax_image_keys": len(MINIMAX_IMAGE_KEYS),
         "minimax_dead_keys": len(_MINIMAX_DEAD_KEYS),
         "minimax_alive_keys": max(0, len(MINIMAX_IMAGE_KEYS) - len(_MINIMAX_DEAD_KEYS)),
+        "minimax_image_model": MINIMAX_H3_MODEL,
         "chain": " > ".join(
             f"{name}-image" for name in _provider_chain("auto") if name != "local"
         ) + " > local-sd",
@@ -879,8 +1036,9 @@ def _build_multipart(fields: dict, image_bytes: bytes, filename: str) -> tuple[b
 def refine_preview(reference: bytes, instruction: str, *, sid=None, timeout=150.0):
     """Edit an existing preview image following a Chinese instruction.
 
-    Chain: MiniMax image-01 with ``subject_reference`` -> AIXJ gpt-image-2
-    ``/images/edits`` -> None if everything fails.
+    Chain: MiniMax H3-Image ``/v1/images/edits`` -> MiniMax image-01 with
+    ``subject_reference`` -> AIXJ gpt-image-2 ``/images/edits`` -> None if
+    everything fails.
 
     Returns (png_bytes, tag) or raises RuntimeError with a readable message.
     """
@@ -981,8 +1139,10 @@ def edit_previews(reference: bytes, prompts, *, sid=None, timeout=120.0):
     wants done with it ("make it a blue robot lamp" and so on).
 
     Two routes can keep the picture:
-      1. MiniMax ``image-01`` with ``subject_reference`` -- the picture is
-         the subject and the prompt says what should become of it.
+      1. MiniMax ``MiniMax-H3-Image`` on ``/v1/images/edits`` -- the picture
+         travels with the request and the prompt says what should become
+         of it (the older ``image-01`` line with ``subject_reference``
+         covers it when H3 is unavailable).
       2. AIXJ ``/images/edits`` -- the relay wants a JSON body with
          ``images: [{"image_url": ...}]``, not a multipart upload.
 

@@ -78,7 +78,7 @@ powershell -ExecutionPolicy Bypass -File scripts\test_local_scene.ps1 -SceneId s
 ## API 优先级链
 
 ```
-预览：aixj-image (gpt-image-2) → minimax-image → jojo-image (熔断) → 本地 SD
+预览：aixj-image (gpt-image-2) → minimax-image (MiniMax-H3-Image → image-01) → jojo-image (熔断) → 本地 SD
 3D：  Tripo3D cloud v3.1     →  TripoSR (本地)     →  卡通浮雕 (本地)
 ```
 
@@ -94,7 +94,7 @@ minimax-key: sk-cp-...        # 主用（注意走 api.minimaxi.com 域名）
 deepseek-key: sk-...          # 备用
 # 生图（aixj 首选，minimax 备用）
 aixj-image-key: sk-e1b84b...  # gpt-image-2，需浏览器 UA 才能下载图片
-minimax-image-key: sk-cp-...
+minimax-image-key: sk-cp-...  # 备用走 MiniMax-H3-Image（两把 sk-cp- 自动轮换）
 jojo-image-key: sk-...        # 兜底（jojo 余额不够自动跳过）
 # 3D
 TRIPO:3D模型生成
@@ -316,7 +316,8 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -BundleDir .\CartoonPrint
 | "Tripo3D credits low" | 余额 < 30 credits；改用引擎选 "卡通浮雕" |
 | jojo 报余额不足 | 正常 — 应用自动标 dead 1 小时，转 minimax / aixj |
 | aixj 生成失败 | 自动重试 1 次，仍失败转 minimax（gpt-image-2 偶发 TLS 握手超时） |
-| minimax 也挂了 | 等服务恢复或换网络；本地 SD 兜底 |
+| minimax 报额度用完 | 自动标 dead 1 小时并换第二把 `sk-cp-` key；两把都满才会往下走 |
+| minimax H3 抽风 | 自动退回老的 `image-01`，再不行转 jojo / 本地 SD |
 | Bambu 没自动打开 | 看 `/api/bambu` 返回的路径是否正确；用 `POST /api/bambu` 手动指定 |
 | 模型倒了 / 质量差 | Tripo3D 是云端 AI 有随机性；多试几次 prompt 调整 |
 

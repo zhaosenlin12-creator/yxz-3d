@@ -193,7 +193,7 @@ pwsh -File start-all.ps1 -BackendPort 8100
 | 镜像 | `install-new-pc.ps1 -PypiIndex / -NpmRegistry` | 默认清华源 + npmmirror；`-SlowNetwork` 走官方源 |
 | 下载缓存 | 环境变量 `YXZ_CACHE_DIR` | 默认 `%LOCALAPPDATA%\yxz-3d-cache`；torch wheel 等大文件缓存在这里，可拷贝到新机器复用 |
 | HF 镜像 | `fetch-models.ps1 -Mirror` | 默认 `https://hf-mirror.com`；直连 huggingface.co 在国内基本不可达 |
-| 生图策略 | 后端 `backend/api_image.py` | aixj 优先 → minimax 备用 → 本地 SD 兜底；失败自动切换 |
+| 生图策略 | 后端 `backend/api_image.py` | aixj (gpt-image-2) 优先 → minimax 备用（`MiniMax-H3-Image`，再退 `image-01`）→ jojo → 本地 SD 兜底；失败自动切换 |
 | LLM 策略 | 后端 `backend/llm_client.py` | MiniMax(.com) → DeepSeek → 本地规则 兜底 |
 | 3D 引擎 | 后端 `backend/` tripo/hunyuan runner | Tripo → 混元3D → 本地彩色 三级自动切换 |
 | 前端 API 地址 | 环境变量 `VITE_CARTOON_PRINT_API` | 默认 `http://127.0.0.1:8100`（start-all.ps1 自动注入实际端口） |
@@ -320,12 +320,16 @@ copy cartoon-print-studio\keys.txt.example cartoon-print-studio\keys.txt
 | `deepseek-key:` | 对话 LLM 备用 | 回退本地规则 |
 | `aixj-image-key:` | 生图（3D 摆件预览图）首选 | 回退 minimax → 本地 SD 1.5 |
 | `aixj-image-key-2:` | 生图备用（同一服务的第二把） | 同上 |
-| `minimax-image-key:` / `jojo-image-key:` | 生图备用 | 同上 |
+| `minimax-image-key:` / `minimax-key:` / `minimax-key-2:` | 生图备用（`MiniMax-H3-Image`，两把 `sk-cp-` key 会自动轮换） | 同上 |
+| `jojo-image-key:` | 生图第三道兜底 | 同上 |
 | `TRIPO:` | 云端高质量 3D 生成首选 | 回退混元 3D → 本地 Hunyuan3D / TripoSR |
 | `hunyuan3d-secret-id:` / `hunyuan3d-secret-key:` | 混元 3D 云端备用 | 同上 |
 
 3. 生图 key 多把出错（比如某一把返回 403，说明那个分组没开生图）时，
    后端会自动换下一把——主备两把一起填更稳。MiniMax 生图只认 `sk-cp-` 开头的平台 key。
+   备用通道走 `MiniMax-H3-Image`（`/v1/images/generations` 与 `/v1/images/edits`，
+   图生图带参考图也走这一条），H3 不可用时自动退回老的 `image-01`，
+   所以 H3 抽风不会让预览图直接断掉。
 
 ### 前端对话也要 key（同一批 key，换个地方放）
 

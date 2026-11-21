@@ -102,8 +102,11 @@ class ProviderChainTests(unittest.TestCase):
 
     def test_auto_chain_starts_with_the_configured_primary(self):
         chain = api_image._provider_chain("auto")
-        self.assertEqual(chain[0], "minimax")
+        # AIXJ (gpt-image-2) carries the pictures; MiniMax (H3) is the
+        # fallback that keeps the chain alive when the gateway is down.
+        self.assertEqual(chain[0], "aixj")
         self.assertIn("aixj", chain)
+        self.assertIn("minimax", chain)
         self.assertIn("jojo", chain)
         self.assertEqual(chain[-1], "local")
 

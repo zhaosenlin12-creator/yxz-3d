@@ -754,6 +754,9 @@ def health():
             "minimax_dead_keys": len(api_image._MINIMAX_DEAD_KEYS),
             "minimax_alive_keys": max(
                 0, len(api_image.MINIMAX_IMAGE_KEYS) - len(api_image._MINIMAX_DEAD_KEYS)),
+            # Which MiniMax model the backup image route runs on
+            # (MiniMax-H3-Image, with the older image-01 line behind it).
+            "minimax_image_model": api_image.MINIMAX_H3_MODEL,
             "prefer_chain": (api_image.health() or {}).get("chain", "?"),
             "tripo3d_key_loaded": tripo_info.get("key_loaded", False),
             "tripo3d_balance": (bal or {}).get("balance"),
