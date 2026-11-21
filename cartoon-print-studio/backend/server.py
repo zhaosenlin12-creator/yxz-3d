@@ -3008,23 +3008,40 @@ def laser_card_generate(req: LaserCardReq):
     try:
         meta_dir = os.path.join(DATA, "laser", sid)
         os.makedirs(meta_dir, exist_ok=True)
-        card_size = result.get("size_mm") or (100.0, 56.25)
-        with open(os.path.join(meta_dir, "meta.json"), "w", encoding="utf-8") as handle:
-            json.dump({
-                "name": req.name,
-                "title": req.title,
-                "unit": req.unit,
-                "contact": req.contact,
-                "slogan": req.slogan,
-                "back_template": req.back_template,
-                "front_template": req.front_template,
-                "size_mm": {
-                    "width": float(card_size[0]),
-                    "height": float(card_size[1]),
-                },
-                "has_artwork": bool(result.get("has_artwork")),
-                "has_front_art": bool(result.get("has_front_art")),
-            }, handle, ensure_ascii=False)
+        # The renderer reports the card size as {"width": .., "height": ..};
+        # older callers handed over a plain tuple.  Both are accepted here.
+        raw_size = result.get("size_mm")
+        if isinstance(raw_size, dict):
+            card_width = float(raw_size.get("width") or 100.0)
+            card_height = float(raw_size.get("height") or 56.25)
+        elif isinstance(raw_size, (list, tuple)) and len(raw_size) >= 2:
+            card_width = float(raw_size[0] or 100.0)
+            card_height = float(raw_size[1] or 56.25)
+        else:
+            card_width, card_height = 100.0, 56.25
+        # The payload is built before the file is opened: a broken field
+        # must not leave an empty meta.json behind, because that would
+        # wipe the settings of a card that was already made.
+        payload = {
+            "name": req.name,
+            "title": req.title,
+            "unit": req.unit,
+            "contact": req.contact,
+            "slogan": req.slogan,
+            "back_template": req.back_template,
+            "front_template": req.front_template,
+            "size_mm": {
+                "width": card_width,
+                "height": card_height,
+            },
+            "has_artwork": bool(result.get("has_artwork")),
+            "has_front_art": bool(result.get("has_front_art")),
+        }
+        meta_path = os.path.join(meta_dir, "meta.json")
+        temp_path = meta_path + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+        os.replace(temp_path, meta_path)
     except Exception as exc:
         print(f"[laser_card] could not save the card settings: {exc}", flush=True)
     # The card keeps a stable file name for the session, so a second
