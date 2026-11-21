@@ -6,7 +6,7 @@ import { useRoute } from 'vue-router'
 
 import YXZPreviewCanvasEditor from '../../../../packages/stage-ui/src/components/scenes/YXZPreviewCanvasEditor.vue'
 
-import { createYXZCartoonModel, createYXZLaserBackground, createYXZLaserCard, detectYXZLocalSoftware, formatYXZElapsed, getYXZPrintApiBase, listYXZLaserTemplates, listYXZModelParts, openYXZLaserCardInSoftware, resolveYXZBuildStage, YXZ_BUILD_STAGES } from '../../../../packages/stage-ui/src/composables/use-yxz-print-preview'
+import { createYXZCartoonModel, createYXZLaserBackground, createYXZLaserCard, detectYXZLocalSoftware, formatYXZElapsed, getYXZLaserCard, getYXZPrintApiBase, listYXZLaserTemplates, listYXZModelParts, openYXZLaserCardInSoftware, resolveYXZBuildStage, YXZ_BUILD_STAGES } from '../../../../packages/stage-ui/src/composables/use-yxz-print-preview'
 
 const route = useRoute()
 const sessionId = String(route.query.session ?? '')
@@ -208,6 +208,33 @@ async function loadLaserTemplates() {
   catch { /* the packaged template stays selected */ }
 }
 
+/**
+ * Pick the card up again after a reload.
+ *
+ * The card was made a moment ago in the chat, so the files are still on the
+ * server.  Without this the visitor would come back to an empty card
+ * panel and have to type the name a second time.
+ */
+async function loadExistingCard() {
+  if (!sessionId)
+    return
+  try {
+    const existing = await getYXZLaserCard(`${sessionId}_card`)
+    if (!existing)
+      return
+    laserCard.value = existing
+    laserForm.value = {
+      name: existing.form.name || laserForm.value.name,
+      title: existing.form.title || laserForm.value.title,
+      unit: existing.form.unit || laserForm.value.unit,
+      contact: existing.form.contact || laserForm.value.contact,
+    }
+    laserBackTemplate.value = existing.backTemplate || laserBackTemplate.value
+    laserFrontTemplate.value = existing.frontTemplate || laserFrontTemplate.value
+  }
+  catch { /* the card simply does not exist yet */ }
+}
+
 async function generateLaserBackground(side: 'back' | 'front' = 'back') {
   if (backgroundBusy.value)
     return
@@ -286,6 +313,7 @@ onMounted(() => {
   void loadExistingModel()
   void loadSessionPreview()
   void loadSessionPreviews()
+  void loadExistingCard()
 })
 
 // Every picture of this session, so the visitor can pick the design that

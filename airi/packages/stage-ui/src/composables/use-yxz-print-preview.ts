@@ -174,6 +174,16 @@ export interface YXZLaserCardResponse {
   message: string
 }
 
+export interface YXZExistingLaserCard extends YXZLaserCardResponse {
+  /** The settings the card was made with, so the form can be filled again. */
+  form: {
+    name: string
+    title: string
+    unit: string
+    contact: string
+  }
+}
+
 /**
  * How long the whole preview call may take, retries included.
  *
@@ -637,6 +647,53 @@ export async function createYXZLaserCard(request: YXZLaserCardRequest, fetcher: 
     hasFrontArt: raw.has_front_art === true,
     hasArtwork: raw.has_artwork === true,
     message: typeof raw.message === 'string' ? raw.message : '卡片已生成',
+  }
+}
+
+/**
+ * Pick up a card this session already made.
+ *
+ * The workbench is opened from the chat, where the card was made a moment
+ * ago.  A reload must not leave an empty card panel: the card is still on
+ * the server, so it is loaded again with the settings it was made with.
+ */
+export async function getYXZLaserCard(sessionId: string, fetcher: typeof fetch = fetch): Promise<YXZExistingLaserCard | null> {
+  if (!sessionId)
+    return null
+  let response: Response
+  try {
+    response = await fetcher(`${getYXZPrintApiBase()}/api/laser/card/${encodeURIComponent(sessionId)}`)
+  }
+  catch {
+    return null
+  }
+  if (!response.ok)
+    return null
+  const raw: unknown = await response.json().catch(() => undefined)
+  if (!isRecord(raw) || typeof raw.session_id !== 'string')
+    return null
+  const size = isRecord(raw.size_mm) ? raw.size_mm : {}
+  return {
+    sessionId: raw.session_id,
+    svgUrl: absolutePrintApiUrl(String(raw.svg_url ?? '')),
+    pngUrl: absolutePrintApiUrl(String(raw.png_url ?? '')),
+    frontUrl: absolutePrintApiUrl(String(raw.front_url ?? '')),
+    backUrl: absolutePrintApiUrl(String(raw.back_url ?? '')),
+    sizeMm: {
+      width: typeof size.width === 'number' ? size.width : 100,
+      height: typeof size.height === 'number' ? size.height : 56.25,
+    },
+    backTemplate: typeof raw.back_template === 'string' ? raw.back_template : 'activity_yichang',
+    frontTemplate: typeof raw.front_template === 'string' ? raw.front_template : '',
+    hasArtwork: raw.has_artwork === true,
+    hasFrontArt: raw.has_front_art === true,
+    message: '已载入这张卡片',
+    form: {
+      name: typeof raw.name === 'string' ? raw.name : '',
+      title: typeof raw.title === 'string' ? raw.title : '',
+      unit: typeof raw.unit === 'string' ? raw.unit : '',
+      contact: typeof raw.contact === 'string' ? raw.contact : '',
+    },
   }
 }
 

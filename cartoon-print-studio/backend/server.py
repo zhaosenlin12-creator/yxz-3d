@@ -3003,6 +3003,30 @@ def laser_card_generate(req: LaserCardReq):
         raise HTTPException(500, f"名片生成失败：{exc}") from exc
 
     sid = result["session_id"]
+    # The card keeps its settings next to the files, so the workbench can
+    # show the card again after a reload instead of an empty panel.
+    try:
+        meta_dir = os.path.join(DATA, "laser", sid)
+        os.makedirs(meta_dir, exist_ok=True)
+        card_size = result.get("size_mm") or (100.0, 56.25)
+        with open(os.path.join(meta_dir, "meta.json"), "w", encoding="utf-8") as handle:
+            json.dump({
+                "name": req.name,
+                "title": req.title,
+                "unit": req.unit,
+                "contact": req.contact,
+                "slogan": req.slogan,
+                "back_template": req.back_template,
+                "front_template": req.front_template,
+                "size_mm": {
+                    "width": float(card_size[0]),
+                    "height": float(card_size[1]),
+                },
+                "has_artwork": bool(result.get("has_artwork")),
+                "has_front_art": bool(result.get("has_front_art")),
+            }, handle, ensure_ascii=False)
+    except Exception as exc:
+        print(f"[laser_card] could not save the card settings: {exc}", flush=True)
     # The card keeps a stable file name for the session, so a second
     # generation (the visitor typed a name and pressed the button again)
     # would be answered from the browser's cache and the preview would
@@ -3027,6 +3051,64 @@ def laser_card_generate(req: LaserCardReq):
         "has_artwork": bool(result.get("has_artwork")),
         "has_front_art": bool(result.get("has_front_art")),
         "message": "名片已生成，可打开 SVG/PNG 交给激光软件切割",
+    }
+
+
+@app.get("/api/laser/card/{sid}")
+def laser_card_existing(sid: str):
+    """Report the card a session already has.
+
+    The workbench is opened straight from the chat, where the card was made
+    a moment ago.  A reload must not leave the visitor with an empty card
+    panel while the card is still sitting on the server.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", sid or ""):
+        raise HTTPException(404, "这张卡片还没生成")
+    out_dir = os.path.join(DATA, "laser", sid)
+    front = os.path.join(out_dir, "card_front.png")
+    back = os.path.join(out_dir, "card_back.png")
+    png = os.path.join(out_dir, "card.png")
+    svg = os.path.join(out_dir, "card.svg")
+    if not (os.path.isfile(front) and os.path.isfile(back)):
+        raise HTTPException(404, "这张卡片还没生成")
+    meta: Dict[str, Any] = {}
+    try:
+        with open(os.path.join(out_dir, "meta.json"), "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict):
+            meta = loaded
+    except Exception:
+        meta = {}
+    revision = int(max(os.path.getmtime(front), os.path.getmtime(back)) * 1000)
+    raw_size = meta.get("size_mm")
+    if isinstance(raw_size, dict):
+        size_width = float(raw_size.get("width") or 100)
+        size_height = float(raw_size.get("height") or 56.25)
+    elif isinstance(raw_size, (list, tuple)) and len(raw_size) >= 2:
+        size_width = float(raw_size[0] or 100)
+        size_height = float(raw_size[1] or 56.25)
+    else:
+        size_width, size_height = 100.0, 56.25
+    return {
+        "session_id": sid,
+        "svg_url": f"/api/data/laser/{sid}/card.svg?v={revision}" if os.path.isfile(svg) else None,
+        "png_url": f"/api/data/laser/{sid}/card.png?v={revision}" if os.path.isfile(png) else None,
+        "front_url": f"/api/data/laser/{sid}/card_front.png?v={revision}",
+        "back_url": f"/api/data/laser/{sid}/card_back.png?v={revision}",
+        "revision": revision,
+        "size_mm": {
+            "width": size_width,
+            "height": size_height,
+        },
+        "back_template": meta.get("back_template") or "activity_yichang",
+        "front_template": meta.get("front_template") or "",
+        "has_artwork": bool(meta.get("has_artwork")),
+        "has_front_art": bool(meta.get("has_front_art")),
+        "name": meta.get("name") or "",
+        "title": meta.get("title") or "",
+        "unit": meta.get("unit") or "",
+        "contact": meta.get("contact") or "",
+        "message": "已载入这张卡片",
     }
 
 
