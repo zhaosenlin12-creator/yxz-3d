@@ -1707,7 +1707,10 @@ def to_3d_cartoon(req: ThreeDCartoonReq):
     pg = _new_progress(req.session_id, "3d-cartoon", reset=True)
     pg.emit("preprocess", 10, "正在读取你的设计稿…", "queued")
     sd = session_dir(req.session_id)
-    src = os.path.join(sd, "previews", f"img_{req.image_index}.png")
+    # The same source the cloud engines use: a picture that came back as a
+    # pose sheet is cut down to the single figure first, so the fallback
+    # engine cannot rebuild the whole grid of nine robots.
+    src = resolve_source_png(req.session_id, req.image_index, None)
     if req.custom_image:
         try:
             from io import BytesIO
@@ -1866,9 +1869,9 @@ def previews_v2(req: PreviewsV2Req):
 def to_3d_multi(req: ThreeDMultiReq):
     """Stage 3: 用多种子跑 TripoSR，返回 K 个候选 glb/stl 让用户挑。"""
     sd = session_dir(req.session_id)
-    src = os.path.join(sd, "previews", f"img_{req.image_index}.png")
-    if not os.path.isfile(src):
-        raise HTTPException(404, "preview not found")
+    # Same source as the cloud engines, so a pose sheet is cut down to the
+    # one figure the visitor picked before the seeds are rendered.
+    src = resolve_source_png(req.session_id, req.image_index, None)
     out_dir = os.path.join(sd, "models_multi")
     os.makedirs(out_dir, exist_ok=True)
     seeds = req.seeds[:4] or [42, 137, 2024]
@@ -2070,9 +2073,9 @@ def to_3d_hy(req: ThreeDHYReq):
     Per-mesh latency: ~90s with steps=5 octree=96.
     """
     sd = session_dir(req.session_id)
-    src = os.path.join(sd, "previews", f"img_{req.image_index}.png")
-    if not os.path.isfile(src):
-        raise HTTPException(404, "preview not found")
+    # The same source the cloud engines use, so a pose sheet is cut down to
+    # the single figure the visitor picked.
+    src = resolve_source_png(req.session_id, req.image_index, None)
     out = os.path.join(sd, "model")
     os.makedirs(out, exist_ok=True)
     try:
