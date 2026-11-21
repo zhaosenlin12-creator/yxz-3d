@@ -1,8 +1,15 @@
 /**
- * MiniMax never answers a rejected key with an HTTP error: an exhausted
- * Token Plan or a wrong credential comes back as HTTP 200 with a body that
- * carries `base_resp.status_code`. The frontend therefore has to read the
- * payload instead of trusting the status code.
+ * MiniMax rejects a key in two different ways and the frontend has to
+ * understand both of them:
+ *
+ * - the native endpoints (`/v1/t2a_v2`, `/v1/text/chatcompletion_v2`) answer
+   with HTTP 200 and a body that carries `base_resp.status_code`;
+ * - the OpenAI-compatible endpoint (`/v1/chat/completions`) answers an
+   exhausted Token Plan with a real HTTP 402 and an empty balance.
+ *
+ * Trusting only the status code means an exhausted key silently kills the
+ * request on the compatible endpoint, and the chat just stays stuck in
+ * "thinking" — the visitor never gets an answer and never sees why.
  *
  * `splitApiKeys` lets one provider config hold several platform keys and
  * `createMinimaxKeyRotatingFetch` retries the request with the next key as
@@ -141,6 +148,39 @@ function parseMinimaxPayload(text: string): unknown {
 }
 
 /**
+ * Pull a short reason out of an error response so the thrown message says
+ * why the key was benched instead of just "HTTP 402".
+ *
+ * The body is read from a clone so the original response stays usable, and
+ * any failure (no body, binary payload, stream already consumed) is simply
+ * swallowed -- the status code alone is good enough to rotate.
+ */
+async function readErrorBody(response: Response): Promise<string> {
+  try {
+    const text = await response.clone().text()
+    if (!text)
+      return ''
+
+    const payload = parseMinimaxPayload(text)
+    if (payload) {
+      const message = readMinimaxError(payload)
+      if (message)
+        return message
+
+      const plain = (payload as { error?: { message?: string }, message?: string }).error?.message
+        ?? (payload as { message?: string }).message
+      if (typeof plain === 'string' && plain)
+        return plain
+    }
+
+    return text.slice(0, 120).replace(/\s+/g, ' ').trim()
+  }
+  catch {
+    return ''
+  }
+}
+
+/**
  * Build a `fetch` that walks the configured MiniMax keys in order.
  *
  * The first chunk of the response is inspected before it is handed over: a
@@ -171,10 +211,13 @@ export function createMinimaxKeyRotatingFetch(keys: string[]): typeof globalThis
       const response = await globalThis.fetch(input, { ...init, headers: requestHeaders })
 
       if (!response.ok) {
-        // 401 / 403 / 429 mean this key cannot serve the request.
-        if (response.status === 401 || response.status === 403 || response.status === 429) {
+        // 401 / 403 = wrong credential, 402 = Token Plan / balance exhausted,
+        // 429 = throttled. All of them mean "this key cannot serve the
+        // request", so bench it and let the next key try.
+        if (response.status === 401 || response.status === 402 || response.status === 403 || response.status === 429) {
+          const detail = await readErrorBody(response)
           markMinimaxKeyDead(key)
-          lastError = new Error(`MiniMax rejected the key (HTTP ${response.status})`)
+          lastError = new Error(`MiniMax rejected the key (HTTP ${response.status}${detail ? `: ${detail}` : ''})`)
           continue
         }
         return response

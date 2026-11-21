@@ -79,6 +79,49 @@ describe('minimax dead key bench', () => {
     expect(isMinimaxKeyDead('spent')).toBe(true)
   })
 
+  it('benches a key that answers HTTP 402 (Token Plan exhausted on the OpenAI-compatible endpoint)', async () => {
+    const calls: string[] = []
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const key = new Headers(init?.headers).get('authorization') ?? ''
+      calls.push(key.replace('Bearer ', ''))
+      if (key.includes('spent')) {
+        return new Response(JSON.stringify({
+          error: { message: 'insufficient balance' },
+        }), { status: 402 })
+      }
+      return new Response('ok', { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const rotating = createMinimaxKeyRotatingFetch(['spent', 'good'])
+    const response = await rotating('https://api.minimaxi.com/v1/chat/completions')
+    expect(await response.text()).toBe('ok')
+    expect(calls).toEqual(['spent', 'good'])
+    expect(isMinimaxKeyDead('spent')).toBe(true)
+
+    // The next turn must not pay for the dead key again.
+    calls.length = 0
+    await rotating('https://api.minimaxi.com/v1/chat/completions')
+    expect(calls).toEqual(['good'])
+  })
+
+  it('reports why a key was benched when every key fails', async () => {
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const key = new Headers(init?.headers).get('authorization') ?? ''
+      if (key.includes('spent')) {
+        return new Response(JSON.stringify({
+          error: { message: 'insufficient balance' },
+        }), { status: 402 })
+      }
+      return new Response('ok', { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const rotating = createMinimaxKeyRotatingFetch(['spent'])
+    await expect(rotating('https://api.minimaxi.com/v1/chat/completions'))
+      .rejects.toThrow(/402/)
+  })
+
   it('forgets the bench when every key is benched, so a topped-up plan works again', async () => {
     const calls: string[] = []
     const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {

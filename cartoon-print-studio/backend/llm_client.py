@@ -230,9 +230,11 @@ def _minimax_call(prompt, *, model=MINIMAX_MODEL, max_retries=1, timeout=20, dea
                         _debug(f"minimax http {e.code} -> key disabled")
                         _cool_down_key(key, _AUTH_COOLDOWN)
                         break
-                    # quota / rate-limit (429 / 2056) -> try next key
-                    if e.code == 429:
-                        _debug(f"minimax http 429 -> key quota cooled down")
+                    # quota / rate-limit -> try next key.
+                    # 402 = Token Plan / balance exhausted (this is what the
+                    # OpenAI-compatible endpoint answers with), 429 = throttled.
+                    if e.code in (402, 429):
+                        _debug(f"minimax http {e.code} -> key quota cooled down")
                         _cool_down_key(key, _QUOTA_COOLDOWN)
                         break
                     _debug(f"minimax http {e.code} -> retry")
