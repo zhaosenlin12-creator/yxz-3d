@@ -232,7 +232,7 @@ pwsh -File start-all.ps1 -BackendPort 8100
 | 宜小智 2D 精灵层 | `airi/packages/stage-ui/src/assets/yxz/layers/` | 已入库：`body.png`（含光环的整身）、`glow.png`（光环辉光）、`eye_l/eye_r`、`mouth_*`、`manifest.json` |
 | 精灵切图脚本 | `airi/scripts/yxz-rebuild/cut_sprite_layers.py` | 从 `front-wave.png` 重新切层；改图后重跑即可再生成整套精灵 |
 | API keys | `cartoon-print-studio/keys.txt` | 随 ZIP；克隆后需手动放入 |
-| 名片模板 | `cartoon-print-studio/data/laser/template/activity_blue.png` | 缺失时后端 `/api/laser_card` 会报错 |
+| 名片背面模板 | `cartoon-print-studio/backend/assets/laser/*.png` | **已入库**；后端启动时自动镜像到 `data/laser/template/`（`laser_card.ensure_templates`），`data/` 里那份只是运行时副本，不入库 |
 | 预制摆件模型 | `presets/models/<pose>/*` | **已入库**（真正的宜小智机器人）；重跑脚本可重建：见下方「重建预制模型」 |
 | SD 1.5 权重 | `cartoon-print-studio/ai/forge-webui/models/Stable-diffusion/` | `fetch-models.ps1` 下载 |
 | SD 1.5 diffusers 配置 | `cartoon-print-studio/ai/forge-webui/backend/huggingface/runwayml/stable-diffusion-v1-5/` | `fetch-models.ps1` 下载；缺 `feature_extractor/preprocessor_config.json` 时本地 SD 起不来 |

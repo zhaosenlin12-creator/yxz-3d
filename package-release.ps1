@@ -74,31 +74,47 @@ Copy-Clean -Src (Join-Path $SourceRoot 'cartoon-print-studio') -Dst (Join-Path $
     -ExcludeFiles @('*.log', 'software_paths.json')
 Ok "cartoon-print-studio"
 
-# 运行数据只带现场必需的素材，测试生成的会话模型不随包（体积大且没用）：
-#   laser                  名片模板与已生成的名片
-#   yxz_character_tripo    宜小智角色模型（GLB/OBJ/STL）
-#   yxz_character_tripo_jpg 宜小智角色模型（高清版）
-#   34e5c9f0a0b0           混元 3D 云端生成的一次成品交付
-$keepData = @('laser', 'yxz_character_tripo', 'yxz_character_tripo_jpg', '34e5c9f0a0b0')
+# ---- 运行数据：只带"换机后立刻能跑"的素材 --------------------------
+#
+# 这里面每一项都做过引用核对（后端 / 前端 / 脚本全仓库 grep 过），
+# 拿掉的东西要么运行时会自己生成，要么是测试会话残留：
+#
+#   edge_voices.json            Edge 免费音色清单快照 —— 官方接口 503 / 断网时仍能选音色
+#   yxz_character_tripo/model/  宜小智角色网格（GLB + STL）
+#                               frontend/yxz-character.html 直接读 mesh.glb
+#   yxz_character_tripo_jpg/model/model_web.glb
+#                               离线重建 2D 分层形象（airi/scripts/build_yxz_*.ps1）用的源网格，
+#                               只要这一个文件；同目录下的 .blend 工程、口型变体全不带
+#
+# 明确不带：
+#   data/laser/*                名片背面模板由 backend/assets/laser 在启动时自动镜像到
+#                               data/laser/template（laser_card.ensure_templates），
+#                               模板图已经在仓库里；历史会话卡片是测试残留
+#   data/34e5c9f0a0b0           一次混元云端交付样品（126MB），代码零引用
+#   data/provider_health.json   本机熔断器状态，换机器应该从干净状态开始
 Write-Host "[4/7] 补回现场素材 ..." -ForegroundColor Cyan
-foreach ($name in $keepData) {
-    $src = Join-Path $SourceRoot ("cartoon-print-studio\data\{0}" -f $name)
-    if (Test-Path -LiteralPath $src) {
-        Copy-Clean -Src $src -Dst (Join-Path $OutDir ("cartoon-print-studio\data\{0}" -f $name)) `
-            -ExcludeDirs @() -ExcludeFiles @('*.log', '*.blend', '*.blend1')
-        Info "data\$name"
-    }
-}
+$dataSrc = Join-Path $SourceRoot 'cartoon-print-studio\data'
+$dataDst = Join-Path $OutDir 'cartoon-print-studio\data'
+New-Item -ItemType Directory -Force -Path $dataDst | Out-Null
 
-# data 根目录下还有值得带走的东西：
-#   edge_voices.json      Edge 免费音色清单快照 —— 官方接口 503 / 断网时仍能选音色
-#   provider_health.json  不带：那是本机的熔断器状态，换机器应该从干净状态开始
-foreach ($name in @('edge_voices.json')) {
-    $src = Join-Path $SourceRoot ("cartoon-print-studio\data\{0}" -f $name)
-    if (Test-Path -LiteralPath $src) {
-        Copy-Item -LiteralPath $src -Destination (Join-Path $OutDir ("cartoon-print-studio\data\{0}" -f $name)) -Force
-        Info "data\$name"
+# 只拷指定文件（而不是整个目录），保证包里不会混进测试残留。
+$dataFiles = @(
+    'edge_voices.json',
+    'yxz_character_tripo\model\mesh.glb',
+    'yxz_character_tripo\model\mesh.stl',
+    'yxz_character_tripo\previews\img_0.png',
+    'yxz_character_tripo_jpg\model\model_web.glb'
+)
+foreach ($rel in $dataFiles) {
+    $src = Join-Path $dataSrc $rel
+    if (-not (Test-Path -LiteralPath $src)) {
+        Warn "缺少素材，跳过：data\$rel"
+        continue
     }
+    $dst = Join-Path $dataDst $rel
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
+    Copy-Item -LiteralPath $src -Destination $dst -Force
+    Info "data\$rel"
 }
 
 # 预制 3D 模型（4 个宜小智姿态）：模型文件太大没有进 git，只能随包走，
@@ -150,13 +166,17 @@ else {
 
 # 本地语音识别模型（faster-whisper）随包带走：换一台电脑、或者现场没有
 # 网络，语音输入照样能用。模型有几百兆，所以不提交 GitHub，只随交付包走。
+#
+# 只带 small —— 它是 asr_api.py 的默认模型（YXZ_ASR_MODEL=small），
+# fetch-models.ps1 也只拉这一份。仓库里那份 faster-whisper-base 全项目
+# 无人引用，纯占 138MB，扔掉。
 Write-Host "[7/7] 拷贝本地语音识别模型 ..." -ForegroundColor Cyan
-$asrModel = Join-Path $SourceRoot 'cartoon-print-studio\models\asr'
+$asrModel = Join-Path $SourceRoot 'cartoon-print-studio\models\asr\faster-whisper-small'
 if (Test-Path -LiteralPath $asrModel) {
-    Copy-Clean -Src $asrModel -Dst (Join-Path $OutDir 'cartoon-print-studio\models\asr') `
-        -ExcludeDirs @() `
+    Copy-Clean -Src $asrModel -Dst (Join-Path $OutDir 'cartoon-print-studio\models\asr\faster-whisper-small') `
+        -ExcludeDirs @('.cache') `
         -ExcludeFiles @('*.metadata', '*.lock', '*.incomplete', '.gitignore', 'CACHEDIR.TAG')
-    Info "models\asr"
+    Info "models\asr\faster-whisper-small"
 }
 else {
     Warn "未找到本地语音识别模型（首次启动时会自动下载）"
@@ -186,6 +206,10 @@ $mustHave = @(
     'cartoon-print-studio\backend\llm_client.py',
     'cartoon-print-studio\backend\api_image.py',
     'cartoon-print-studio\data\edge_voices.json',
+    'cartoon-print-studio\data\yxz_character_tripo\model\mesh.glb',
+    'cartoon-print-studio\data\yxz_character_tripo_jpg\model\model_web.glb',
+    'cartoon-print-studio\backend\assets\laser\activity_yichang.png',
+    'cartoon-print-studio\models\asr\faster-whisper-small\model.bin',
     'airi\apps\stage-web\.env.local',
     'airi\apps\stage-web\public\provider-seed.json',
     'airi\packages\stage-ui\src\components\scenes\YXZPetScene.vue',
