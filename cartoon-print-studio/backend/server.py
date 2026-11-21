@@ -2395,7 +2395,12 @@ def to_3d_build(req: ThreeDBuildReq):
         source_name = req.source_png
     # Every engine needs the picture: without it the whole chain would
     # fail one after another with a confusing error.
-    resolve_source_png(req.session_id, req.image_index, source_name)
+    source_path = resolve_source_png(req.session_id, req.image_index, source_name)
+    # Which picture the build really works from.  When a visitor picked a
+    # design out of a gallery, a wrong number here quietly builds the
+    # wrong thing, so the file name is written down every time.
+    print(f"[3d_build] session={req.session_id} image_index={req.image_index} "
+          f"source={os.path.basename(source_path)}", flush=True)
 
     attempts: List[Dict[str, Any]] = []
     last_error: Optional[str] = None
@@ -3446,7 +3451,12 @@ def get_session_previews(sid: str):
                 continue
             items.append({"index": index, "path": f"/api/data/{sid}/previews/{fname}"})
     items.sort(key=lambda item: item["index"])
-    return {"session_id": sid, "previews": items}
+    # A session that starts with an uploaded picture keeps the upload in
+    # img_0.png and writes the generated designs next to it from img_1.png.
+    # The workbench has to know that, otherwise "design 1" is really the
+    # picture the visitor uploaded.
+    uploaded_index = 0 if os.path.isfile(os.path.join(sd, "_source.json")) else -1
+    return {"session_id": sid, "previews": items, "uploaded_index": uploaded_index}
 
 
 # ---------------------------------------------------------------------------

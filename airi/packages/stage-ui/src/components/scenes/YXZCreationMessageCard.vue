@@ -1,10 +1,17 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
-import { yxzPreviewPageUrl } from '../../composables/use-yxz-print-preview'
+import { resolveYXZPreviewIndex, yxzPreviewPageUrl } from '../../composables/use-yxz-print-preview'
 import { retryYXZModelBuild } from '../../tools/yxz-creation'
 
 export interface YXZCardPreviewItem {
+  /**
+   * The number the backend gave this picture inside the session
+   * (`img_<index>.png`).  It is NOT the position in the gallery: an
+   * uploaded picture already owns `img_0.png`, so the first generated
+   * design is `img_1.png`.
+   */
+  index: number
   src: string
   caption: string
 }
@@ -17,6 +24,8 @@ const props = withDefaults(defineProps<{
   stlUrl?: string
   sessionId?: string
   interactive?: boolean
+  /** Index of the picture shown in the big preview above the thumbs. */
+  previewIndex?: number
   status?: 'preview' | 'preview-building' | 'model-building' | 'model-ready' | 'failed' | 'adopted' | 'redescribe'
   progressMsg?: string
   errorMsg?: string
@@ -24,6 +33,7 @@ const props = withDefaults(defineProps<{
 }>(), {
   description: '',
   interactive: true,
+  previewIndex: 0,
   status: 'preview',
   progressMsg: '',
   errorMsg: '',
@@ -40,7 +50,9 @@ const retryError = ref('')
 const modelPreviewUrl = computed(() => props.modelUrl ? yxzPreviewPageUrl(props.modelUrl, props.sessionId) : '')
 
 const gallery = computed<YXZCardPreviewItem[]>(() => {
-  const items = props.previews?.length ? props.previews : [{ src: props.previewSrc, caption: props.caption }]
+  const items = props.previews?.length
+    ? props.previews
+    : [{ index: props.previewIndex, src: props.previewSrc, caption: props.caption }]
   return items.filter(item => item.src)
 })
 const lightboxOpen = ref(false)
@@ -50,7 +62,11 @@ function openStudio() {
   const item = gallery.value[lightboxIndex.value]
   if (!item || !props.sessionId)
     return
-  const index = (props.previews?.length ? props.previews?.findIndex(p => p.src === item.src) : 0) ?? 0
+  // The studio asks the backend for `previews/img_<image>.png`, so it needs
+  // the backend's own number for this picture.  Using the position in the
+  // gallery instead pointed the build at the uploaded picture (img_0.png)
+  // and the visitor got a model of the wrong thing.
+  const index = resolveYXZPreviewIndex(props.previews, item.src, props.previewIndex)
   const url = new URL('/yxz-studio', typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:5199')
   url.searchParams.set('session', props.sessionId)
   url.searchParams.set('image', String(Math.max(0, index)))

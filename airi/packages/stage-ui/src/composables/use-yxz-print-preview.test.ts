@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { buildYXZPreviewPrompt, createYXZCartoonModel, createYXZPreview, previewImageSrc, waitForYXZBackend, yxzBackendRecovery } from './use-yxz-print-preview'
+import { buildYXZImageRetryUrl, buildYXZPreviewPrompt, createYXZCartoonModel, createYXZPreview, previewImageSrc, resolveYXZPreviewIndex, waitForYXZBackend, yxzBackendRecovery } from './use-yxz-print-preview'
 
 afterEach(() => {
   yxzBackendRecovery.waitMs = 30_000
@@ -8,6 +8,34 @@ afterEach(() => {
 })
 
 describe('YXZ print preview adapter', () => {
+  it('resolves the backend index of a picture, not its gallery position', () => {
+    // A session that starts with an uploaded picture keeps the upload in
+    // img_0.png and numbers the generated designs from img_1.png.
+    const previews = [
+      { index: 1, src: '/api/data/abc/previews/img_1.png' },
+      { index: 2, src: '/api/data/abc/previews/img_2.png' },
+      { index: 3, src: '/api/data/abc/previews/img_3.png' },
+      { index: 4, src: '/api/data/abc/previews/img_4.png' },
+    ]
+    expect(resolveYXZPreviewIndex(previews, previews[0].src)).toBe(1)
+    expect(resolveYXZPreviewIndex(previews, previews[3].src)).toBe(4)
+    // An unknown picture falls back to the index the card already knows.
+    expect(resolveYXZPreviewIndex(previews, '/nope.png', 3)).toBe(3)
+    expect(resolveYXZPreviewIndex(undefined, '/nope.png', 2)).toBe(2)
+  })
+
+  it('asks for a fresh copy of a picture the browser refuses to load', () => {
+    // The thumbnail cached the picture without CORS headers, so the canvas
+    // has to ask for it under a new name to get a copy it can draw.
+    expect(buildYXZImageRetryUrl('/api/data/abc/previews/img_3.png', 42))
+      .toBe('/api/data/abc/previews/img_3.png?yxz-retry=42')
+    expect(buildYXZImageRetryUrl('/api/data/abc/previews/img_3.png?v=1', 42))
+      .toBe('/api/data/abc/previews/img_3.png?v=1&yxz-retry=42')
+    // One retry is enough: a second attempt would loop forever.
+    expect(buildYXZImageRetryUrl('/api/data/abc/previews/img_3.png?yxz-retry=42', 42)).toBe('')
+    expect(buildYXZImageRetryUrl('', 42)).toBe('')
+  })
+
   it('adds selected design constraints without changing the original description', () => {
     expect(buildYXZPreviewPrompt('一个小猫摆件', ['圆润可爱', '适合 3D 打印']))
       .toBe('一个小猫摆件\n\n设计约束：圆润可爱、适合 3D 打印')
@@ -81,7 +109,11 @@ describe('YXZ print preview adapter', () => {
   it('does not walk the provider chain again when the backend already gave up', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response('{"detail":"no image"}', { status: 500 }))
     await expect(createYXZPreview({ prompt: '测试' }, fetcher)).rejects.toThrow('预览没能生成出来')
-    expect(fetcher).toHaveBeenCalledTimes(1)
+    // The provider chain itself is walked exactly once.  The extra request
+    // is the cheap "did the server already finish the pictures?" check that
+    // keeps a cut-off request from throwing away work that succeeded.
+    const chainCalls = fetcher.mock.calls.filter(call => String(call[0]).includes('/api/previews'))
+    expect(chainCalls).toHaveLength(1)
   })
 
   it('reports whether the backend came back for the retry', async () => {

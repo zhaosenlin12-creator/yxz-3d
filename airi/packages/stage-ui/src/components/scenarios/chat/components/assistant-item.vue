@@ -144,6 +144,7 @@ const hideInternalFailure = computed(() => !creation.value && !laserCard.value
           <YXZCreationMessageCard
             v-if="creation"
             :preview-src="creation.preview.src"
+            :preview-index="creation.preview.index"
             :caption="creation.preview.caption"
             :description="creation.description"
             :previews="creation.previews"

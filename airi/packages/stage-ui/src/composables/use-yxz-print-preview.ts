@@ -238,6 +238,51 @@ export function previewImageSrc(item: YXZPreviewItem, baseUrl = getYXZPrintApiBa
 }
 
 /**
+ * The backend's own number for a picture inside its session.
+ *
+ * The workbench asks the backend for `previews/img_<index>.png`, so it
+ * needs the index the backend gave the picture -- not the position of
+ * the picture in a gallery.  A session that starts with an uploaded
+ * picture keeps that upload in img_0.png and numbers the generated
+ * designs from img_1.png, so the two are not the same thing: using the
+ * gallery position rebuilt the uploaded picture instead of the design
+ * the visitor picked.
+ */
+export function resolveYXZPreviewIndex(
+  previews: Array<{ index?: number, src?: string }> | undefined,
+  src: string,
+  fallbackIndex = 0,
+): number {
+  const found = (previews ?? []).find(item => item?.src === src)
+  const index = found?.index
+  if (typeof index === 'number' && Number.isFinite(index) && index >= 0)
+    return Math.floor(index)
+  const fallback = Number.isFinite(fallbackIndex) ? fallbackIndex : 0
+  return Math.max(0, Math.floor(fallback))
+}
+
+/**
+ * A fresh URL for a picture that the browser refuses to load.
+ *
+ * The same picture is often shown twice: once as a small thumbnail and
+ * once on the drawing canvas.  The thumbnail is fetched without CORS
+ * headers, and that copy lands in the browser cache.  The canvas asks for
+ * the picture *with* CORS headers, gets the cached copy that carries none,
+ * and the browser then refuses to load it -- the server does send the
+ * headers, the cache entry just does not know about them.  Asking for the
+ * picture under a new name gets a clean copy.
+ *
+ * An empty string means "there is nothing to retry": the picture has
+ * already been retried once, or there is no picture at all.
+ */
+export function buildYXZImageRetryUrl(src: string, stamp = Date.now()): string {
+  if (!src || src.includes('yxz-retry='))
+    return ''
+  const separator = src.includes('?') ? '&' : '?'
+  return `${src}${separator}yxz-retry=${stamp}`
+}
+
+/**
  * Ask the backend whether the session already has preview pictures.
  *
  * The image service keeps working on the server after the browser stopped
@@ -253,7 +298,11 @@ export async function fetchSessionPreviews(
   if (!sessionId)
     return []
   try {
-    const response = await fetcher(`${getYXZPrintApiBase()}/api/session/${sessionId}/previews`, {
+    // The backend lists the session's pictures under /api/sessions/...
+    // (plural).  Asking for /api/session/... answered 404, so the recovery
+    // path never found the pictures a timed-out request had already made
+    // and the visitor got a hard failure instead of their previews.
+    const response = await fetcher(`${getYXZPrintApiBase()}/api/sessions/${sessionId}/previews`, {
       cache: 'no-store',
     })
     if (!response.ok)

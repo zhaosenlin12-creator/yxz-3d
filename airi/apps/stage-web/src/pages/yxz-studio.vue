@@ -10,9 +10,20 @@ import { createYXZCartoonModel, createYXZLaserBackground, createYXZLaserCard, de
 
 const route = useRoute()
 const sessionId = String(route.query.session ?? '')
-const imageIndex = Number(route.query.image ?? 0)
+const routeImageIndex = Number(route.query.image ?? 0)
 const previewSrc = ref(String(route.query.src ?? ''))
 const caption = String(route.query.caption ?? '宜小智创作方案')
+
+// Which design the visitor picked.  The number is the backend's own index
+// inside the session (`previews/img_<index>.png`); an uploaded picture
+// already owns img_0.png, so the generated designs start at img_1.png.
+// It has to travel with the picture instead of being guessed from the
+// position in a gallery.
+const activeIndex = ref(Number.isFinite(routeImageIndex) ? routeImageIndex : 0)
+/** Every picture this session holds, so the visitor can switch designs. */
+const sessionPreviews = ref<{ index: number, src: string }[]>([])
+/** The index of the uploaded original, or -1 when the session has none. */
+const uploadedIndex = ref(-1)
 
 interface YXZPresetModel {
   id: string
@@ -31,6 +42,8 @@ const progress = ref<YXZModelProgress | null>(null)
 const buildStartedAt = ref(0)
 const elapsedMs = ref(0)
 const model = ref<{ glbUrl: string, stlUrl: string, upAxis: string } | null>(null)
+/** True when a model is on screen but a different design got picked. */
+const modelStale = ref(false)
 /** The separate bodies of the current model, for printing them one by one. */
 const parts = ref<YXZModelPart[]>([])
 const errorMessage = ref('')
@@ -112,13 +125,17 @@ async function generateLaserCard() {
     laserError.value = '当前页面没有作品会话，请从对话里的预览卡片进入创作面板。'
     return
   }
+  if (!laserForm.value.name.trim()) {
+    laserError.value = '先填上姓名，卡片正面要印这个名字。'
+    return
+  }
   laserBusy.value = true
   laserError.value = ''
   try {
     laserCard.value = await createYXZLaserCard({
       sessionId: `${sessionId}_card`,
       artworkSessionId: sessionId,
-      artworkImageIndex: imageIndex,
+      artworkImageIndex: activeIndex.value,
       name: laserForm.value.name,
       title: laserForm.value.title,
       unit: laserForm.value.unit,
@@ -231,6 +248,7 @@ async function loadExistingModel() {
       stlUrl: data.stl_url ? `${getYXZPrintApiBase()}${data.stl_url}` : '',
       upAxis: typeof data.up_axis === 'string' ? data.up_axis : 'z',
     }
+    modelStale.value = false
     progress.value = { percent: 100, message: '已载入本方案此前生成的 3D 模型', step: 'done' }
     void loadParts()
   }
@@ -258,7 +276,59 @@ onMounted(() => {
   void loadLaserTemplates()
   void loadExistingModel()
   void loadSessionPreview()
+  void loadSessionPreviews()
 })
+
+// Every picture of this session, so the visitor can pick the design that
+// gets turned into a model or a card.
+async function loadSessionPreviews() {
+  if (!sessionId)
+    return
+  const base = getYXZPrintApiBase()
+  try {
+    const resp = await fetch(`${base}/api/sessions/${encodeURIComponent(sessionId)}/previews`)
+    if (!resp.ok)
+      return
+    const data = await resp.json()
+    const items = Array.isArray(data?.previews) ? data.previews : []
+    sessionPreviews.value = items
+      .filter((item: { index?: number }) => Number.isInteger(item?.index))
+      .map((item: { index: number, path: string }) => ({
+        index: item.index,
+        src: `${base}${item.path}`,
+      }))
+    uploadedIndex.value = Number.isInteger(data?.uploaded_index) ? data.uploaded_index : -1
+  }
+  catch {
+    // A session without a picture list still works: the single preview
+    // that came with the link stays on screen.
+  }
+}
+
+function previewLabel(index: number) {
+  if (index === uploadedIndex.value)
+    return '上传原图'
+  const designs = sessionPreviews.value.filter(item => item.index !== uploadedIndex.value)
+  const position = designs.findIndex(item => item.index === index)
+  return position >= 0 ? `设计稿 ${position + 1}` : `图 ${index + 1}`
+}
+
+function selectPreview(item: { index: number, src: string }) {
+  if (item.index === activeIndex.value)
+    return
+  activeIndex.value = item.index
+  previewSrc.value = item.src
+  // The annotation belonged to the picture that was on screen before.
+  editedDataUrl.value = ''
+  // The card is drawn from the chosen design, so it has to follow it.  The
+  // card is composed locally, so this is quick -- no cloud call is made.
+  if (laserCard.value)
+    void generateLaserCard()
+  // A model is expensive to rebuild, so it is not thrown away silently:
+  // the visitor is told that what is on screen belongs to the old design.
+  if (model.value)
+    modelStale.value = true
+}
 
 // The workbench is usually opened straight from a chat session, which only
 // carries the session id. Recover the picture that session produced so the
@@ -273,7 +343,7 @@ async function loadSessionPreview() {
       return
     const data = await resp.json()
     const previews = Array.isArray(data?.previews) ? data.previews : []
-    const wanted = previews.find((item: { index: number }) => item?.index === imageIndex)
+    const wanted = previews.find((item: { index: number }) => item?.index === activeIndex.value)
     const fallback = previews[0]
     const picked = wanted ?? fallback
     if (picked?.path)
@@ -318,13 +388,14 @@ async function startModelBuild() {
   building.value = true
   errorMessage.value = ''
   model.value = null
+  modelStale.value = false
   activeView.value = '3d'
   progress.value = { percent: 2, message: '已收到你的方案，马上开始制作…', step: 'building', stage: 'queued' }
   startElapsedTimer()
   try {
     const result = await createYXZCartoonModel({
       sessionId,
-      imageIndex,
+      imageIndex: activeIndex.value,
       ...(editedDataUrl.value ? { customImage: editedDataUrl.value } : {}),
       onProgress: (p) => {
         progress.value = { ...p, stage: p.stage ?? resolveYXZBuildStage(p.step, p.percent) }
@@ -403,6 +474,30 @@ function goBack() {
         <small v-if="laserCard" class="yxz-view-badge">已生成</small>
       </button>
     </nav>
+
+    <!-- Which design is being turned into a model / a card -->
+    <section
+      v-if="sessionPreviews.length > 1"
+      class="yxz-studio-designs"
+      aria-label="选择设计稿"
+    >
+      <div class="yxz-studio-designs-head">
+        <strong>选择设计稿</strong>
+        <small>点一下要做的那张，3D 模型和切割卡片都会按它来制作。</small>
+      </div>
+      <div class="yxz-studio-designs-strip">
+        <button
+          v-for="item in sessionPreviews"
+          :key="item.index"
+          type="button"
+          :class="['yxz-studio-design', { 'is-active': item.index === activeIndex }]"
+          @click="selectPreview(item)"
+        >
+          <img :src="item.src" :alt="previewLabel(item.index)">
+          <span>{{ previewLabel(item.index) }}</span>
+        </button>
+      </div>
+    </section>
 
     <!-- Preset printable models (3 poses, built with Tripo / Hunyuan3D) -->
     <section v-if="presets.length || presetsError" class="yxz-studio-presets" aria-label="宜小智预制模型示例">
@@ -542,7 +637,7 @@ function goBack() {
             <strong>激光切割卡片</strong>
             <small>
               {{ laserCard.sizeMm.width }} × {{ laserCard.sizeMm.height }} mm ·
-              正面是你的作品，反面是活动主题
+              正面是你的作品，背面是活动主题
             </small>
           </header>
           <figure class="yxz-studio-cardface">
@@ -572,7 +667,7 @@ function goBack() {
           <div class="yxz-studio-3d-empty-icon">
             🪵
           </div>
-          <p>在右侧「激光切割」里填好姓名与信息，生成后这里会显示正反两面的完整预览。</p>
+          <p>在右侧「激光切割」里填好姓名，生成后这里会显示正面和背面的完整预览。</p>
           <button type="button" class="yxz-studio-build" @click="sidePanel = 'laser'">
             去填写卡片信息
           </button>
@@ -611,7 +706,7 @@ function goBack() {
         <div v-if="sidePanel === 'print'" class="yxz-studio-card">
           <h3>生成 3D 模型</h3>
           <p class="yxz-studio-note">
-            按你的设计稿生成可以 3D 打印的立体模型，全程自动完成。
+            按「{{ previewLabel(activeIndex) }}」生成可以 3D 打印的立体模型，全程自动完成。
           </p>
           <button
             class="yxz-studio-build"
@@ -648,6 +743,10 @@ function goBack() {
             {{ errorMessage }}
           </p>
 
+          <p v-if="model && modelStale" class="yxz-studio-warn">
+            你换了设计稿，现在这个模型还是按上一张做的。要按新的那张重新生成。
+          </p>
+
           <div v-if="model" class="yxz-studio-done">
             <span>✓ 模型已完成</span>
             <button type="button" class="yxz-studio-linkish" @click="switchView('3d')">
@@ -658,105 +757,117 @@ function goBack() {
         </div>
 
         <div v-if="sidePanel === 'laser'" class="yxz-studio-card">
-          <h3>导出激光切割卡片</h3>
+          <h3>制作切割卡片</h3>
           <p class="yxz-studio-note">
-            正面是你的 2D 作品预览图加姓名信息，背面是带活动主题大字的宜昌主视觉，
-            尺寸 {{ laserCard?.sizeMm.width ?? 100 }} × {{ laserCard?.sizeMm.height ?? 56.25 }} mm。
+            正面是「{{ previewLabel(activeIndex) }}」加姓名，背面是带活动主题大字的宜昌主视觉。
+            尺寸 {{ laserCard?.sizeMm.width ?? 100 }} × {{ laserCard?.sizeMm.height ?? 56.25 }} mm，固定不变。
           </p>
-          <div class="yxz-studio-laser-bg">
-            <label class="yxz-studio-laser-bg-label">
-              卡片正面主视觉
-              <textarea
-                v-model="laserFrontPrompt"
-                rows="2"
-                maxlength="120"
-                placeholder="描述正面的风格，例如：明亮蓝紫渐变，电路板与光点，底部留白放名字"
-              />
-            </label>
-            <div class="yxz-studio-laser-bg-actions">
-              <button
-                type="button"
-                class="yxz-studio-linkish"
-                :disabled="backgroundBusy !== ''"
-                @click="generateLaserBackground('front')"
-              >
-                {{ backgroundBusy === 'front' ? '正在绘制…' : 'AI 生成正面' }}
-              </button>
-              <button
-                v-if="laserFrontTemplate"
-                type="button"
-                class="yxz-studio-linkish"
-                @click="laserFrontTemplate = ''"
-              >
-                恢复纯色版式
-              </button>
+          <label class="yxz-studio-field">
+            <span>姓名 <em>必填，会印在正面</em></span>
+            <input v-model="laserForm.name" maxlength="12" placeholder="张三">
+          </label>
+          <details class="yxz-studio-more">
+            <summary>更多信息（单位 / 身份 / 联系方式）</summary>
+            <div class="yxz-studio-laser-fields">
+              <label>单位 <input v-model="laserForm.unit" maxlength="30" placeholder="宜昌市实验中学"></label>
+              <label>身份 <input v-model="laserForm.title" maxlength="20" placeholder="学生"></label>
+              <label>联系方式 <input v-model="laserForm.contact" maxlength="60" placeholder="电话 / 微信"></label>
             </div>
-            <div v-if="frontTemplates.length" class="yxz-studio-laser-templates">
-              <button
-                v-for="tpl in frontTemplates"
-                :key="tpl.id"
-                type="button"
-                :class="['yxz-studio-laser-template', { active: laserFrontTemplate === tpl.id }]"
-                @click="laserFrontTemplate = tpl.id"
-              >
-                <img :src="`${getYXZPrintApiBase()}${tpl.url}`" :alt="tpl.name" loading="lazy">
-                <span>{{ tpl.name }}</span>
-              </button>
+          </details>
+          <details class="yxz-studio-more">
+            <summary>换个背景风格（可选）</summary>
+            <div class="yxz-studio-laser-bg">
+              <label class="yxz-studio-laser-bg-label">
+                卡片正面主视觉
+                <textarea
+                  v-model="laserFrontPrompt"
+                  rows="2"
+                  maxlength="120"
+                  placeholder="描述正面的风格，例如：明亮蓝紫渐变，电路板与光点，底部留白放名字"
+                />
+              </label>
+              <div class="yxz-studio-laser-bg-actions">
+                <button
+                  type="button"
+                  class="yxz-studio-linkish"
+                  :disabled="backgroundBusy !== ''"
+                  @click="generateLaserBackground('front')"
+                >
+                  {{ backgroundBusy === 'front' ? '正在绘制…' : 'AI 生成正面' }}
+                </button>
+                <button
+                  v-if="laserFrontTemplate"
+                  type="button"
+                  class="yxz-studio-linkish"
+                  @click="laserFrontTemplate = ''"
+                >
+                  恢复纯色版式
+                </button>
+              </div>
+              <div v-if="frontTemplates.length" class="yxz-studio-laser-templates">
+                <button
+                  v-for="tpl in frontTemplates"
+                  :key="tpl.id"
+                  type="button"
+                  :class="['yxz-studio-laser-template', { active: laserFrontTemplate === tpl.id }]"
+                  @click="laserFrontTemplate = tpl.id"
+                >
+                  <img :src="`${getYXZPrintApiBase()}${tpl.url}`" :alt="tpl.name" loading="lazy">
+                  <span>{{ tpl.name }}</span>
+                </button>
+              </div>
             </div>
-          </div>
-          <div class="yxz-studio-laser-bg">
-            <label class="yxz-studio-laser-bg-label">
-              卡片背面背景
-              <textarea
-                v-model="laserBackgroundPrompt"
-                rows="2"
-                maxlength="120"
-                placeholder="描述你想要的背景，例如：深蓝科技感，星辰与电路板，卡通插画风"
-              />
-            </label>
-            <div class="yxz-studio-laser-bg-actions">
-              <button
-                type="button"
-                class="yxz-studio-linkish"
-                :disabled="backgroundBusy !== ''"
-                @click="generateLaserBackground('back')"
-              >
-                {{ backgroundBusy === 'back' ? '正在绘制…' : 'AI 生成背景' }}
-              </button>
-              <span v-if="backgroundMessage" class="yxz-studio-note">{{ backgroundMessage }}</span>
+            <div class="yxz-studio-laser-bg">
+              <label class="yxz-studio-laser-bg-label">
+                卡片背面背景
+                <textarea
+                  v-model="laserBackgroundPrompt"
+                  rows="2"
+                  maxlength="120"
+                  placeholder="描述你想要的背景，例如：深蓝科技感，星辰与电路板，卡通插画风"
+                />
+              </label>
+              <div class="yxz-studio-laser-bg-actions">
+                <button
+                  type="button"
+                  class="yxz-studio-linkish"
+                  :disabled="backgroundBusy !== ''"
+                  @click="generateLaserBackground('back')"
+                >
+                  {{ backgroundBusy === 'back' ? '正在绘制…' : 'AI 生成背景' }}
+                </button>
+                <span v-if="backgroundMessage" class="yxz-studio-note">{{ backgroundMessage }}</span>
+              </div>
+              <div v-if="backTemplates.length" class="yxz-studio-laser-templates is-back">
+                <button
+                  v-for="tpl in backTemplates"
+                  :key="tpl.id"
+                  type="button"
+                  :class="['yxz-studio-laser-template', { active: laserBackTemplate === tpl.id }]"
+                  @click="laserBackTemplate = tpl.id"
+                >
+                  <span class="yxz-studio-laser-template-thumb">
+                    <img
+                      :src="`${getYXZPrintApiBase()}${tpl.previewUrl ?? tpl.url}`"
+                      :alt="tpl.name"
+                      loading="lazy"
+                    >
+                  </span>
+                  <span>{{ tpl.name }}</span>
+                </button>
+              </div>
             </div>
-            <div v-if="backTemplates.length" class="yxz-studio-laser-templates is-back">
-              <button
-                v-for="tpl in backTemplates"
-                :key="tpl.id"
-                type="button"
-                :class="['yxz-studio-laser-template', { active: laserBackTemplate === tpl.id }]"
-                @click="laserBackTemplate = tpl.id"
-              >
-                <span class="yxz-studio-laser-template-thumb">
-                  <img
-                    :src="`${getYXZPrintApiBase()}${tpl.previewUrl ?? tpl.url}`"
-                    :alt="tpl.name"
-                    loading="lazy"
-                  >
-                </span>
-                <span>{{ tpl.name }}</span>
-              </button>
-            </div>
-          </div>
-          <div class="yxz-studio-laser-fields">
-            <label>姓名 <input v-model="laserForm.name" maxlength="12" placeholder="张三"></label>
-            <label>身份 <input v-model="laserForm.title" maxlength="20" placeholder="学生"></label>
-            <label>学校 <input v-model="laserForm.unit" maxlength="30" placeholder="宜昌市实验中学"></label>
-            <label>联系方式 <input v-model="laserForm.contact" maxlength="60" placeholder="电话 / 微信"></label>
-          </div>
+          </details>
           <button
             class="yxz-studio-build"
-            :disabled="laserBusy || !sessionId"
+            :disabled="laserBusy || !sessionId || !laserForm.name.trim()"
             @click="generateLaserCard"
           >
             {{ laserBusy ? '生成中…' : '生成切割卡片' }}
           </button>
+          <p v-if="!laserForm.name.trim()" class="yxz-studio-note">
+            填上姓名就能生成，其余信息留空也没关系。
+          </p>
 
           <p v-if="laserError" class="yxz-studio-error">
             {{ laserError }}
@@ -769,8 +880,8 @@ function goBack() {
                 <img :src="laserCard.frontUrl" alt="卡片正面">
               </figure>
               <figure>
-                <figcaption>反面</figcaption>
-                <img :src="laserCard.backUrl" alt="卡片反面">
+                <figcaption>背面</figcaption>
+                <img :src="laserCard.backUrl" alt="卡片背面">
               </figure>
             </div>
             <div class="yxz-studio-laser-links">
@@ -925,6 +1036,83 @@ function goBack() {
   border: 1px solid rgba(96, 165, 250, .32);
   border-radius: 14px;
   background: rgba(13, 37, 66, .55);
+}
+
+/* --- the design strip: pick the picture that becomes the model ------- */
+.yxz-studio-designs {
+  max-width: 1320px;
+  margin: 14px auto 0;
+  padding: 14px 18px;
+  border: 1px solid rgba(96, 165, 250, .32);
+  border-radius: 14px;
+  background: rgba(13, 37, 66, .55);
+}
+
+.yxz-studio-designs-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.yxz-studio-designs-head strong {
+  font-size: 15px;
+  color: #dff1ff;
+}
+
+.yxz-studio-designs-head small {
+  font-size: 12px;
+  color: #8fb8dd;
+}
+
+.yxz-studio-designs-strip {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.yxz-studio-design {
+  flex: none;
+  width: 132px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  border: 2px solid rgba(96, 165, 250, .22);
+  border-radius: 12px;
+  background: rgba(6, 21, 39, .55);
+  color: #9fc6e6;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color .18s ease, background .18s ease;
+}
+
+.yxz-studio-design:hover {
+  border-color: rgba(77, 184, 240, .6);
+  background: rgba(20, 52, 84, .6);
+}
+
+.yxz-studio-design.is-active {
+  border-color: #38b6ff;
+  background: rgba(56, 182, 255, .14);
+  color: #eaf6ff;
+  box-shadow: 0 0 0 3px rgba(56, 182, 255, .16);
+}
+
+.yxz-studio-design img {
+  display: block;
+  width: 100%;
+  height: 92px;
+  border-radius: 8px;
+  background: #fff;
+  object-fit: contain;
+}
+
+.yxz-studio-design span {
+  font-size: 12px;
+  padding-left: 2px;
 }
 
 .yxz-studio-presets-head {
@@ -1296,6 +1484,76 @@ function goBack() {
   background: rgba(255, 255, 255, .03);
 }
 
+/* --- the card form: one field up front, the rest tucked away --------- */
+.yxz-studio-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #dff0ff;
+  font-size: 13px;
+}
+
+.yxz-studio-field span {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.yxz-studio-field em {
+  font-style: normal;
+  font-size: 11px;
+  color: #7fa9cc;
+}
+
+.yxz-studio-field input {
+  border: 1px solid rgba(143, 212, 255, .3);
+  border-radius: 9px;
+  padding: 9px 11px;
+  background: rgba(10, 26, 44, .7);
+  color: #eaf6ff;
+  font-size: 14px;
+}
+
+.yxz-studio-field input:focus {
+  outline: none;
+  border-color: #38b6ff;
+  box-shadow: 0 0 0 3px rgba(56, 182, 255, .18);
+}
+
+.yxz-studio-more {
+  border: 1px solid rgba(160, 205, 255, .18);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .03);
+  padding: 8px 10px;
+}
+
+.yxz-studio-more > summary {
+  cursor: pointer;
+  color: #9fc6e6;
+  font-size: 12px;
+  list-style: none;
+}
+
+.yxz-studio-more > summary::-webkit-details-marker {
+  display: none;
+}
+
+.yxz-studio-more > summary::after {
+  content: '展开';
+  margin-left: 8px;
+  color: #38b6ff;
+  font-size: 11px;
+}
+
+.yxz-studio-more[open] > summary::after {
+  content: '收起';
+}
+
+.yxz-studio-more > *:not(summary) {
+  margin-top: 10px;
+}
+
 .yxz-studio-laser-bg-label {
   display: flex;
   flex-direction: column;
@@ -1538,6 +1796,13 @@ function goBack() {
   color: #ff8f8f;
   font-size: 12px;
 }
+
+  .yxz-studio-warn {
+    margin: 0;
+    color: #ffd479;
+    font-size: 12px;
+    line-height: 1.6;
+  }
 
 .yxz-studio-done {
   display: flex;

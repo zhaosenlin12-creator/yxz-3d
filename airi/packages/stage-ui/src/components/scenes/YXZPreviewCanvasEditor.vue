@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref, watch } from 'vue'
 
+import { buildYXZImageRetryUrl } from '../../composables/use-yxz-print-preview'
+
 const props = defineProps<{
   imageSrc: string
   caption: string
@@ -56,6 +58,8 @@ const operations = ref<Operation[]>([])
 const isDrawing = ref(false)
 const imageReady = ref(false)
 const imageError = ref('')
+/** Counts picture loads, so only the newest one may touch the canvas. */
+let loadTicket = 0
 const imageRect = ref({ x: 0, y: 0, width: CANVAS_SIZE, height: CANVAS_SIZE })
 const placingText = ref(false)
 let activeStroke: Operation & { kind: 'stroke' } | undefined
@@ -272,16 +276,34 @@ async function loadImage() {
     return
   }
   await nextTick()
+  // Only the newest request may write to the canvas.  Switching designs
+  // starts a second load while the first one may still be running, and the
+  // slower one must not overwrite the newer picture.
+  const ticket = ++loadTicket
   const image = new Image()
   image.onload = () => {
+    if (ticket !== loadTicket)
+      return
     baseImage = image
     imageReady.value = true
     imageError.value = ''
     redraw()
   }
   image.onerror = () => {
+    if (ticket !== loadTicket)
+      return
     baseImage = undefined
     imageReady.value = false
+    // A picture that is already in the browser's cache from a request
+    // without CORS headers comes back without them, and the browser then
+    // refuses to load it -- even though the server does send the headers.
+    // Asking for the same picture under a fresh name gets a clean copy,
+    // which is what the visitor actually needs.
+    const retry = buildYXZImageRetryUrl(props.imageSrc)
+    if (retry) {
+      image.src = retry
+      return
+    }
     // NOTICE: without this the canvas stayed on "正在加载预览…" forever when
     // the preview image could not be fetched (backend down, session gone),
     // which looked like the page was stuck.
