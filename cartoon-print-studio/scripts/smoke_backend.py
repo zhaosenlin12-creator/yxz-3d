@@ -7,12 +7,16 @@ safe to run against a live workstation while the user is using the UI.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import urllib.error
 import urllib.request
 
-BASE = "http://127.0.0.1:8000"
+# The workstation runs the backend on 8100, but the same script has to be
+# able to smoke-test a throw-away instance (e.g. the backend unpacked from
+# the delivery ZIP), so the base URL can be pointed anywhere.
+BASE = os.environ.get("YXZ_BASE_URL", "http://127.0.0.1:8100").rstrip("/")
 
 GETS: list[tuple[str, str]] = [
     ("health", "/api/health"),
@@ -27,7 +31,9 @@ GETS: list[tuple[str, str]] = [
 ]
 
 POSTS: list[tuple[str, str, dict]] = [
-    ("prompt/polish", "/api/prompt/polish", {"prompt": "一个小摆件"}),
+    ("prompt/polish", "/api/prompt/polish", {"text": "一个小摆件"}),
+    # from-image needs a real image payload; an empty body is enough to prove
+    # the route is alive (it answers 422 with a field error, not a 5xx).
     ("session/from-image", "/api/session/from-image", {}),
 ]
 

@@ -50,6 +50,20 @@ def _debug(message: str) -> None:
 # the chat app itself runs on, so the backend uses the same one.
 MINIMAX_MODEL = "MiniMax-M3"
 
+# Token budget for one chat completion.
+#
+# M3 is a reasoning model: it spends tokens thinking before it writes the
+# answer, and those thinking tokens come out of the same budget.  With the
+# old 2048 the model regularly hit the limit while still reasoning, the
+# provider returned finish_reason=length with an empty body, and the whole
+# request silently fell back to the local rule engine -- the user just saw
+# "the model got dumber".  4096 leaves room for the reasoning plus four to
+# six full prompts; MAX_TOKENS_CEILING is what a length-truncated answer is
+# retried with.
+DEFAULT_MAX_TOKENS = 4096
+MAX_TOKENS_CEILING = 16384
+DEEPSEEK_MAX_TOKENS = 2048
+
 # AIXJ text models (gpt-5.x) are a second opinion for picture
 # understanding when DeepSeek is unavailable.
 AIXJ_LLM_ENDPOINTS = ["https://aixj.vip/v1/chat/completions"]
@@ -189,6 +203,7 @@ def _extract_openai_text(payload):
 
 
 def _minimax_call(prompt, *, model=MINIMAX_MODEL, max_retries=1, timeout=20, deadline=None,
+                   max_tokens=DEFAULT_MAX_TOKENS,
                    system="You are an art director for a kid-friendly 3D-print shop. Reply in JSON only."):
     """Call the MiniMax chat API (native v2 endpoint, api.minimaxi.com).
 
@@ -203,7 +218,7 @@ def _minimax_call(prompt, *, model=MINIMAX_MODEL, max_retries=1, timeout=20, dea
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.9,
-        "max_tokens": 2048,
+        "max_tokens": max_tokens,
     }
     data = json.dumps(body).encode("utf-8")
     for key_index, key in enumerate(MINIMAX_API_KEYS, 1):
@@ -213,12 +228,14 @@ def _minimax_call(prompt, *, model=MINIMAX_MODEL, max_retries=1, timeout=20, dea
             _debug(f"minimax key#{key_index} is benched -> skip")
             continue
         for ep in MINIMAX_ENDPOINTS:
+            budget = max_tokens
             for attempt in range(max_retries + 1):
                 if deadline is not None and time.time() >= deadline:
                     return None
                 attempt_timeout = timeout
                 if deadline is not None:
                     attempt_timeout = max(1.0, min(timeout, deadline - time.time()))
+                body["max_tokens"] = budget
                 try:
                     req = urllib.request.Request(
                         ep, data=data, method="POST",
@@ -262,11 +279,21 @@ def _minimax_call(prompt, *, model=MINIMAX_MODEL, max_retries=1, timeout=20, dea
                 reply = payload.get("reply", "")
                 if not reply and payload.get("choices"):
                     reply = _extract_openai_text(payload)
+                finish = (payload.get("choices") or [{}])[0].get("finish_reason")
+                # 推理模型（M3）先想再答，token 预算被思考过程吃光时正文是空的，
+                # finish_reason 会是 length。以前这里直接跳过，把请求丢给本地规则
+                # 引擎，用户看到的就是"模型变笨了"。改成加预算重试一次。
+                # 截断时返回的那半截 JSON 也是废的（解析不出来），所以只要还有
+                # 预算就重来，别把半截答案当成答案。
+                if finish == "length" and budget < MAX_TOKENS_CEILING and attempt < max_retries:
+                    budget = min(budget * 2, MAX_TOKENS_CEILING)
+                    _debug("minimax finish_reason=length -> retry with max_tokens=" + str(budget))
+                    continue
                 if reply:
                     _KEY_COOLDOWN.pop(key, None)
                     return reply.strip()
-                _debug("minimax empty content (finish_reason="
-                       + str((payload.get("choices") or [{}])[0].get("finish_reason")) + ")")
+                _debug("minimax empty content (finish_reason=" + str(finish) + ")")
+                break
     return None
 
 
@@ -280,7 +307,7 @@ def _deepseek_call(prompt, *, model=DEEPSEEK_MODEL, timeout=20, deadline=None,
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.9,
-        "max_tokens": 1024,
+        "max_tokens": DEEPSEEK_MAX_TOKENS,
     }
     for key in DEEPSEEK_API_KEYS:
         if not key:
@@ -292,13 +319,15 @@ def _deepseek_call(prompt, *, model=DEEPSEEK_MODEL, timeout=20, deadline=None,
     return None
 
 
-def llm_call(prompt, *, timeout=30, deadline=None, max_retries=1, system=None):
+def llm_call(prompt, *, timeout=30, deadline=None, max_retries=1, system=None,
+              max_tokens=DEFAULT_MAX_TOKENS):
     """Try MiniMax -> DeepSeek. Returns (text, provider) or (None, None)."""
     if deadline is None:
         deadline = time.time() + max(timeout, 1) * 2 + 5
     t0 = time.time()
     if MINIMAX_API_KEYS:
         reply = _minimax_call(prompt, max_retries=max_retries, timeout=timeout, deadline=deadline,
+                               max_tokens=max_tokens,
                                **({"system": system} if system else {}))
         if reply:
             return reply, "MiniMax"
@@ -455,8 +484,11 @@ def elaborate_via_llm(user_prompt, n=6):
     )
     # MiniMax-M3 reasons before it answers: six full prompts take ~20s, so
     # the old 20s per-attempt budget cut the answer off and silently sent
-    # the request to the rule engine instead.
-    text, provider = llm_call(user, timeout=45, deadline=time.time() + 60)
+    # the request to the rule engine instead.  The same applies to the
+    # token budget -- the reasoning eats into it, so ask for a roomy one
+    # and give the call enough wall-clock time to finish thinking.
+    text, provider = llm_call(user, timeout=55, deadline=time.time() + 75,
+                              max_tokens=DEFAULT_MAX_TOKENS)
     if not text:
         _debug("elaborate: provider returned no text")
         return None, None
