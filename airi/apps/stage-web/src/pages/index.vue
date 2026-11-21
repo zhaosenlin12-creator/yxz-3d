@@ -282,10 +282,34 @@ watch([stream, () => vadLoaded.value], async ([s, loaded]) => {
 
 @media (max-width: 900px) {
   .stage-title-block { top: 3.5vh; }
-  .stage-title-line-1 { font-size: clamp(16px, 4.4vw, 26px); }
-  .stage-title-line-2 { font-size: clamp(12px, 3vw, 17px); }
+  /* 窄屏上标题必须让开左上角的 YCSL 和右上角的 2026，
+     放不下就换行，绝不压到品牌字上。 */
+  .stage-title-block {
+    white-space: normal;
+    max-width: calc(100vw - 6vw);
+  }
+  .stage-title-line-1 {
+    font-size: clamp(13px, 4.2vw, 26px);
+    letter-spacing: 0.02em;
+    line-height: 1.3;
+  }
+  .stage-title-line-2 {
+    font-size: clamp(11px, 3vw, 17px);
+    letter-spacing: 0.04em;
+    line-height: 1.35;
+  }
   .stage-brand-slogan { display: none; }
   .stage-title-year { top: 3.5vh; }
+}
+
+@media (max-width: 480px) {
+  .stage-title-line-1 {
+    font-size: clamp(12px, 3.8vw, 17px);
+    letter-spacing: 0;
+  }
+  .stage-title-line-2 { font-size: clamp(10px, 2.8vw, 14px); }
+  .stage-title-year { font-size: 15px; }
+  .stage-brand-mark { font-size: 13px; }
 }
 </style>
 
