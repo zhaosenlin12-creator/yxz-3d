@@ -206,10 +206,11 @@ def _minimax_call(prompt, *, model=MINIMAX_MODEL, max_retries=1, timeout=20, dea
         "max_tokens": 2048,
     }
     data = json.dumps(body).encode("utf-8")
-    for key in MINIMAX_API_KEYS:
+    for key_index, key in enumerate(MINIMAX_API_KEYS, 1):
         if not key:
             continue
         if not _key_usable(key):
+            _debug(f"minimax key#{key_index} is benched -> skip")
             continue
         for ep in MINIMAX_ENDPOINTS:
             for attempt in range(max_retries + 1):
@@ -227,31 +228,36 @@ def _minimax_call(prompt, *, model=MINIMAX_MODEL, max_retries=1, timeout=20, dea
                         payload = json.loads(r.read().decode("utf-8", "ignore"))
                 except urllib.error.HTTPError as e:
                     if e.code in (401, 403):
-                        _debug(f"minimax http {e.code} -> key disabled")
+                        _debug(f"minimax key#{key_index} http {e.code} -> key disabled")
                         _cool_down_key(key, _AUTH_COOLDOWN)
                         break
                     # quota / rate-limit -> try next key.
                     # 402 = Token Plan / balance exhausted (this is what the
                     # OpenAI-compatible endpoint answers with), 429 = throttled.
                     if e.code in (402, 429):
-                        _debug(f"minimax http {e.code} -> key quota cooled down")
+                        _debug(f"minimax key#{key_index} http {e.code} -> key quota cooled down")
                         _cool_down_key(key, _QUOTA_COOLDOWN)
                         break
-                    _debug(f"minimax http {e.code} -> retry")
+                    _debug(f"minimax key#{key_index} http {e.code} -> retry")
                     continue
                 except Exception as exc:
-                    _debug(f"minimax {type(exc).__name__}: {exc} -> retry")
+                    _debug(f"minimax key#{key_index} {type(exc).__name__}: {exc} -> retry")
                     continue
                 base = payload.get("base_resp", {}) or {}
                 if base.get("status_code", 0) != 0:
                     code = base.get("status_code")
                     # invalid key / quota / not allowed -> abandon this key
                     # 2069: the model was retired by the provider.
-                    if code in (2049, 1004, 1002, 2056, 2069):
-                        _debug(f"minimax base_resp {code} -> key cooled down")
+                    # 2067: "已达到 Token Plan 用量上限" — the provider now
+                    # answers an exhausted plan with 2067 instead of 2056/429.
+                    # It has to be benched too, otherwise every request burns
+                    # its whole budget on the dead key and falls back to the
+                    # local rule engine.
+                    if code in (2049, 1004, 1002, 2056, 2067, 2069):
+                        _debug(f"minimax key#{key_index} base_resp {code} -> key cooled down")
                         _cool_down_key(key, _QUOTA_COOLDOWN)
                         break
-                    _debug(f"minimax base_resp {code} -> retry")
+                    _debug(f"minimax key#{key_index} base_resp {code} -> retry")
                     continue
                 reply = payload.get("reply", "")
                 if not reply and payload.get("choices"):
