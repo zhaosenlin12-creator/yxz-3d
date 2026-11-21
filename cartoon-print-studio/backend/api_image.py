@@ -95,8 +95,34 @@ def _minimax_image_keys_from_file():
         pass
 
 
+def _aixj_image_keys_from_codex_env():
+    """Safety net for the aixj image key.
+
+    The key in keys.txt can be rotated on the provider side and go stale
+    (it then answers 401).  The desktop tooling keeps the live key in
+    ``~/.codex/secrets/aixj.env``; picking it up here means the image chain
+    keeps working without touching keys.txt by hand.
+    """
+    path = os.path.expanduser(r"~\.codex\secrets\aixj.env")
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except Exception:
+        return
+    for line in lines:
+        name, _, value = line.strip().partition("=")
+        key = value.strip()
+        if name.strip() != "AIXJ_IMAGE_API_KEY" or not key.startswith("sk-"):
+            continue
+        if key not in AIXJ_IMAGE_KEYS:
+            AIXJ_IMAGE_KEYS.append(key)
+
+
 _classify_keys_from_file()
 _minimax_image_keys_from_file()
+_aixj_image_keys_from_codex_env()
 
 # Strip empties
 JOJO_KEYS = [k for k in JOJO_KEYS if k]
@@ -196,6 +222,34 @@ class _OutboundSlot:
 _AIXJ_DEAD_UNTIL: dict = {}
 
 
+def _prepare_reference(image_bytes: bytes, max_side: int = 1024) -> Optional[bytes]:
+    """Shrink a reference picture into a small JPEG.
+
+    The image providers choke on multi-megabyte uploads, so the reference is
+    scaled down and re-encoded before it is sent.  Returns None when the
+    bytes cannot be decoded as an image.
+    """
+    if not image_bytes:
+        return None
+    try:
+        import io
+        from PIL import Image
+        with Image.open(io.BytesIO(image_bytes)) as decoded:
+            decoded = decoded.convert("RGB")
+            width, height = decoded.size
+            scale = min(1.0, max_side / float(max(width, height) or 1))
+            if scale < 1.0:
+                decoded = decoded.resize(
+                    (max(1, int(width * scale)), max(1, int(height * scale))),
+                    Image.LANCZOS,
+                )
+            buffer = io.BytesIO()
+            decoded.save(buffer, format="JPEG", quality=85)
+            return buffer.getvalue()
+    except Exception:
+        return None
+
+
 def _download_with_retry(url: str, ua: str = "", attempts: int = 3,
                          timeout: float = 30.0) -> Optional[bytes]:
     """Fetch a generated image, retrying a couple of times.
@@ -243,7 +297,7 @@ def _report_provider(name: str, kind: str, detail: str = "") -> None:
 
 
 def _aixj_image_call(prompt, *, n=1, size="1024x1024", model=AIXJ_IMAGE_MODEL,
-                     timeout=90, sid=None) -> Optional[List[bytes]]:
+                     timeout=150, sid=None) -> Optional[List[bytes]]:
     """Call AIXJ images/generations (OpenAI-compatible) with per-key retry.
 
     Endpoint shape: POST {base}/images/generations
@@ -266,34 +320,55 @@ def _aixj_image_call(prompt, *, n=1, size="1024x1024", model=AIXJ_IMAGE_MODEL,
         if key in _AIXJ_DEAD_KEYS:
             print(f"[aixj] skip dead key {ki+1}/{n_keys}", flush=True)
             continue
-        try:
-            req = urllib.request.Request(
-                AIXJ_BASE + "/images/generations",
-                data=data, method="POST",
-                headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
-            )
-            with _OutboundSlot(_AIXJ_SEMAPHORE):
-                with urllib.request.urlopen(req, timeout=timeout) as r:
-                    payload = json.loads(r.read().decode("utf-8", "ignore"))
-        except urllib.error.HTTPError as e:
+        payload = None
+        # The relay's upstream is flaky: a 502 means "try again in a
+        # moment", not "this key is broken".  AIXJ carries the best picture
+        # quality of the whole chain, so a couple of retries with a short
+        # back-up beat dropping to a worse provider straight away.
+        for attempt in range(3):
             try:
-                err = e.read().decode("utf-8", "ignore")
-            except Exception:
-                err = str(e.reason)
-            low = err.lower()
-            if e.code in (401, 402, 403) or any(
-                x in low for x in ("quota", "balance", "insufficient")
-            ) or "invalid" in low:
-                _AIXJ_DEAD_KEYS.add(key)
-                _report_provider("aixj", "quota", f"HTTP {e.code}")
-                print(f"[aixj] key {ki+1}/{n_keys} DEAD (HTTP {e.code}): {err[:120]}", flush=True)
-                continue
-            _report_provider("aixj", "server", f"HTTP {e.code}")
-            print(f"[aixj] key {ki+1}/{n_keys} HTTP {e.code}: {err[:160]}")
-            continue
-        except Exception as e:
-            _report_provider("aixj", "network", f"{type(e).__name__}: {str(e)[:120]}")
-            print(f"[aixj] key {ki+1}/{n_keys} {type(e).__name__}: {str(e)[:160]}")
+                req = urllib.request.Request(
+                    AIXJ_BASE + "/images/generations",
+                    data=data, method="POST",
+                    headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+                )
+                with _OutboundSlot(_AIXJ_SEMAPHORE):
+                    with urllib.request.urlopen(req, timeout=timeout) as r:
+                        payload = json.loads(r.read().decode("utf-8", "ignore"))
+                break
+            except urllib.error.HTTPError as e:
+                try:
+                    err = e.read().decode("utf-8", "ignore")
+                except Exception:
+                    err = str(e.reason)
+                low = err.lower()
+                dead = e.code in (401, 402, 403) or any(
+                    x in low for x in ("quota", "balance", "insufficient")
+                ) or ("invalid" in low and "key" in low)
+                if dead:
+                    _AIXJ_DEAD_KEYS.add(key)
+                    _report_provider("aixj", "quota", f"HTTP {e.code}")
+                    print(f"[aixj] key {ki+1}/{n_keys} DEAD (HTTP {e.code}): {err[:120]}", flush=True)
+                    payload = None
+                    break
+                _report_provider("aixj", "server", f"HTTP {e.code}")
+                print(f"[aixj] key {ki+1}/{n_keys} HTTP {e.code} "
+                      f"(try {attempt+1}/3): {err[:160]}", flush=True)
+                if e.code in (502, 503, 504) and attempt < 2:
+                    time.sleep(3.0 * (attempt + 1))
+                    continue
+                payload = None
+                break
+            except Exception as e:
+                _report_provider("aixj", "network", f"{type(e).__name__}: {str(e)[:120]}")
+                print(f"[aixj] key {ki+1}/{n_keys} {type(e).__name__} "
+                      f"(try {attempt+1}/3): {str(e)[:160]}", flush=True)
+                if attempt < 2:
+                    time.sleep(3.0 * (attempt + 1))
+                    continue
+                payload = None
+                break
+        if payload is None:
             continue
         out = []
         # The image host (Cloudflare R2 gateway) blocks non-browser requests
@@ -399,7 +474,7 @@ MINIMAX_IMAGE_ENDPOINTS = [
 
 
 def _minimax_image_call(prompt, *, n=1, size="1024x1024", model="image-01",
-                       timeout=45, sid=None):
+    timeout=120, sid=None, reference=None):
     """Call MiniMax image API with per-key retry + per-attempt timeout.
 
     Endpoint shape: POST {base}/v1/image_generation
@@ -417,6 +492,16 @@ def _minimax_image_call(prompt, *, n=1, size="1024x1024", model="image-01",
     elif size in ("1024x1536", "1024*1536"): aspect = "9:16"
     else: aspect = "1:1"
     body = {"model": model, "prompt": prompt, "aspect_ratio": aspect, "n": n}
+    # subject_reference turns MiniMax into a real image-to-image provider:
+    # the picture becomes the subject the prompt keeps describing.  The
+    # reference has to be a small base64 image, so it is downscaled first.
+    if reference:
+        small = _prepare_reference(reference)
+        if small:
+            body["subject_reference"] = [
+                {"type": "character",
+                 "image_file": "data:image/jpeg;base64," + base64.b64encode(small).decode()},
+            ]
     data = json.dumps(body).encode("utf-8")
     n_keys = len(MINIMAX_IMAGE_KEYS)
     for ki, key in enumerate(MINIMAX_IMAGE_KEYS):
@@ -511,7 +596,7 @@ def _try_minimax_image(prompts, size, sid=None):
             _pg.Progress(sid, "previews").emit(
                 f"minimax-{i+1}/{n_total}", int(i / n_total * 90),
                 f"正在生成第 {i+1}/{n_total} 张预览…")
-        res = _minimax_image_call(p, n=1, size=size, timeout=60, sid=sid)
+        res = _minimax_image_call(p, n=1, size=size, timeout=150, sid=sid)
         if not res:
             return (None, f"minimax#fail{i+1}")
         return (res[0], f"minimax#{i+1}")
@@ -547,7 +632,7 @@ def _try_aixj_image(prompts, size, sid=None, deadline=None):
             _pg.Progress(sid, "previews").emit(
                 f"aixj-{i+1}/{n_total}", int(i / n_total * 90),
                 f"正在生成第 {i+1}/{n_total} 张预览…")
-        res = _aixj_image_call(p, n=1, size=size, timeout=90, sid=sid)
+        res = _aixj_image_call(p, n=1, size=size, timeout=150, sid=sid)
         if not res:
             # transient TLS handshake timeouts happen under concurrency;
             # one retry usually succeeds.  The retry is skipped once the
@@ -558,7 +643,7 @@ def _try_aixj_image(prompts, size, sid=None, deadline=None):
                 print(f"[api_image] aixj prompt {i+1} failed, no budget left for a retry")
                 return (None, f"aixj#fail{i+1}")
             print(f"[api_image] aixj prompt {i+1} failed, retrying once")
-            res = _aixj_image_call(p, n=1, size=size, timeout=90, sid=sid)
+            res = _aixj_image_call(p, n=1, size=size, timeout=150, sid=sid)
         if not res:
             return (None, f"aixj#fail{i+1}")
         return (res[0], f"aixj#{i+1}")
@@ -630,15 +715,15 @@ def _provider_chain(prefer: str) -> list:
     service that is configured and healthy wins, the rest are the automatic
     backup -- the visitor never has to pick a model.
 
-    The default primary is MiniMax: two keys, a clean product render and
-    roughly 18 seconds for four images.  AIXJ (gpt-image-2) makes prettier
-    lifestyle shots but needs a minute or more, and AIXJ's own gateway only
-    tolerates a couple of parallel calls, which used to be the reason a
-    preview "failed" in front of the audience.
+    The default primary is AIXJ (gpt-image-2): the product renders it makes
+    are markedly better, and the four prompts are sent in parallel so the
+    wait is roughly the same as one call.  MiniMax is the backup -- it has
+    two keys and answers in seconds -- and jojo / local-sd are the last
+    resorts.  Set ``YXZ_IMAGE_PRIMARY`` to change the order.
     """
     primary = (os.environ.get("YXZ_IMAGE_PRIMARY", "") or "").strip().lower()
     if primary not in ("aixj", "minimax", "jojo"):
-        primary = "minimax"
+        primary = "aixj"
 
     if prefer in ("auto", "api", "image", "online", ""):
         order = [primary]
@@ -794,18 +879,32 @@ def _build_multipart(fields: dict, image_bytes: bytes, filename: str) -> tuple[b
 def refine_preview(reference: bytes, instruction: str, *, sid=None, timeout=150.0):
     """Edit an existing preview image following a Chinese instruction.
 
-    Chain: AIXJ gpt-image-2 /images/edits (multipart reference image) ->
-    per-key retry -> None if everything fails. MiniMax image-01 has no
-    reference-editing endpoint, so this provider is not part of the chain.
+    Chain: MiniMax image-01 with ``subject_reference`` -> AIXJ gpt-image-2
+    ``/images/edits`` -> None if everything fails.
 
     Returns (png_bytes, tag) or raises RuntimeError with a readable message.
     """
     if not instruction.strip():
         raise RuntimeError("修改指令不能为空")
-    if not AIXJ_IMAGE_KEYS:
+    if not AIXJ_IMAGE_KEYS and not MINIMAX_IMAGE_KEYS:
         raise RuntimeError("没有可用的生图服务（aixj 图片 key 未配置）")
 
     prompt = instruction.strip()
+
+    # MiniMax keeps the picture as the subject of the new design.
+    if MINIMAX_IMAGE_KEYS:
+        try:
+            out = _minimax_image_call(
+                prompt, n=1, size="1024x1024", timeout=150, sid=sid,
+                reference=reference,
+            )
+            if out:
+                if sid:
+                    _pg.Progress(sid, "previews").emit("refine-done", 100, "AI 已按批注修改完成")
+                return out[0], "minimax-image-ref"
+        except Exception as e:
+            print(f"[api_image] minimax refine failed: {e}", flush=True)
+
     n_keys = len(AIXJ_IMAGE_KEYS)
     last_err = "aixj 生图服务暂时不可用"
     for ki, key in enumerate(AIXJ_IMAGE_KEYS):
@@ -815,30 +914,41 @@ def refine_preview(reference: bytes, instruction: str, *, sid=None, timeout=150.
             _pg.Progress(sid, "previews").emit(
                 "refine-trying", 8, "AI 正在按批注修改设计稿…")
         try:
-            body, boundary = _build_multipart(
-                {"model": AIXJ_IMAGE_MODEL, "prompt": prompt},
-                reference, "refined.png",
-            )
+            small = _prepare_reference(reference) or reference
+            body = json.dumps({
+                "model": AIXJ_IMAGE_MODEL,
+                "prompt": prompt,
+                "size": "1024x1024",
+                "response_format": "b64_json",
+                "images": [{
+                    "image_url": "data:image/jpeg;base64,"
+                                + base64.b64encode(small).decode(),
+                }],
+            }).encode("utf-8")
             req = urllib.request.Request(
                 AIXJ_BASE + "/images/edits",
                 data=body, method="POST",
                 headers={
                     "Authorization": "Bearer " + key,
-                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                    "Content-Type": "application/json",
                 },
             )
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 payload = json.loads(r.read().decode("utf-8", "ignore"))
-            urls = [item.get("url") for item in payload.get("data") or [] if item.get("url")]
-            if not urls:
+            out = None
+            for item in payload.get("data") or []:
+                if item.get("b64_json"):
+                    out = base64.b64decode(item["b64_json"])
+                    break
+                url = item.get("url")
+                if url:
+                    blob = _download_with_retry(url, ua=_DL_UA, timeout=30.0)
+                    if blob:
+                        out = blob
+                        break
+            if not out:
                 last_err = f"aixj key {ki+1}/{n_keys} 未返回图片"
                 continue
-            out = None
-            for url in urls:
-                blob = _download_with_retry(url, ua=_DL_UA, timeout=30.0)
-                if blob:
-                    out = blob
-                    break
             if out:
                 if sid:
                     _pg.Progress(sid, "previews").emit("refine-done", 100, "AI 已按批注修改完成")
@@ -862,6 +972,131 @@ def refine_preview(reference: bytes, instruction: str, *, sid=None, timeout=150.
             last_err = f"aixj key {ki+1}/{n_keys} {type(e).__name__}: {str(e)[:160]}"
             print(f"[api_image] {last_err}", flush=True)
     raise RuntimeError(last_err)
+
+
+def edit_previews(reference: bytes, prompts, *, sid=None, timeout=120.0):
+    """Turn one uploaded picture into several product views.
+
+    The picture is the shape reference and the prompt says what the visitor
+    wants done with it ("make it a blue robot lamp" and so on).
+
+    Two routes can keep the picture:
+      1. MiniMax ``image-01`` with ``subject_reference`` -- the picture is
+         the subject and the prompt says what should become of it.
+      2. AIXJ ``/images/edits`` -- the relay wants a JSON body with
+         ``images: [{"image_url": ...}]``, not a multipart upload.
+
+    Whichever route answers first wins; a provider that fails leaves its
+    slot empty so the caller can still fall back to plain rendering.
+
+    Returns a list of ``(png_bytes_or_None, tag)``, one per prompt.
+    """
+    if not reference:
+        raise RuntimeError("没有参考图片")
+    prompts = list(prompts or [])
+    if not prompts:
+        raise RuntimeError("没有生成提示词")
+
+    results = []
+    last_err = "图生图服务暂时不可用"
+    for pi, prompt in enumerate(prompts):
+        if sid:
+            _pg.Progress(sid, "previews").emit(
+                "edit-trying", 8 + pi * 8, f"正在按你的图片生成第 {pi + 1}/{len(prompts)} 张设计稿…")
+        blob = None
+        tag = "image-to-image-fail"
+
+        # -- route 1: MiniMax subject_reference -------------------------
+        if MINIMAX_IMAGE_KEYS:
+            try:
+                out = _minimax_image_call(
+                    # Image generation with a reference picture takes
+                    # noticeably longer than a plain one (the reference is
+                    # uploaded and re-rendered): 60s was short enough to
+                    # time out on a busy link and throw away a picture
+                    # that was about to arrive.
+                    prompt, n=1, size="1024x1024", timeout=150, sid=sid,
+                    reference=reference,
+                )
+                if out:
+                    blob = out[0]
+                    tag = "minimax-image-ref"
+            except Exception as e:
+                print(f"[api_image] minimax subject_reference failed: {e}", flush=True)
+
+        # -- route 2: AIXJ /images/edits -------------------------------
+        if blob:
+            results.append((blob, tag))
+            continue
+
+        n_keys = len(AIXJ_IMAGE_KEYS)
+        for ki, key in enumerate(AIXJ_IMAGE_KEYS):
+            if key in _AIXJ_DEAD_KEYS:
+                continue
+            try:
+                small = _prepare_reference(reference) or reference
+                body = json.dumps({
+                    "model": AIXJ_IMAGE_MODEL,
+                    "prompt": prompt,
+                    "size": "1024x1024",
+                    "response_format": "b64_json",
+                    "images": [{
+                        "image_url": "data:image/jpeg;base64,"
+                                    + base64.b64encode(small).decode(),
+                    }],
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    AIXJ_BASE + "/images/edits",
+                    data=body, method="POST",
+                    headers={
+                        "Authorization": "Bearer " + key,
+                        "Content-Type": "application/json",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    payload = json.loads(r.read().decode("utf-8", "ignore"))
+                for item in payload.get("data") or []:
+                    if item.get("b64_json"):
+                        blob = base64.b64decode(item["b64_json"])
+                        tag = "aixj-image"
+                        break
+                    url = item.get("url")
+                    if url:
+                        data = _download_with_retry(url, ua=_DL_UA, timeout=30.0)
+                        if data:
+                            blob = data
+                            tag = "aixj-image"
+                            break
+                if blob:
+                    break
+                last_err = f"aixj key {ki+1}/{n_keys} 未返回图片"
+            except urllib.error.HTTPError as e:
+                try:
+                    err = e.read().decode("utf-8", "ignore")
+                except Exception:
+                    err = str(e.reason)
+                low = err.lower()
+                # Only a quota / auth problem kills the key.  The relay also
+                # answers "invalid" for a payload it does not like (it
+                # wants a public image URL, not a data URL), and that has
+                # nothing to do with the key being usable for plain
+                # generation -- blacklisting it there took the whole image
+                # service down for the rest of the session.
+                if e.code in (401, 402, 403) or any(
+                    x in low for x in ("quota", "balance", "insufficient")
+                ):
+                    _AIXJ_DEAD_KEYS.add(key)
+                    print(f"[api_image] edit key {ki+1}/{n_keys} DEAD (HTTP {e.code}): {err[:120]}", flush=True)
+                    continue
+                last_err = f"aixj key {ki+1}/{n_keys} HTTP {e.code}: {err[:160]}"
+                print(f"[api_image] {last_err}", flush=True)
+            except Exception as e:
+                last_err = f"aixj key {ki+1}/{n_keys} {type(e).__name__}: {str(e)[:160]}"
+                print(f"[api_image] {last_err}", flush=True)
+        results.append((blob, tag))
+    if all(blob is None for blob, _ in results):
+        raise RuntimeError(last_err)
+    return results
 
 
 if __name__ == "__main__":

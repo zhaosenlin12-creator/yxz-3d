@@ -105,9 +105,17 @@ def main() -> int:
                 "instruct": "温暖、活泼、亲切，带一点可爱的卡通感，语速自然，像宜小智在和用户面对面交流。",
             },
             # Free Microsoft Edge neural voices. The synthesis happens in the
-            # local backend, so the frontend only needs the backend address.
+            # local backend.
+            #
+            # No baseUrl on purpose: the frontend resolves it at runtime from
+            # VITE_CARTOON_PRINT_API, which carries the port the backend
+            # actually got on this machine (8100, or 8101/8102 when another
+            # program holds 8100). A hardcoded port here meant the free
+            # fallback pointed at a dead port as soon as the machine was not
+            # the one the seed was written on -- and it also broke for
+            # visitors on the local network, who must go through the
+            # frontend's own /api proxy.
             "edge-tts-free": {
-                "baseUrl": "http://127.0.0.1:8000",
                 "model": "edge-tts",
                 "voice": "zh-CN-XiaoxiaoNeural",
                 "rate": "+0%",
@@ -116,7 +124,7 @@ def main() -> int:
             },
         },
         "activeProvider": "minimax",
-        "activeModel": "MiniMax-M2.7",
+        "activeModel": "MiniMax-M3",
         "speech": {
             # MiniMax is the primary voice: it has the fullest Chinese voice
             # pack and the narration quality the 宜小智 videos rely on. The

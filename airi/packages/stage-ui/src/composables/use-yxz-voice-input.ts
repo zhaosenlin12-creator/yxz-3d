@@ -168,7 +168,12 @@ export function useYXZVoiceInput(options: YXZVoiceInputOptions = {}) {
     if (state.value === 'recording')
       return true
     if (!supported()) {
-      fail('当前浏览器不支持录音，请用 Chrome 或 Edge 打开本页')
+      // 局域网 http:// 访问时浏览器不给 mediaDevices（不是安全上下文），
+      // 这时候要说清楚真实原因，别让用户以为是浏览器不支持。
+      const insecure = typeof window !== 'undefined' && window.isSecureContext === false
+      fail(insecure
+        ? '浏览器只在 https 或本机地址下允许录音；在局域网用 http:// 打开时不能录音，请用文字输入，或改用 https 打开本页'
+        : '当前浏览器不支持录音，请用 Chrome 或 Edge 打开本页')
       return false
     }
 

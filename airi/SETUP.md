@@ -138,7 +138,7 @@ Wait for:
 
 1. **Settings → Models / Chat**.
 2. Set **Active provider** = `MiniMax` (or `MiniMax Global`).
-3. Set **Active model** to one of the suggested ones (e.g. `MiniMax-M2.7` or `MiniMax-M2.5`).
+3. Set **Active model** to one of the suggested ones (e.g. `MiniMax-M3` or `MiniMax-M2.5`).
 4. Save. Send a message from the main page to verify.
 
 ---

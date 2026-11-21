@@ -290,13 +290,19 @@ def store_edited_preview(session_id: str, image_index: int, custom_image: Option
 
 
 @app.post("/api/upload-image", status_code=201)
-async def upload_image(image: UploadFile = File(...), source: str = Form("camera")):
+async def upload_image(image: UploadFile = File(...), source: str = Form("camera"),
+                       prompt: str = Form("")):
     """Accept a camera / picker image, keep it as the session preview and describe it.
 
     The picture is stored as ``previews/img_0.png`` inside a fresh session so
     the existing preview -> 3D pipeline can reuse it directly. The returned
     description pre-fills the chat input; when no vision provider answers the
     caller still gets a usable factual description.
+
+    ``prompt`` is what the visitor already typed.  When it is there the
+    description is written against that wish ("this photo but as a robot
+    lamp") instead of a generic caption, so the picture and the request are
+    understood together.
     """
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(415, "只支持上传图片文件")
@@ -327,9 +333,18 @@ async def upload_image(image: UploadFile = File(...), source: str = Form("camera
     try:
         with open(img_path, "rb") as handle:
             img_base64 = base64.b64encode(handle.read()).decode()
-        vision_prompt = (
-            "请用一句话描述这张图片的主要内容，重点说明适合制作什么样的创意作品，控制在20字以内。"
-        )
+        wish = (prompt or "").strip()
+        if wish:
+            vision_prompt = (
+                "用户上传了一张图片，并希望："
+                + wish[:600]
+                + "。请用一句话说明这张图片的内容，以及它适合怎么改造成用户想要的作品，"
+                "控制在30字以内，不要输出多余解释。"
+            )
+        else:
+            vision_prompt = (
+                "请用一句话描述这张图片的主要内容，重点说明适合制作什么样的创意作品，控制在20字以内。"
+            )
         reply = llm_client.vision_chat(vision_prompt, img_base64)
         if reply:
             description = reply.strip()
@@ -513,6 +528,13 @@ class PreviewsReq(BaseModel):
     # Inlining four 1024x1024 PNGs as base64 makes the response ~10 MB.
     # The chat flow only ever uses the `path`, so the bytes are opt-in.
     include_b64: bool = False
+
+class PreviewsFromImageReq(BaseModel):
+    """按访客上传的那张照片出预览图。"""
+    session_id: str
+    prompt: str
+    n: int = 4
+    prefer: str = "auto"
 
 class RefineReq(BaseModel):
     """按批注修改一版：把带批注的预览图 + 指令发给 AI 图片编辑模型。"""
@@ -1113,40 +1135,127 @@ def get_progress(sid: str, since: float = 0.0):
     events = progress.read(sid, since_ts=since)
     latest = events[-1] if events else progress.latest(sid)
     return {"sid": sid, "events": events, "latest": latest}
-def _english_render_prompt(text: str) -> str:
+def _english_render_prompt(text: str, *, keep_change: bool = False) -> str:
     """Cloud image models draw Chinese glyphs as gibberish posters.
 
     Translate the product idea into one English sentence first.  If the LLM is
     unavailable, fall back to a keyword-derived English phrase rather than
     sending Chinese to the image model.
+
+    ``keep_change`` is for the picture-upload flow: there the visitor asks
+    for a *change* ("turn this robot into a lamp"), and the default wording
+    ("describe only the object's shape, material, colors and style") would
+    drop the change and the picture would come back unchanged.  In that mode
+    the request is rewritten so the transformation survives.
     """
     if not any("\u4e00" <= c <= "\u9fff" for c in text):
         return text
     try:
-        out = llm_client.llm_call(
-            "Translate the following product idea into ONE concise English sentence "
-            "for an image model. Describe only the object's shape, material, colors "
-            "and style. Output English only, no quotes, no explanation, no Chinese.\n"
-            f"Idea: {text}", timeout=18,
-        )
+        if keep_change:
+            system = (
+                "You rewrite product requests into short English prompts for an image model. "
+                "Answer with the prompt text only -- no JSON, no quotes, no explanation."
+            )
+            instruction = (
+                "Rewrite the following request for an image model that will also receive "
+                "a reference picture. Write exactly two short sentences. The first says "
+                "what the result must become, naming the new shape, material and colors "
+                "in concrete words. The second says which parts of the reference must stay "
+                "identical (character, proportions, pose, colors). Do not use abstract "
+                "words like 'transform' or 'ornament'. "
+                "Output English only, no quotes, no explanation, no Chinese.\n"
+                f"Request: {text}"
+            )
+        else:
+            system = (
+                "You translate product ideas into short English prompts for an image model. "
+                "Answer with the prompt text only -- no JSON, no quotes, no explanation."
+            )
+            instruction = (
+                "Translate the following product idea into ONE concise English sentence "
+                "for an image model. Describe only the object's shape, material, colors "
+                "and style. Output English only, no quotes, no explanation, no Chinese.\n"
+                f"Idea: {text}"
+            )
+        # llm_call returns (text, provider) -- unwrap it before cleaning.
+        out, _provider = llm_client.llm_call(instruction, timeout=30, system=system)
         if out:
-            line = out.strip().splitlines()[0].strip().strip('"').strip("'")
+            line = _clean_english_prompt(out)
             if line and not any("\u4e00" <= c <= "\u9fff" for c in line):
                 return line
     except Exception:
         pass
     p = text.lower()
+    fallback = ""
     if any(k in p for k in ("齿轮", "徽章", "badge", "gear")):
-        return ("A round gear badge with a glowing gear at the center, thick rim, "
-                "metallic and translucent blue materials, cute product design")
-    if any(k in p for k in ("机器人", "robot", "宇航", "太空")):
-        return ("A cute white astronaut robot figurine, round helmet with glowing blue "
-                "visor, small wings, glossy plastic and metal, product design")
-    if any(k in p for k in ("太阳系", "行星", "planet", "宇宙")):
-        return ("A miniature solar system model with a glowing sun and eight colorful "
-                "planets on thin orbit rings, clean educational product design")
-    return ("A cute educational desktop object, rounded shapes, blue and white palette, "
-            "clean product design")
+        fallback = ("A round gear badge with a glowing gear at the center, thick rim, "
+                    "metallic and translucent blue materials, cute product design")
+    elif any(k in p for k in ("机器人", "robot", "宇航", "太空")):
+        fallback = ("A cute white astronaut robot figurine, round helmet with glowing blue "
+                    "visor, small wings, glossy plastic and metal, product design")
+    elif any(k in p for k in ("太阳系", "行星", "planet", "宇宙")):
+        fallback = ("A miniature solar system model with a glowing sun and eight colorful "
+                    "planets on thin orbit rings, clean educational product design")
+    else:
+        fallback = ("A cute educational desktop object, rounded shapes, blue and white palette, "
+                    "clean product design")
+    if keep_change:
+        # The visitor uploaded a picture and asked for a change: say so, so
+        # the image model still treats the picture as the starting point.
+        fallback = ("Transform the object in the reference picture as requested. " + fallback)
+    return fallback
+
+
+def _clean_english_prompt(reply: str) -> str:
+    """Turn whatever the LLM answered into one plain English prompt line.
+
+    Models answer in many shapes: bare text, a JSON object, a JSON object
+    with a "sentence" field, or text wrapped in a <think> block.  The image
+    model should only see the prompt itself, so everything around it is
+    peeled off here.
+    """
+    if not reply:
+        return ""
+    text = reply.strip()
+    # Reasoning models wrap their answer in <think>...</think>.
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1].strip()
+    if text.startswith("<think>"):
+        text = text.split("</think>", 1)[-1].strip()
+    if not text:
+        return ""
+
+    # JSON answers: take the longest string value inside.
+    if text.startswith("{") or text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            best = ""
+            for value in parsed.values():
+                if isinstance(value, str) and len(value) > len(best):
+                    best = value
+            text = best or ""
+        elif isinstance(parsed, list):
+            best = ""
+            for value in parsed:
+                if isinstance(value, str) and len(value) > len(best):
+                    best = value
+            text = best or ""
+
+    # One line, no wrapping quotes, no markdown.
+    text = text.strip().splitlines()[0] if text.strip() else ""
+    text = text.strip().strip('"').strip("'").strip()
+    text = text.strip("*").strip()
+    # Curly quotes and dashes confuse some image models -- make them plain.
+    for fancy, plain in (("\u2019", "'"), ("\u2018", "'"), ("\u201c", '"'),
+                         ("\u201d", '"'), ("\u2014", "-"), ("\u2013", "-"),
+                         ("\u00a0", " ")):
+        text = text.replace(fancy, plain)
+    if text.lower().startswith(("prompt:", "sentence:", "answer:")):
+        text = text.split(":", 1)[1].strip()
+    return text.strip()
 
 
 @app.post("/api/previews")
@@ -1205,7 +1314,15 @@ def previews(req: PreviewsReq):
             )
         )
         try:
-            src, results = future.result(timeout=max(30.0, float(os.environ.get("BLUEAI_PREVIEW_TIMEOUT", "90"))))
+            # The cloud chain budgets itself for 240s (see
+            # api_image.generate_previews) and four AIXJ renders routinely
+            # take 80-150s.  The old 90s outer wait gave up first and threw
+            # away perfectly good renders, dropping the visitor onto the
+            # flat "本地概念稿" placeholder -- which is exactly the
+            # "预览质量很低 / 预览不出来" that kept coming back.
+            # Wait long enough for the inner budget instead of racing it.
+            preview_wait = float(os.environ.get("BLUEAI_PREVIEW_TIMEOUT", "300") or 300)
+            src, results = future.result(timeout=max(60.0, preview_wait))
         except FutureTimeout:
             print("[previews] cloud image timed out; keeping the local concept fallback", flush=True)
             src, results = [], []
@@ -1251,6 +1368,118 @@ def previews(req: PreviewsReq):
     with open(os.path.join(sd, "prompt.txt"), "w", encoding="utf-8") as f:
         f.write(req.prompt)
     return {"session_id": sid, "previews": items, "prompt": req.prompt, "source": src}
+
+
+@app.post("/api/previews/from-image")
+def previews_from_image(req: PreviewsFromImageReq):
+    """Make product previews that follow the picture the visitor uploaded.
+
+    The uploaded picture is the shape reference; the prompt says what should
+    become of it.  Image-to-image (AIXJ images/edits) is used when the
+    provider supports it.  When it does not, the chain falls back to plain
+    rendering with the same prompt -- the picture has already been described
+    by the vision model, so the result still follows it -- and finally to the
+    local concept board.  The visitor always gets something to look at.
+
+    The generated pictures are written next to the upload as ``img_1`` ..
+    ``img_n`` so the 3D step can pick them with the usual image index.
+    """
+    if not req.prompt.strip():
+        raise HTTPException(400, "请说说你想要什么")
+    sid = req.session_id or uuid.uuid4().hex[:12]
+    sd = session_dir(sid)
+    pdir = os.path.join(sd, "previews")
+    os.makedirs(pdir, exist_ok=True)
+    ref_path = os.path.join(pdir, "img_0.png")
+    if not os.path.isfile(ref_path):
+        raise HTTPException(404, "没有找到你上传的图片，请重新上传一次")
+    with open(ref_path, "rb") as handle:
+        reference = handle.read()
+
+    pg = progress.Progress(sid, "previews")
+    n = max(1, min(int(req.n or 4), 4))
+    render_prompt = _english_render_prompt(req.prompt.strip(), keep_change=True)
+    if "reference" not in render_prompt.lower():
+        render_prompt = (
+            "Keep the same character, proportions, pose and colors as the reference picture. "
+            + render_prompt
+        )
+    # The reference is a 3D toy render, so the output is asked for as a 3D
+    # product photo -- "photorealistic" would push it away from the design.
+    render_prompt += (
+        ". 3D product photo of the same design, single object centered,"
+        " plain white background, soft studio lighting, no text, no letters"
+    )
+    # Four viewpoints of the SAME design.  The colours must not change here:
+    # a different colourway would drift away from the uploaded picture.
+    variants = [
+        "Front view.",
+        "Three-quarter view, slight perspective.",
+        "Close-up of the center, shallow depth of field.",
+        "Same design and colors, slightly different soft lighting.",
+    ]
+    prompts = [f"{render_prompt} {variants[i % len(variants)]}" for i in range(n)]
+
+    items = []
+    source = "aixj-image"
+
+    def _store(blob, tag, index, src_label):
+        if not blob:
+            return None
+        path = os.path.join(pdir, f"img_{index}.png")
+        with open(path, "wb") as handle:
+            handle.write(blob)
+        return {
+            "index": index, "seed": index, "tag": tag, "source": src_label,
+            "path": f"/api/data/{sid}/previews/img_{index}.png",
+        }
+
+    try:
+        edited = api_image.edit_previews(reference, prompts, sid=sid)
+        for i, (blob, tag) in enumerate(edited):
+            item = _store(blob, tag, i + 1, tag if tag and "fail" not in tag else "aixj-image")
+            if item:
+                items.append(item)
+                source = tag if tag and "fail" not in tag else source
+    except Exception as e:
+        print(f"[previews/from-image] image-to-image failed: {e}", flush=True)
+
+    if not items:
+        # 图生图这条路走不通，就用同一段提示词纯文字渲染：图片已经被识图
+        # 模型描述过，结果照样贴合访客想要的东西。
+        print("[previews/from-image] falling back to text rendering", flush=True)
+        try:
+            src, results = api_image.generate_previews(
+                prompts, prefer=req.prefer or "auto", size="1024x1024", sid=sid,
+            )
+            source = src
+            for i, (blob, tag) in enumerate(results):
+                item = _store(blob, tag, i + 1, src)
+                if item:
+                    items.append(item)
+        except Exception as e:
+            print(f"[previews/from-image] text rendering failed: {e}", flush=True)
+
+    if not items:
+        print("[previews/from-image] using the local concept board", flush=True)
+        try:
+            src, results = local_preview.render_previews(req.prompt, pdir, n)
+            source = src
+            for i, (blob, tag) in enumerate(results):
+                item = _store(blob, tag, i + 1, src)
+                if item:
+                    items.append(item)
+        except Exception:
+            traceback.print_exc()
+
+    if not items:
+        pg.fail("这次没能生成出预览图，请再试一次")
+        raise HTTPException(500, "这次没能生成出预览图，请再试一次")
+
+    pg.done(f"已按你的图片生成 {len(items)} 张设计稿")
+    with open(os.path.join(sd, "prompt.txt"), "w", encoding="utf-8") as f:
+        f.write(req.prompt)
+    return {"session_id": sid, "previews": items, "prompt": req.prompt, "source": source}
 
 @app.post("/api/refine")
 def refine_preview_endpoint(req: RefineReq):
@@ -1313,34 +1542,25 @@ def refine_preview_endpoint(req: RefineReq):
 
 @app.post("/api/3d")
 def to_3d(req: ThreeDReq):
-    pg = _new_progress(req.session_id, "3d-triposr", reset=True)
-    os.environ["PROGRESS_SID"] = req.session_id
-    pg.emit("preprocess", 10, "正在处理你的设计稿…", "queued")
-    sd = session_dir(req.session_id)
-    src = resolve_source_png(req.session_id, req.image_index, req.source_png)
-    out = os.path.join(sd, "model")
-    os.makedirs(out, exist_ok=True)
-    try:
-        info = mesh_isolation.run_local_mesh(
-            "triposr", src, out, log_dir=os.path.join(DATA, "logs")
-        )
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(500, "这次没能生成出模型，请再试一次")
-    # Re-export cleaned mesh (single connected body, flat base on z=0).
-    try:
-        import trimesh
-        cleaned = trimesh.load(info["stl"], force="mesh")
-        cleaned = mesh_postprocess.clean_for_print(cleaned, add_base=True)
-        cleaned.export(info["stl"])
-        cleaned.export(info["obj"])
-        mesh_postprocess.export_view_glb(cleaned, info["glb"])
-        info["vertices"] = len(cleaned.vertices)
-        info["faces"] = len(cleaned.faces)
-        info["extents_mm"] = cleaned.extents.tolist()
-    except Exception as e:
-        print(f"[postprocess] clean_for_print skipped: {e}", flush=True)
-    return {"session_id": req.session_id, **info, "model_url": f"/api/data/{req.session_id}/model/mesh.glb"}
+    """Legacy entry point -- same engine chain as /api/3d_build.
+
+    It used to drive the local TripoSR worker only, so on a machine
+    without torch it answered "no usable engine" even though Tripo and
+    Hunyuan were sitting there with working keys.  Now it walks the very
+    same chain, so every caller gets the automatic switch-over.
+    """
+    result = to_3d_build(ThreeDBuildReq(
+        session_id=req.session_id,
+        image_index=req.image_index,
+        source_png=req.source_png,
+    ))
+    out = dict(result)
+    # Keep the old key names working for callers that still read them.
+    out.setdefault("stl", result.get("stl_url"))
+    out.setdefault("obj", result.get("obj_url"))
+    out.setdefault("glb", result.get("model_url"))
+    out["model_url"] = result.get("model_url")
+    return out
 class ThreeDCartoonReq(BaseModel):
     session_id: str
     image_index: int = 0
@@ -1793,6 +2013,21 @@ def to_3d_tripo(req: ThreeDTripoReq):
     # visitor for seconds whenever the provider is slow, which is exactly
     # the "卡住" the workbench must never show.
     bal = _cached_tripo_balance()
+    if bal is None:
+        # The cache was cold: the balance is UNKNOWN, not zero.  Asking
+        # for it now costs one small request and decides whether the
+        # model comes back painted or as bare grey geometry -- which is
+        # exactly the difference between a toy and a shell.  The old
+        # code read "unknown" as "no credits" and silently asked Tripo
+        # for an untextured model even though the account had more than
+        # a thousand credits waiting.
+        try:
+            bal = tripo_api.get_balance(timeout=10.0, retries=0)
+            if isinstance(bal, dict) and bal.get("ok"):
+                _BALANCE_CACHE["value"] = bal
+                _BALANCE_CACHE["ts"] = time.time()
+        except Exception as e:
+            print(f"[tripo3d] balance lookup failed: {e}", flush=True)
     # 额度可能暂时查不到（后台探针还没跑完）。这时它是「未知」，不是 0，
     # 更不能是「没定义」—— 之前这里没给默认值，模型生成成功之后组装
     # 响应时直接抛 UnboundLocalError，整个请求变成 500，前端只好换到
@@ -1815,11 +2050,17 @@ def to_3d_tripo(req: ThreeDTripoReq):
     os.makedirs(out, exist_ok=True)
 
     # Tripo charges extra for texture/PBR and refuses the task when the
-    # balance cannot cover it.  Geometry alone is what a 3D print needs, so
-    # paint only when the balance is clearly enough and known.
-    want_texture = credits is not None and credits >= 30
+    # balance cannot cover it.  Geometry alone is what a 3D print needs,
+    # but an unpainted shell is not what the visitor asked for, so the
+    # textured model is the default.
+    #
+    # Unknown balance -> ask for the textured model anyway.  Tripo refuses
+    # the job itself when the account cannot pay for the texture, and the
+    # engine chain then moves on to the next provider.  Guessing "no
+    # credits" instead produced the cheap grey shell everybody saw.
+    want_texture = credits is None or credits >= 30
     if not want_texture:
-        pg.emit("no-texture", 8, "额度有限，先生成可打印的立体结构（不上色）", "queued")
+        pg.emit("no-texture", 8, "额度不够上色，先生成可打印的立体结构", "queued")
 
     def on_poll(t):
         try:
@@ -1981,6 +2222,18 @@ def to_3d_hycloud(req: ThreeDHYCloudReq):
         )
     except Exception as e:
         traceback.print_exc()
+        raw = str(e)
+        # An account that ran out of money is a quota problem, not a
+        # broken provider.  Saying so lets the shared breaker park this
+        # engine for a while instead of letting every visitor wait for
+        # the same failing call.
+        if ("InArrears" in raw or "ResourceUnavailable" in raw
+                or "余额" in raw or "欠费" in raw
+                or "quota" in raw.lower() or "arrears" in raw.lower()):
+            pg.fail("混元3D 云端额度暂时用完了，正在换一条通道")
+            print(f"[3d_build] hunyuan3d is out of credits: {raw[:160]}", flush=True)
+            raise HTTPException(402, {"error": "混元3D 云端额度暂时用完了",
+                                      "engine": "hunyuan3d-cloud"})
         pg.fail(f"这次没能生成出模型，请再试一次（{e}）")
         raise HTTPException(500, {"error": "这次没能生成出模型，请再试一次"})
     faces = int(result.get("faces", 0))
@@ -2013,6 +2266,9 @@ class ThreeDBuildReq(BaseModel):
     # The visitor's edited preview, as a data URL.  It is stored next to
     # the original preview and every engine builds from that file.
     custom_image: Optional[str] = None
+    # A file name inside the session's preview folder.  Used by the
+    # legacy /api/3d entry point, which has no data URL to hand over.
+    source_png: Optional[str] = None
     target_height_mm: float = 70.0
 
 
@@ -2097,6 +2353,8 @@ def to_3d_build(req: ThreeDBuildReq):
     """
     session_dir(req.session_id)
     source_name = store_edited_preview(req.session_id, req.image_index, req.custom_image)
+    if not source_name:
+        source_name = req.source_png
     # Every engine needs the picture: without it the whole chain would
     # fail one after another with a confusing error.
     resolve_source_png(req.session_id, req.image_index, source_name)
@@ -2104,6 +2362,9 @@ def to_3d_build(req: ThreeDBuildReq):
     attempts: List[Dict[str, Any]] = []
     last_error: Optional[str] = None
     last_status = 500
+    # A model without colour is kept aside instead of being returned
+    # right away: if a painted engine can still run, it should.
+    untextured_fallback: Optional[Dict[str, Any]] = None
     pg = _new_progress(req.session_id, "3d-build", reset=True)
     pg.emit("queued", 2, "已经收到你的方案，马上开始制作…", "queued")
 
@@ -2182,12 +2443,34 @@ def to_3d_build(req: ThreeDBuildReq):
                     if not provider.startswith("local-"):
                         provider_health.report_success(provider)
                     result = dict(payload)
+                    # An untextured model is a fallback, not a finished
+                    # product: a grey shell is what the visitor complained
+                    # about.  Keep it as a safety net, but keep walking the
+                    # chain so a painted engine (Hunyuan) can still win.
+                    if result.get("textured") is False and index + 1 < len(_BUILD_ENGINES):
+                        attempts.append({"engine": key, "ok": True,
+                                         "note": "untextured, trying a painted engine"})
+                        print(f"[3d_build] {key} came back untextured, "
+                              f"trying the next engine", flush=True)
+                        untextured_fallback = result
+                        continue
                     result["engine_chain"] = attempts + [{"engine": key, "ok": True}]
                     print(f"[3d_build] done with {key} in "
                           f"{result.get('elapsed_s', 0)}s", flush=True)
                     return result
     finally:
         _PROGRESS_RESET.reset = True
+
+    if untextured_fallback is not None:
+        # Every painted engine was out of reach, but a printable model
+        # does exist.  Hand it over instead of failing outright.
+        result = dict(untextured_fallback)
+        result["engine_chain"] = attempts + [{"engine": result.get("engine", "?"),
+                                              "ok": True, "note": "untextured"}]
+        print(f"[3d_build] falling back to the untextured model from "
+              f"{result.get('engine')}", flush=True)
+        pg.done("3D 模型已经做好啦")
+        return result
 
     pg.fail("这次没能生成出模型，请再试一次")
     raise HTTPException(last_status if last_status >= 400 else 500,
@@ -2505,7 +2788,7 @@ def laser_design(req: LaserDesignReq):
     )
     fallback = _laser_design_fallback(description, req.theme, req.accent)
     try:
-        llm_result = llm_client.llm_call(prompt, timeout=25)
+        llm_result = llm_client.llm_call(prompt, timeout=35)
     except Exception:
         return fallback
     if not llm_result or not llm_result[0]:

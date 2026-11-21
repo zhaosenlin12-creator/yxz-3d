@@ -1,6 +1,7 @@
+import { shortId } from '../utils/uuid'
+
 const TRAILING_SLASH_RE = /\/$/
 const HTTP_URL_RE = /^https?:\/\//i
-const DASH_RE = /-/g
 /** Addresses that mean "this computer" - they mean something else to a guest. */
 const LOOPBACK_HOST_RE = /^(127\.0\.0\.1|localhost|::1|\[::1\])$/i
 
@@ -27,6 +28,15 @@ export interface YXZPreviewResponse {
   prompt: string
   source?: string
   previews: YXZPreviewItem[]
+}
+
+export interface YXZPreviewFromImageRequest {
+  /** The session that holds the uploaded picture (its img_0.png). */
+  sessionId: string
+  prompt: string
+  n?: number
+  signal?: AbortSignal
+  onProgress?: (message: string) => void
 }
 
 export interface YXZModelRequest {
@@ -227,6 +237,39 @@ export function previewImageSrc(item: YXZPreviewItem, baseUrl = getYXZPrintApiBa
   return `${baseUrl}${item.path.startsWith('/') ? item.path : `/${item.path}`}`
 }
 
+/**
+ * Ask the backend whether the session already has preview pictures.
+ *
+ * The image service keeps working on the server after the browser stopped
+ * waiting: the request was cut short (the tab was closed, the network
+ * flickered, the turn was cancelled) but the pictures arrive a moment
+ * later.  Asking the backend is the difference between "the preview failed"
+ * and a picture that is already there.
+ */
+export async function fetchSessionPreviews(
+  sessionId: string,
+  fetcher: typeof fetch = fetch,
+): Promise<YXZPreviewItem[]> {
+  if (!sessionId)
+    return []
+  try {
+    const response = await fetcher(`${getYXZPrintApiBase()}/api/session/${sessionId}/previews`, {
+      cache: 'no-store',
+    })
+    if (!response.ok)
+      return []
+    const raw: unknown = await response.json()
+    if (!isRecord(raw) || !Array.isArray(raw.previews))
+      return []
+    return raw.previews
+      .map((item, index) => parsePreviewItem(item, index))
+      .filter((item): item is YXZPreviewItem => item !== null)
+  }
+  catch {
+    return []
+  }
+}
+
 function sleep(ms: number, signal?: AbortSignal) {
   return new Promise<void>((resolve) => {
     if (signal?.aborted) {
@@ -252,10 +295,13 @@ function createRequestSignal(externalSignal: AbortSignal | undefined, timeoutMs:
     timedOut = true
     controller.abort()
   }, timeoutMs)
-  const abort = () => controller.abort()
+  // Keep the reason of the outer abort.  Dropping it turned every
+  // cancellation into the useless "signal is aborted without reason",
+  // which the visitor saw instead of a sentence that says what happened.
+  const abort = () => controller.abort(externalSignal?.reason)
   externalSignal?.addEventListener('abort', abort, { once: true })
   if (externalSignal?.aborted)
-    controller.abort()
+    controller.abort(externalSignal.reason)
 
   return {
     signal: controller.signal,
@@ -1100,7 +1146,9 @@ export async function createYXZPreview(request: YXZPreviewRequest, fetcher: type
   // "auto" lets the backend walk its own chain: the service that is
   // configured and healthy wins, the others are the automatic backup.
   const prefer = request.prefer ?? 'auto'
-  const sessionId = request.sessionId ?? crypto.randomUUID().replace(DASH_RE, '').slice(0, 12)
+  // crypto.randomUUID() 在局域网 http:// 下不存在（只有安全上下文才有），
+  // 一调用整条生成链路就断，所以这里用局域网安全的 shortId。
+  const sessionId = request.sessionId ?? shortId(12)
   const deadline = Date.now() + YXZ_PREVIEW_TIMEOUT_MS
 
   // Watch the image service while it works.  Without this the visitor only
@@ -1188,12 +1236,147 @@ export async function createYXZPreview(request: YXZPreviewRequest, fetcher: type
       }
     }
   }
+  catch (error) {
+    // The request was cut short (the turn was cancelled, the network
+    // flickered) but the image service kept working on the server.  If the
+    // pictures are already there, use them instead of telling the visitor
+    // that the preview failed.
+    const recovered = await fetchSessionPreviews(sessionId, fetcher)
+    if (recovered.length) {
+      return {
+        sessionId,
+        prompt,
+        source: 'recovered',
+        previews: recovered,
+      }
+    }
+    throw error
+  }
   finally {
     progressController.abort()
     request.signal?.removeEventListener('abort', onAbort)
     await progressTask.catch(() => undefined)
   }
 
+  // The backend may have finished the pictures after the browser stopped
+  // waiting for them.  Ask before telling the visitor that nothing came
+  // out -- the pictures are usually already on the server.
+  const recovered = await fetchSessionPreviews(sessionId, fetcher)
+  if (recovered.length) {
+    return {
+      sessionId,
+      prompt,
+      source: 'recovered',
+      previews: recovered,
+    }
+  }
+
   const reason = lastError instanceof Error ? lastError.message : '出图服务暂时没有响应'
   throw new Error(`预览没能生成出来（${reason}）。你可以直接说「再试一次」，我会换一种方式重新出图。`)
+}
+
+/**
+ * Make the previews follow the picture the visitor uploaded.
+ *
+ * The backend keeps the uploaded file as ``img_0.png`` of its session and
+ * writes the new designs next to it as ``img_1`` .. ``img_n``, so the 3D
+ * step can pick them up with the usual image index and the visitor's
+ * original picture stays available.
+ */
+export async function createYXZPreviewFromImage(
+  request: YXZPreviewFromImageRequest,
+  fetcher: typeof fetch = fetch,
+): Promise<YXZPreviewResponse> {
+  const prompt = request.prompt.trim()
+  if (!prompt)
+    throw new Error('请先说说你想把这张图做成什么')
+  if (!request.sessionId)
+    throw new Error('没有找到你上传的图片，请重新上传一次')
+
+  const n = Math.min(Math.max(request.n ?? 4, 1), 4)
+  const deadline = Date.now() + YXZ_PREVIEW_TIMEOUT_MS
+  const progressController = new AbortController()
+  const onAbort = () => progressController.abort()
+  request.signal?.addEventListener('abort', onAbort, { once: true })
+  const progressTask = request.onProgress
+    ? pollYXZPreviewProgress(request.sessionId, progressController.signal, request.onProgress, fetcher)
+    : Promise.resolve()
+
+  try {
+    const linked = createRequestSignal(request.signal, Math.max(5_000, deadline - Date.now()))
+    let response: Response
+    try {
+      response = await fetcher(`${getYXZPrintApiBase()}/api/previews/from-image`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: request.sessionId,
+          prompt,
+          n,
+          prefer: 'auto',
+        }),
+        signal: linked.signal,
+      })
+    }
+    catch (error) {
+      // The request was cut short, but the image service kept working on
+      // the server.  If the designs are already there, use them instead of
+      // telling the visitor that the preview failed.  Index 0 is the
+      // picture the visitor uploaded, not a generated design.
+      const recovered = (await fetchSessionPreviews(request.sessionId, fetcher))
+        .filter(item => item.index > 0)
+      if (recovered.length) {
+        return {
+          sessionId: request.sessionId,
+          prompt,
+          source: 'recovered',
+          previews: recovered,
+        }
+      }
+      // Keep the reason of the abort: "signal is aborted without reason"
+      // tells the visitor nothing at all.
+      const message = error instanceof Error
+        ? (error.message || '网络中断')
+        : '网络中断'
+      throw new PreviewTransportError(message, true)
+    }
+    finally {
+      linked.dispose()
+    }
+
+    if (!response.ok) {
+      let detail = `出图服务暂时不可用（HTTP ${response.status}）`
+      try {
+        const raw = await response.json()
+        if (isRecord(raw) && typeof raw.detail === 'string' && raw.detail)
+          detail = raw.detail
+      }
+      catch {
+        // Keep the generic message.
+      }
+      throw new Error(detail)
+    }
+
+    const raw: unknown = await response.json()
+    if (!isRecord(raw) || typeof raw.session_id !== 'string' || !Array.isArray(raw.previews))
+      throw new Error('出图服务返回的数据格式无法识别')
+
+    const previews = raw.previews
+      .map((item, index) => parsePreviewItem(item, index))
+      .filter((item): item is YXZPreviewItem => item !== null)
+    if (!previews.length)
+      throw new Error('出图服务没有返回可展示的图片')
+
+    return {
+      sessionId: raw.session_id,
+      prompt: typeof raw.prompt === 'string' ? raw.prompt : prompt,
+      source: typeof raw.source === 'string' ? raw.source : undefined,
+      previews,
+    }
+  }
+  finally {
+    progressController.abort()
+    request.signal?.removeEventListener('abort', onAbort)
+    await progressTask.catch(() => undefined)
+  }
 }

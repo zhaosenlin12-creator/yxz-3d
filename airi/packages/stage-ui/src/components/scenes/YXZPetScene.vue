@@ -596,7 +596,13 @@ watch(() => props.paused, (paused) => {
 
 .yxz-pet-bubble {
   position: absolute;
-  top: 4%;
+  /*
+   * The page that puts an event title over the stage hands down
+   * `--yxz-bubble-top` so the status bubble can be pushed out of the way.
+   * The 2D sprite scene used to ignore that variable and pinned the bubble
+   * to the very top, which put it straight through the title text.
+   */
+  top: var(--yxz-bubble-top, 4%);
   left: 50%;
   z-index: 2;
   display: flex;
@@ -621,8 +627,21 @@ watch(() => props.paused, (paused) => {
 @media (min-width: 1024px) {
   .yxz-pet-bubble {
     left: 30%;
-    top: 15%;
+    top: var(--yxz-bubble-top, 15%);
     max-width: min(24rem, calc(52% - 2rem));
+  }
+}
+
+/*
+ * Narrow screens put the event title across the whole width, so there is no
+ * free sky above the character: the title band reaches down to the robot's
+ * head.  The bubble is docked above the chat panel instead, where it reads
+ * as a caption of what 宜小智 is doing and never touches the title.
+ */
+@media (max-width: 1023px) {
+  .yxz-pet-bubble {
+    top: auto;
+    bottom: 1.25rem;
   }
 }
 

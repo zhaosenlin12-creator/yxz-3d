@@ -140,6 +140,24 @@ def _cooldown_for(kind: str, failures: int) -> float:
     return base * factor
 
 
+def _expire_locked(record: Dict[str, Any]) -> None:
+    """Half-open transition: the cooldown is over, start counting afresh.
+
+    The failure counter is persisted, so a provider that failed thirty
+    times last month still carries that count today.  Without this reset
+    one unlucky request today would immediately push it into the longest
+    possible cooldown instead of the short first one -- the breaker would
+    keep punishing a provider for failures that happened ages ago.
+    """
+    if float(record.get("open_until", 0.0)) <= 0.0:
+        return
+    if int(record.get("failures", 0)) <= 0:
+        return
+    record["failures"] = 0
+    record["open_until"] = 0.0
+    record["state"] = "healthy"
+
+
 def report_success(provider: str) -> None:
     """Record that the provider answered.  Closes an open circuit."""
     name = (provider or "").strip()
@@ -202,6 +220,9 @@ def remaining(provider: str) -> float:
         record = _STATE.get(name)
         if not record:
             return 0.0
+        if float(record.get("open_until", 0.0)) > 0.0 and float(record.get("open_until", 0.0)) <= time.time():
+            _expire_locked(record)
+            _save_locked()
         left = float(record.get("open_until", 0.0)) - time.time()
         return left if left > 0 else 0.0
 

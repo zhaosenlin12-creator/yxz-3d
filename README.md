@@ -4,7 +4,41 @@
 
 - **airi**：对话前端（Vue3 + 3D 宜小智），dev 端口 `5199`
 - **cartoon-print-studio**：后端能力服务（FastAPI），端口 `8100`，提供生图预览、3D 建模、激光名片 SVG、本机软件检测与打开
-- **blueprint**：智造工作台（Node.js，端口 `9418`），提供项目蓝图、3D 工坊、课程模式；对话右侧「设计蓝图 / 项目课」模式使用它
+
+---
+
+## 〇、当前这一版的真实状态（2026-11 验收）
+
+下面每一行都是实测过的，不是设计意图。哪一格红了就照下面「处理」列走，**不用问用户选哪个模型**。
+
+| 能力 | 用的哪家 | 实测 | 备注 |
+|---|---|---|---|
+| 对话大脑 | **MiniMax `MiniMax-M3`** | ✅ 4–20 秒出结构化方案 | 已切到 M3；`MiniMax-M2.7` / `M2.5` 也通，`M3-highspeed` 不通 |
+| 生图（2D 预览） | AIXJ `gpt-image-2` 首选 → MiniMax 图 → jojo → 本地 SD | ✅ 约 30–55 秒出 4 张 | AIXJ 偶发 502，后端自动重试 3 次再换下一家 |
+| 3D 建模 | **Tripo**（`api.tripo3d.com/v3`，带纹理） | ✅ 约 110–125 秒 | 两把 key 轮换；余额不足才降级 |
+| 3D 备用 | 混元 3D 云端 | ⚠️ **腾讯云账号欠费**（`ResourceUnavailable.InArrears`） | 代码无法修复，已按 402 熔断并冷却 1 小时；恢复后自动接回 |
+| 3D 打印性 | 后端 `trimesh` 检测 | ✅ watertight / volume / faces / 尺寸 四项全过 | 导出 GLB / STL / OBJ 均 200 |
+| 激光切割卡片 | 本地排版 + 后端出图 | ✅ 约 1 秒出正面/背面/SVG | SVG 带切割红线 / 雕刻绿线 / 定位十字，单位 mm |
+| TTS 语音 | **MiniMax → 本地 Voicebox → Edge 免费** | ✅ 三级全通 | 见下方「语音（TTS）用哪一条」，**不使用浏览器原生 speechSynthesis** |
+| 语音识别 | 本机 faster-whisper `small` | ✅ 模型随包 | 离线可用，不依赖云端 ASR |
+| 本机软件检测 | 注册表 / 开始菜单 / 常见路径 | ✅ 能认出 Bambu Studio、xTool Studio | 也能手动指定 exe 路径 |
+| 局域网访问 | 同一 Wi-Fi 下 `http://<IP>:5199` | ✅ 对话 / 2D 预览 / 3D 全通 | 录音与剪贴板受浏览器安全上下文限制（见交付说明第四节） |
+
+> **局域网之前会「能聊天但生成必炸」**，原因找到了：会话 id 用的是
+> `crypto.randomUUID()`，这个 API 只在安全上下文（https / localhost）里存在，
+> `http://192.168.x.x` 下浏览器直接不给，一调用整轮生成就断。
+> 现在换成了不依赖安全上下文的 id 生成（`stage-ui/src/utils/uuid.ts`），
+> 实测局域网访问：对话 → 4 张 2D 预览 → 创作面板 → 3D 全通，零控制台报错。
+
+**对话 → 创作的完整闭环**（现场演示按这个顺序走）：
+
+```
+对话说需求 → 宜小智追问关键信息 → 4 张 2D 预览卡 → 打开创作面板批注编辑
+→ 生成 3D（Tripo，带纹理）→ 完整 3D 预览 + 打印性检测 → 导出 STL/GLB
+→ 检测并打开 Bambu Studio / xTool Studio
+```
+
+> 每一环失败都**自动降级**，不会把「请换一个模型」这种选择题丢给观众。
 
 ---
 
@@ -84,7 +118,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File verify-install.ps1
 |---|---|---|
 | 后端 | 浏览器打开 `http://127.0.0.1:8100/api/software/detect` | 返回 JSON（`tools` 数组） |
 | 前端 | 浏览器打开 `http://127.0.0.1:5199` | 看到宜小智对话界面 + 会动的宜小智形象 |
-| 预制模型 | `http://127.0.0.1:8100/api/presets/models` | 返回 3 个 pose_* 模型 |
+| 预制模型 | `http://127.0.0.1:8100/api/presets/models` | 返回 4 个 pose_* 模型（招手 / 叉腰 / 敬礼 / 混元招手感） |
 | 日志 | `.run\backend-8100.err.log`、`.run\frontend-5199.err.log` | 无致命报错 |
 
 > 端口 8100 被别的程序占用时，脚本会**自动顺延**到 8101/8102 并把真实端口注入前端，日志里会写明。
@@ -115,25 +149,6 @@ pwsh -File start-all.ps1 -NoBackend      # 只起前端
 pwsh -File start-all.ps1 -NoVoicebox     # 不起本地语音包
 pwsh -File start-all.ps1 -BackendPort 8100
 ```
-
-### Blueprint 智造工作台（独立进程）
-
-Blueprint 在 `blueprint/`，是单独的 Node 服务，端口 `9418`。首次使用：
-
-```powershell
-# 1) 配置（可选；不配也能用内置演示模板）
-Copy-Item blueprint\config.example.json blueprint\config.json
-# 编辑 blueprint\config.json，填 llm/apiKey 等；密钥不要提交
-
-# 2) 启动（会自动复用 cartoon-print-studio\keys.txt 的 DeepSeek key）
-pwsh -NoProfile -ExecutionPolicy Bypass -File start-blueprint.ps1
-```
-
-打开 `http://127.0.0.1:9418/studio`。完整配置字段、优先级、数据目录和 API 自检见
-[`blueprint/README.md`](blueprint/README.md)。
-
-> 桌面版 `BLUEAI.exe` 会把 `5199 / 8100 / 9418` 三个服务一起拉起；仓库源码方式启动时，
-> `start-all.ps1` 负责 `5199 + 8100`，`start-blueprint.ps1` 负责 `9418`。
 
 ---
 
@@ -256,7 +271,7 @@ cartoon-print-studio\ai\forge-webui\venv\Scripts\python.exe `
 
 ## 九·五、重建宜小智预制摆件模型
 
-`presets/models/<pose>/` 里的三个摆件（招手打招呼 / 双手叉腰 / 举手敬礼）是用真实角色渲染图跑
+`presets/models/<pose>/` 里的四个摆件（招手打招呼 / 双手叉腰 / 举手敬礼 / 混元 3D 招手）是用真实角色渲染图跑
 **混元3D 云端** image-to-3D 得到的，不是手搓模型。重跑脚本：
 
 ```powershell
@@ -330,7 +345,7 @@ copy airi\apps\stage-web\public\provider-seed.json.example airi\apps\stage-web\p
     "deepseek": { "apiKey": "<sk- 开头>",    "baseUrl": "https://api.deepseek.com/" }
   },
   "activeProvider": "minimax",
-  "activeModel": "MiniMax-M2.7"
+  "activeModel": "MiniMax-M3"
 }
 ```
 
@@ -350,6 +365,11 @@ copy airi\apps\stage-web\public\provider-seed.json.example airi\apps\stage-web\p
 1. **MiniMax 云端**（`speech-2.5-hd` / `female-shaonv`）——音色最全，排最前面。
    按字符计费，一句话十几个字符，消耗极低；`keys.txt` 里的两个 key 会轮换着，
    第一个用完自动切第二个。
+   > **注意 model id**：MiniMax 真正可用的是 `speech-2.5-hd-preview`。
+   > 直接写 `speech-2.5-hd` 会返回 `1008 insufficient balance`（不是余额问题，是 id 不对）。
+   > 前端 `buildMinimaxTtsBody()` 已经把 `speech-2.5-hd` 自动映射成
+   > `speech-2.5-hd-preview`，`speech-2.5-turbo` → `speech-2.5-turbo-preview` 同理，
+   > 种子文件里写 `speech-2.5-hd` 就行，不用自己改。
 2. **本地语音包**（Voicebox / Qwen CustomVoice，默认 `http://127.0.0.1:17493`）——
    不走网络，云端不可用时接管。声音档案从 `/profiles` 拉，用户在设置页选的那一个
    记在 `settings/speech/voice`。

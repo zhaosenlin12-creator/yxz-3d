@@ -5,9 +5,10 @@ import { tool } from '@xsai/tool'
 import { nanoid } from 'nanoid'
 import { z } from 'zod'
 
-import { buildYXZPreviewPrompt, createYXZCartoonModel, createYXZLaserBackground, createYXZLaserCard, createYXZPreview, previewImageSrc } from '../composables/use-yxz-print-preview'
+import { buildYXZPreviewPrompt, createYXZCartoonModel, createYXZLaserBackground, createYXZLaserCard, createYXZPreview, createYXZPreviewFromImage, previewImageSrc } from '../composables/use-yxz-print-preview'
 import { useYXZRequirementMemory } from '../composables/use-yxz-requirement-memory'
 import { useChatSessionStore } from '../stores/chat/session-store'
+import { shortId } from '../utils/uuid'
 
 /**
  * Decide whether a visitor message really means "go ahead and build it".
@@ -364,10 +365,30 @@ export async function createYXZCreationTools() {
         const abortSignal = options?.abortSignal
         const memory = useYXZRequirementMemory()
         memory.update({ description, constraints })
+        // 上传过照片时，预览要跟着那张照片走：图片是造型参考，描述是
+ // 「想把它改成什么」。没有上传照片就走普通的文生图链路。
+        //
+        // 只有"这一轮对话里"上传的照片才算数。旧照片（上一场对话、几天前）
+        // 会被当成造型参考，让本来纯文字的需求走图生图链路：更慢，而且
+        // 出图根本不是用户说的那个东西。
+        const activeSessionId = useChatSessionStore().activeSessionId
+        const storedReference = memory.state.value?.referenceImage
+        const reference = storedReference
+          && (!storedReference.chatSessionId || storedReference.chatSessionId === activeSessionId)
+          ? storedReference
+          : undefined
+        if (storedReference && !reference) {
+          // The picture belongs to an earlier conversation: forget it so it
+          // cannot leak into the next request either.
+          memory.update({ referenceImage: null })
+        }
         // The backend session id is generated here so the chat can follow the
         // image service step by step ("正在生成第 2/4 张…") instead of
         // showing a frozen bubble for a whole minute.
-        const sessionId = crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+        // crypto.randomUUID() 只在安全上下文（https / localhost）里存在。
+        // 同事从局域网 http://192.168.x.x 打开时它根本不存在，一调用整轮
+        // 生成就抛 "crypto.randomUUID is not a function" 然后断掉。
+        const sessionId = reference?.sessionId ?? shortId(12)
         const buildingCard = {
           sessionId,
           description,
@@ -376,15 +397,27 @@ export async function createYXZCreationTools() {
         }
         appendCreationCard({ ...buildingCard, status: 'preview-building' })
         try {
-          const result = await createYXZPreview({
-            prompt: buildYXZPreviewPrompt(description, constraints),
-            n: 4,
-            sessionId,
-            signal: abortSignal,
-            onProgress: (message) => {
-              appendCreationCard({ ...buildingCard, status: 'preview-building', progressMsg: message })
-            },
-          })
+          const onProgress = (message: string) => {
+            appendCreationCard({ ...buildingCard, status: 'preview-building', progressMsg: message })
+          }
+          const previewPrompt = reference
+            ? [reference.description, description, ...constraints].filter(Boolean).join('。')
+            : buildYXZPreviewPrompt(description, constraints)
+          const result = reference
+            ? await createYXZPreviewFromImage({
+                sessionId: reference.sessionId,
+                prompt: previewPrompt,
+                n: 4,
+                signal: abortSignal,
+                onProgress,
+              })
+            : await createYXZPreview({
+                prompt: previewPrompt,
+                n: 4,
+                sessionId,
+                signal: abortSignal,
+                onProgress,
+              })
           const item = result.previews[0]
           if (!item)
             throw new Error('后台没有返回预览图')

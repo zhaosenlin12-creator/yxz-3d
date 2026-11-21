@@ -5,6 +5,8 @@ import type { ChatProvider } from '@xsai-ext/providers/utils'
 import { ChatHistory, HearingConfigDialog } from '@proj-airi/stage-ui/components'
 import { useAudioAnalyzer } from '@proj-airi/stage-ui/composables'
 import { useAudioContext } from '@proj-airi/stage-ui/stores/audio'
+import { getYXZPrintApiBase } from '@proj-airi/stage-ui/composables/use-yxz-print-preview'
+import { useYXZRequirementMemory } from '@proj-airi/stage-ui/composables/use-yxz-requirement-memory'
 import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
 import { useChatMaintenanceStore } from '@proj-airi/stage-ui/stores/chat/maintenance'
 import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
@@ -21,6 +23,7 @@ import { RouterLink } from 'vue-router'
 import { toast } from 'vue-sonner'
 
 import IndicatorMicVolume from '../Widgets/IndicatorMicVolume.vue'
+import { useYXZChatTurnGuard } from '../Widgets/use-yxz-chat-turn-guard'
 import ActionAbout from './InteractiveArea/Actions/About.vue'
 import ActionViewControls from './InteractiveArea/Actions/ViewControls.vue'
 import ViewControlInputs from './ViewControls/Inputs.vue'
@@ -30,10 +33,18 @@ import { ChatSendTimeoutError, notifyYXZChatRecovery, withChatSendTimeout } from
 
 const { isDark, toggleDark } = useTheme()
 const hearingDialogOpen = ref(false)
+// The picture the visitor uploaded, remembered as the shape reference for
+// the next creation round.  The wide layout has had this for a while; on a
+// phone or a tablet the visitor has to be able to do the same thing, and
+// that is exactly the device people hand their phone to at an exhibition.
+const uploadedImagePath = ref<string>()
+const imageFileInput = ref<HTMLInputElement>()
+const requirementMemory = useYXZRequirementMemory()
 const chatOrchestrator = useChatOrchestratorStore()
 const chatSession = useChatSessionStore()
 const chatStream = useChatStreamStore()
 const { cleanupMessages } = useChatMaintenanceStore()
+const { chatProgressStamp, chatTurnIsBusy } = useYXZChatTurnGuard()
 const { messages } = storeToRefs(chatSession)
 const { streamingMessage } = storeToRefs(chatStream)
 const { sending } = storeToRefs(chatOrchestrator)
@@ -94,7 +105,17 @@ async function handleSend() {
         providerConfig,
       })
     })()
-    await withChatSendTimeout(operation, () => cancelPendingSends(chatSession.activeSessionId))
+    // The stall detector has to see that the turn is still working.  Without
+    // this, a turn that renders four preview images (or a 3D model) looked
+    // "stuck" after 90 seconds on a phone, and the running tool was
+    // aborted -- the backend kept going and finished, but the visitor was
+    // told the preview had failed.
+    await withChatSendTimeout(
+      operation,
+      () => cancelPendingSends(chatSession.activeSessionId),
+      chatProgressStamp,
+      { isTurnActive: chatTurnIsBusy },
+    )
   }
   catch (error) {
     messageInput.value = textToSend
@@ -113,6 +134,101 @@ function teardownAnalyzer() {
   catch {}
   analyzerSource = undefined
   stopAnalyzer()
+}
+
+/**
+ * Upload a picture and remember it as the shape reference for the next
+ * creation round.
+ *
+ * Whatever the visitor already typed travels along with the picture so the
+ * vision model reads the image *together with* the request ("this cat, but
+ * as a lamp") instead of captioning it in isolation.
+ */
+async function uploadImageBlob(blob: Blob, filename: string, source: 'camera' | 'picker') {
+  const wish = messageInput.value.trim()
+  const formData = new FormData()
+  formData.append('image', blob, filename)
+  formData.append('source', source)
+  formData.append('prompt', wish)
+
+  const uploadingToast = toast.loading('正在上传图片...')
+
+  try {
+    const response = await fetch(`${getYXZPrintApiBase()}/api/upload-image`, {
+      method: 'POST',
+      body: formData,
+    })
+
+    if (!response.ok) {
+      let detail = `上传失败（${response.status}）`
+      try {
+        const raw = await response.json()
+        if (raw && typeof raw.detail === 'string' && raw.detail)
+          detail = raw.detail
+      }
+      catch {
+        // Keep the generic message.
+      }
+      throw new Error(detail)
+    }
+
+    const result = await response.json()
+    uploadedImagePath.value = result.image_path
+
+    requirementMemory.update({
+      referenceImage: {
+        sessionId: result.session_id,
+        path: result.image_path,
+        description: result.description || '',
+        width: result.width,
+        height: result.height,
+        // The picture belongs to this conversation only; a picture from an
+        // earlier chat must not become the shape reference of a new request.
+        chatSessionId: chatSession.activeSessionId,
+      },
+    })
+
+    toast.dismiss(uploadingToast)
+    toast.success('图片已上传', {
+      description: result.description || '可以开始创作了',
+    })
+
+    const description = result.description || '这张图片'
+    const existing = messageInput.value.trim()
+    messageInput.value = existing
+      ? `[参考图片: ${description}] ${existing}`
+      : `[参考图片: ${description}] 帮我把这张图做成一个可以3D打印的作品`
+  }
+  catch (error) {
+    toast.dismiss(uploadingToast)
+    console.error('图片上传失败:', error)
+    toast.error('图片上传失败', {
+      description: error instanceof Error ? error.message : '请检查网络连接或稍后重试',
+    })
+  }
+}
+
+function handleImageFileChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  // Allow picking the very same file again.
+  input.value = ''
+  if (!file)
+    return
+  if (!file.type.startsWith('image/')) {
+    toast.error('只能上传图片文件')
+    return
+  }
+  void uploadImageBlob(file, file.name || 'upload.png', 'picker')
+}
+
+function openImagePicker() {
+  imageFileInput.value?.click()
+}
+
+function removeUploadedImage() {
+  uploadedImagePath.value = undefined
+  requirementMemory.update({ referenceImage: null })
 }
 
 async function setupAnalyzer() {
@@ -230,6 +346,16 @@ onMounted(() => {
         </div>
       </div>
       <div bg="white dark:neutral-800" max-h-100dvh max-w-100dvw w-full flex gap-1 overflow-auto px-3 pt-2 :style="{ paddingBottom: `${Math.max(Number.parseFloat(screenSafeArea.bottom.value.replace('px', '')), 12)}px` }">
+        <button
+          w="[calc(1lh+4px+4px)]" h="[calc(1lh+4px+4px)]" aspect-square flex items-center self-end justify-center rounded-full outline-none backdrop-blur-md
+          text="neutral-500 hover:neutral-600 dark:neutral-900 dark:hover:neutral-800"
+          bg="neutral-100/80 dark:neutral-950/80 hover:neutral-50 dark:hover:neutral-100/80"
+          transition="all duration-250 ease-in-out"
+          title="上传图片"
+          @click="openImagePicker"
+        >
+          <div i-solar:image-square-bold-duotone />
+        </button>
         <BasicTextarea
           v-model="messageInput"
           :placeholder="t('stage.message')"
@@ -256,6 +382,34 @@ onMounted(() => {
           <div i-solar:arrow-up-outline />
         </button>
       </div>
+      <!-- The uploaded picture, with a way to take it back. -->
+      <div
+        v-if="uploadedImagePath"
+        class="flex items-center gap-2 px-3 pb-1"
+      >
+        <img
+          :src="`${getYXZPrintApiBase()}${uploadedImagePath}`"
+          alt="已上传的照片"
+          class="h-10 w-10 shrink-0 rounded-lg border border-neutral-200 object-cover dark:border-neutral-700"
+        >
+        <span class="min-w-0 flex-1 truncate text-xs text-neutral-500 dark:text-neutral-400">
+          图片已上传，可以补充你的创作想法
+        </span>
+        <button
+          type="button"
+          class="shrink-0 rounded-md px-2 py-1 text-xs text-neutral-400 transition hover:bg-neutral-100 dark:hover:bg-neutral-800"
+          @click="removeUploadedImage"
+        >
+          移除
+        </button>
+      </div>
+      <input
+        ref="imageFileInput"
+        type="file"
+        accept="image/*"
+        class="hidden"
+        @change="handleImageFileChange"
+      >
     </div>
   </div>
 </template>

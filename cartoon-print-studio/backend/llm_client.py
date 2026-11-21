@@ -24,6 +24,38 @@ DEEPSEEK_ENDPOINTS = ["https://api.deepseek.com/chat/completions"]
 DEEPSEEK_API_KEYS = [os.environ.get("DEEPSEEK_API_KEY", "").strip()]
 DEEPSEEK_MODEL = "deepseek-chat"
 
+# Per-key cooldown.  A MiniMax key whose Token Plan ran out answers 429 /
+# 2056 every single time; without this map every chat request would pay
+# that dead end again instead of going straight to the key that works.
+_KEY_COOLDOWN: dict = {}
+_QUOTA_COOLDOWN = 3600.0
+_AUTH_COOLDOWN = 86400.0
+
+
+def _key_usable(key: str) -> bool:
+    until = _KEY_COOLDOWN.get(key, 0.0)
+    return until <= time.time()
+
+
+def _cool_down_key(key: str, seconds: float) -> None:
+    _KEY_COOLDOWN[key] = time.time() + seconds
+
+
+def _debug(message: str) -> None:
+    """One-line trace of the provider chain, printed to the backend log."""
+    print(f"[llm] {message}", flush=True)
+
+# The MiniMax chat model that used to answer here was retired by the
+# provider ("MiniMax-Text-01 is no longer available").  M3 is the model
+# the chat app itself runs on, so the backend uses the same one.
+MINIMAX_MODEL = "MiniMax-M3"
+
+# AIXJ text models (gpt-5.x) are a second opinion for picture
+# understanding when DeepSeek is unavailable.
+AIXJ_LLM_ENDPOINTS = ["https://aixj.vip/v1/chat/completions"]
+AIXJ_LLM_KEYS: List[str] = []
+AIXJ_VISION_MODELS = ("gpt-5.4-mini", "gpt-5.2")
+
 # Prefer <install>/keys.txt, fall back to ~/Desktop/key.txt (Windows convenience)
 _ROOT = os.environ.get("CARTOON_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _KEYFILE = (
@@ -73,12 +105,42 @@ def _classify_keys_from_file():
         if "deepseek" in (label or "") or (not label and key.startswith("sk-f")):
             if key not in DEEPSEEK_API_KEYS:
                 DEEPSEEK_API_KEYS.append(key)
+        elif "aixj" in (label or "") and "image" not in (label or ""):
+            # AIXJ text key: used for picture understanding, never for images.
+            if key not in AIXJ_LLM_KEYS:
+                AIXJ_LLM_KEYS.append(key)
         elif "minimax" in (label or "") or key.startswith("sk-cp-"):
             if key not in MINIMAX_API_KEYS:
                 MINIMAX_API_KEYS.append(key)
 
 
+def _classify_keys_from_codex_env():
+    """Pick up the aixj keys the desktop tooling keeps outside the project.
+
+    ``~/.codex/secrets/aixj.env`` holds the account's real aixj keys.  The
+    copy in keys.txt can fall behind (rotated on the provider side), so this
+    is the safety net that keeps picture understanding working.
+    """
+    path = os.path.expanduser(r"~\.codex\secrets\aixj.env")
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except Exception:
+        return
+    for line in lines:
+        name, _, value = line.strip().partition("=")
+        key = value.strip()
+        if not key.startswith("sk-"):
+            continue
+        if name.strip() == "AIXJ_API_KEY":
+            if key not in AIXJ_LLM_KEYS:
+                AIXJ_LLM_KEYS.append(key)
+
+
 _classify_keys_from_file()
+_classify_keys_from_codex_env()
 
 # Strip empties
 MINIMAX_API_KEYS = [k for k in MINIMAX_API_KEYS if k]
@@ -126,7 +188,8 @@ def _extract_openai_text(payload):
     return None
 
 
-def _minimax_call(prompt, *, model="MiniMax-Text-01", max_retries=1, timeout=20, deadline=None):
+def _minimax_call(prompt, *, model=MINIMAX_MODEL, max_retries=1, timeout=20, deadline=None,
+                   system="You are an art director for a kid-friendly 3D-print shop. Reply in JSON only."):
     """Call the MiniMax chat API (native v2 endpoint, api.minimaxi.com).
 
     ``deadline`` is an absolute ``time.time()`` value: when it passes, the
@@ -136,15 +199,17 @@ def _minimax_call(prompt, *, model="MiniMax-Text-01", max_retries=1, timeout=20,
     body = {
         "model": model,
         "messages": [
-            {"role": "system", "content": "You are an art director for a kid-friendly 3D-print shop. Reply in JSON only."},
+            {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.9,
-        "max_tokens": 1024,
+        "max_tokens": 2048,
     }
     data = json.dumps(body).encode("utf-8")
     for key in MINIMAX_API_KEYS:
         if not key:
+            continue
+        if not _key_usable(key):
             continue
         for ep in MINIMAX_ENDPOINTS:
             for attempt in range(max_retries + 1):
@@ -162,34 +227,48 @@ def _minimax_call(prompt, *, model="MiniMax-Text-01", max_retries=1, timeout=20,
                         payload = json.loads(r.read().decode("utf-8", "ignore"))
                 except urllib.error.HTTPError as e:
                     if e.code in (401, 403):
+                        _debug(f"minimax http {e.code} -> key disabled")
+                        _cool_down_key(key, _AUTH_COOLDOWN)
                         break
                     # quota / rate-limit (429 / 2056) -> try next key
                     if e.code == 429:
+                        _debug(f"minimax http 429 -> key quota cooled down")
+                        _cool_down_key(key, _QUOTA_COOLDOWN)
                         break
+                    _debug(f"minimax http {e.code} -> retry")
                     continue
-                except Exception:
+                except Exception as exc:
+                    _debug(f"minimax {type(exc).__name__}: {exc} -> retry")
                     continue
                 base = payload.get("base_resp", {}) or {}
                 if base.get("status_code", 0) != 0:
                     code = base.get("status_code")
                     # invalid key / quota / not allowed -> abandon this key
-                    if code in (2049, 1004, 1002, 2056):
+                    # 2069: the model was retired by the provider.
+                    if code in (2049, 1004, 1002, 2056, 2069):
+                        _debug(f"minimax base_resp {code} -> key cooled down")
+                        _cool_down_key(key, _QUOTA_COOLDOWN)
                         break
+                    _debug(f"minimax base_resp {code} -> retry")
                     continue
                 reply = payload.get("reply", "")
                 if not reply and payload.get("choices"):
                     reply = _extract_openai_text(payload)
                 if reply:
+                    _KEY_COOLDOWN.pop(key, None)
                     return reply.strip()
+                _debug("minimax empty content (finish_reason="
+                       + str((payload.get("choices") or [{}])[0].get("finish_reason")) + ")")
     return None
 
 
-def _deepseek_call(prompt, *, model=DEEPSEEK_MODEL, timeout=20, deadline=None):
+def _deepseek_call(prompt, *, model=DEEPSEEK_MODEL, timeout=20, deadline=None,
+                   system="You are an art director for a kid-friendly 3D-print shop. Reply in JSON only."):
     """Call DeepSeek chat (OpenAI-compatible). Returns text or None."""
     body = {
         "model": model,
         "messages": [
-            {"role": "system", "content": "You are an art director for a kid-friendly 3D-print shop. Reply in JSON only."},
+            {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.9,
@@ -205,34 +284,27 @@ def _deepseek_call(prompt, *, model=DEEPSEEK_MODEL, timeout=20, deadline=None):
     return None
 
 
-def llm_call(prompt, *, timeout=20, deadline=None, max_retries=1):
+def llm_call(prompt, *, timeout=30, deadline=None, max_retries=1, system=None):
     """Try MiniMax -> DeepSeek. Returns (text, provider) or (None, None)."""
     if deadline is None:
         deadline = time.time() + max(timeout, 1) * 2 + 5
     t0 = time.time()
     if MINIMAX_API_KEYS:
-        reply = _minimax_call(prompt, max_retries=max_retries, timeout=timeout, deadline=deadline)
+        reply = _minimax_call(prompt, max_retries=max_retries, timeout=timeout, deadline=deadline,
+                               **({"system": system} if system else {}))
         if reply:
             return reply, "MiniMax"
     if DEEPSEEK_API_KEYS and time.time() < deadline:
-        reply = _deepseek_call(prompt, timeout=timeout, deadline=deadline)
+        reply = _deepseek_call(prompt, timeout=timeout, deadline=deadline,
+                               **({"system": system} if system else {}))
         if reply:
             return reply, "DeepSeek"
     return None, None
 
 
-def vision_chat(prompt: str, image_b64: str, *, timeout=12, deadline=None) -> Optional[str]:
-    """Describe an image with the MiniMax chat endpoint.
-
-    The native v2 chat endpoint accepts an OpenAI-style content array, so the
-    picture travels as a base64 data URL next to the text prompt. Returns the
-    reply, or None when no provider accepted the request (the caller then
-    falls back to a plain description).
-    """
-    if not MINIMAX_API_KEYS or not image_b64:
-        return None
-    body = {
-        "model": "MiniMax-Text-01",
+def _vision_body(prompt: str, image_b64: str, model: str) -> dict:
+    return {
+        "model": model,
         "messages": [
             {
                 "role": "user",
@@ -243,34 +315,54 @@ def vision_chat(prompt: str, image_b64: str, *, timeout=12, deadline=None) -> Op
             },
         ],
         "temperature": 0.2,
-        "max_tokens": 200,
+        "max_tokens": 300,
     }
-    data = json.dumps(body).encode("utf-8")
-    for key in MINIMAX_API_KEYS:
+
+
+def _deepseek_vision_call(prompt, image_b64, *, timeout, deadline=None):
+    """DeepSeek's chat model reads pictures as well as text."""
+    body = _vision_body(prompt, image_b64, DEEPSEEK_MODEL)
+    for key in DEEPSEEK_API_KEYS:
         if not key:
             continue
-        attempt_timeout = timeout
-        if deadline is not None:
-            attempt_timeout = max(1.0, min(timeout, deadline - time.time()))
-            if attempt_timeout < 1.0:
-                return None
-        try:
-            req = urllib.request.Request(
-                MINIMAX_ENDPOINTS[0], data=data, method="POST",
-                headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=attempt_timeout) as r:
-                payload = json.loads(r.read().decode("utf-8", "ignore"))
-        except Exception:
-            continue
-        base = payload.get("base_resp", {}) or {}
-        if base.get("status_code", 0) != 0:
-            continue
-        reply = payload.get("reply", "")
-        if not reply and payload.get("choices"):
-            reply = _extract_openai_text(payload)
+        reply = _call_openai_style(DEEPSEEK_ENDPOINTS[0], body, key, timeout, deadline)
         if reply:
             return reply.strip()
+    return None
+
+
+def _aixj_vision_call(prompt, image_b64, *, timeout, deadline=None):
+    """AIXJ text models (gpt-5.x) as the second opinion."""
+    for key in AIXJ_LLM_KEYS:
+        if not key:
+            continue
+        for model in AIXJ_VISION_MODELS:
+            body = _vision_body(prompt, image_b64, model)
+            reply = _call_openai_style(AIXJ_LLM_ENDPOINTS[0], body, key, timeout, deadline)
+            if reply:
+                return reply.strip()
+    return None
+
+
+def vision_chat(prompt: str, image_b64: str, *, timeout=20, deadline=None) -> Optional[str]:
+    """Describe an image so the preview can follow the picture.
+
+    DeepSeek answers first because its chat model actually reads pictures.
+    AIXJ's text models are the backup.  When no provider can see the picture
+    the caller falls back to a plain description.
+    """
+    if not image_b64:
+        return None
+
+    for probe in (_deepseek_vision_call, _aixj_vision_call):
+        try:
+            reply = probe(prompt, image_b64, timeout=timeout, deadline=deadline)
+        except Exception:
+            reply = None
+        if reply:
+            return reply
+        if deadline is not None and time.time() >= deadline:
+            break
     return None
 
 
@@ -342,37 +434,121 @@ def _noun_phrase(prompt):
 
 def elaborate_via_llm(user_prompt, n=6):
     user = (
-        f"Customer request: {user_prompt!r}\n\nProduce exactly {n} image prompts as JSON:\n"
-        "Format: {\"items\":[{\"pose\":\"...\",\"style\":\"...\",\"prompt\":\"...\",\"caption\":\"...\"}}, ...]}\n"
-        "Each prompt: subject + pose + style + white background no text single object full body.\n"
-        "Captions 2-6 words for UI chip."
+        f"Customer request: {user_prompt!r}\n\n"
+        f"Write exactly {n} DIFFERENT image prompts for the request above.\n"
+        "Answer with ONE JSON object and nothing else:\n"
+        '{"items":[{"pose":"short pose","style":"short style","prompt":"full image prompt",'
+        '"caption":"2-6 words"}]}\n'
+        "Rules for every prompt: subject + pose + style + white background + no text "
+        "+ single object + full body + kid-friendly 3D printable figurine.\n"
+        "The prompts must differ from each other in pose and style.\n"
+        "Keep every prompt to one short sentence (max 45 words).\n"
+        "Write every prompt in English only, even when the request is in Chinese."
     )
-    text, provider = llm_call(user, timeout=20, deadline=time.time() + 40)
+    # MiniMax-M3 reasons before it answers: six full prompts take ~20s, so
+    # the old 20s per-attempt budget cut the answer off and silently sent
+    # the request to the rule engine instead.
+    text, provider = llm_call(user, timeout=45, deadline=time.time() + 60)
     if not text:
-        return None
-    text = text.strip().strip("`").strip()
-    if text.startswith("json"):
-        text = text[4:].strip()
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if not m:
-        return None
-    try:
-        data = json.loads(m.group(0))
-    except Exception:
-        return None
-    items = data.get("items") or []
+        _debug("elaborate: provider returned no text")
+        return None, None
+    text = _strip_json_fence(text)
+    data = _parse_llm_json(text)
+    if data is None:
+        _debug("elaborate: answer was not JSON -> " + text[:120].replace("\n", " "))
+        return None, provider
+    items = _collect_llm_items(data)
     out = []
     for it in items[:n]:
-        p = (it.get("prompt") or "").strip()
+        if isinstance(it, str):
+            p = it.strip()
+            if not p:
+                continue
+            out.append(PreviewSpec("", "", p, "选项"))
+            continue
+        if not isinstance(it, dict):
+            continue
+        p = _first_text(it, ("prompt", "image_prompt", "sub_prompt", "text", "description", "desc"))
         if not p:
             continue
         out.append(PreviewSpec(
-            it.get("pose", "").strip(),
-            it.get("style", "").strip(),
+            _first_text(it, ("pose", "position", "action")),
+            _first_text(it, ("style", "art_style", "look")),
             p,
-            it.get("caption", "").strip() or "选项",
+            _first_text(it, ("caption", "label", "title", "name")) or "选项",
         ))
-    return out if out else None
+    if not out:
+        _debug("elaborate: JSON had no usable prompts -> "
+               + str(list(data)[:8] if isinstance(data, dict) else type(data)))
+    return (out, provider) if out else (None, provider)
+
+
+def _strip_json_fence(text: str) -> str:
+    """Peel ```json fences and a leading ``json`` word off an LLM answer."""
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    text = text.strip()
+    if text.lower().startswith("json"):
+        text = text[4:].strip()
+    return text
+
+
+def _parse_llm_json(text: str):
+    """Parse the LLM answer as JSON, tolerating prose around the object."""
+    text = _strip_json_fence(text)
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    for pattern in (r"\{.*\}", r"\[.*\]"):
+        m = re.search(pattern, text, re.DOTALL)
+        if not m:
+            continue
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            continue
+    return None
+
+
+def _collect_llm_items(data):
+    """Pull the prompt list out of whatever shape the model answered with.
+
+    MiniMax-M3 answers ``{"prompts": [...]}`` while other models use
+    ``{"items": [...]}``; both are accepted so the chat never silently
+    falls back to the rule engine.
+    """
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    for key in ("items", "prompts", "prompt_list", "results", "candidates",
+                "outputs", "variants", "options", "data"):
+        val = data.get(key)
+        if isinstance(val, list) and val:
+            return val
+        if isinstance(val, dict):
+            for sub in ("items", "prompts", "results", "list"):
+                inner = val.get(sub)
+                if isinstance(inner, list) and inner:
+                    return inner
+    # last resort: the first list-of-strings value in the object
+    for val in data.values():
+        if isinstance(val, list) and val and all(isinstance(x, str) for x in val):
+            return val
+    return []
+
+
+def _first_text(d: dict, keys) -> str:
+    for k in keys:
+        v = d.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
 
 
 def elaborate_local(user_prompt, n=6):
@@ -426,9 +602,10 @@ def elaborate(user_prompt, n=6, *, think_budget_ms=0):
     specs = None
     if has_provider():
         info["thinking"].append("询问大模型生成差异化变体")
-        specs = elaborate_via_llm(user_prompt, n)
+        specs, provider = elaborate_via_llm(user_prompt, n)
         if specs is not None:
-            info["model"] = "LLM"
+            info["model"] = ("MiniMax-M3" if provider == "MiniMax"
+                             else (provider or "LLM"))
             info["source"] = "llm"
             info["elapsed_ms"] = int((time.time() - t0) * 1000)
             info["thinking"].append(f"LLM 返回 {len(specs)} 个候选")

@@ -23,6 +23,7 @@ param(
     [switch]$SkipBackend,
     [switch]$SlowNetwork,               # 不用国内镜像
     [switch]$CpuOnly,                   # 装 CPU 版 torch（无 NVIDIA 显卡时用，体积小 ~10 倍）
+    [switch]$WithCuda,                  # 额外装 2.4GB 的 CUDA 版 torch（有 N 卡且要跑本地引擎时才加）
     [switch]$Force,                     # 忽略缓存哨兵强制重装
     [switch]$SkipModels,                # 不下载 AI 模型权重（SD 1.5 / Hunyuan3D / TripoSR）
     [switch]$OnlyModels,                # 只下载 AI 模型权重
@@ -98,8 +99,6 @@ if ($SlowNetwork) {
     Enable-NpmMirror -Registry $NpmRegistry
     Ok "npm 源 -> $NpmRegistry"
 }
-$torchIndex = if ($CpuOnly) { 'https://download.pytorch.org/whl/cpu' } else { 'https://download.pytorch.org/whl/cu121' }
-
 # ---- 2) 后端 ---------------------------------------------------------
 $backend = Join-Path $root 'cartoon-print-studio'
 $venv    = Join-Path $backend 'ai\forge-webui\venv'
@@ -122,7 +121,7 @@ if ($OnlyModels) {
     if (-not $SlowNetwork) { Enable-PipMirror -VenvDir $venv -Index $PypiIndex }
 
     # --- 变更检测：requirements + python 版本 + torch 通道 ---
-    $torchFlavor = if ($CpuOnly) { 'cpu' } else { 'cu121' }
+    $torchFlavor = if ($CpuOnly) { 'cpu' } elseif ($WithCuda) { 'cu121' } else { 'auto' }
     $depKey = (Get-FileSha256 $req) + '|' + $pyVer + '|' + $torchFlavor
     $depKey = Get-TextSha256 $depKey
     $stamp  = Join-Path $venv '.deps-hash'
@@ -130,38 +129,119 @@ if ($OnlyModels) {
     if (-not $Force -and (Test-Path -LiteralPath $stamp) -and (Get-Content -LiteralPath $stamp -Raw).Trim() -eq $depKey) {
         Ok "后端依赖已就绪（跳过安装，约 1 秒）"
     } else {
-        # --- 2.1 torch / torchvision：先落到本地 wheel 缓存 ---
-        $wheelDir = Get-WheelCacheDir
+        # --- 2.1 torch / torchvision ---
+        # 换机最容易卡死的一步：CUDA 版 torch 约 2.4GB，直连 download.pytorch.org
+        # 实测只有 0.1MB/s（要几小时），而且中途断流。所以这里的顺序是：
+        #   ① 默认走 PyPI 镜像的 CPU 版 torch（193MB，国内镜像几秒钟下完）
+        #      —— 云端 Tripo / 混元 / AIXJ 主链路根本不需要 CUDA，本地兜底
+        #         引擎用 CPU 版也跑得动（只是慢一点）
+        #   ② 加 -WithCuda 才去拉 2.4GB 的 CUDA 版（阿里云镜像 + 断点续传）
+        #   ③ 全部失败 → 跳过 torch 继续装其余依赖，云端主链路不受影响
         $torchVer = '2.5.1'
         $tvVer    = '0.20.1'
-        $wheelSpecs = @(
-            @{ Name = "torch-$torchVer+$torchFlavor-$pyTag-$pyTag-win_amd64.whl";      Url = "$torchIndex/torch-$torchVer%2B$torchFlavor-$pyTag-$pyTag-win_amd64.whl" },
-            @{ Name = "torchvision-$tvVer+$torchFlavor-$pyTag-$pyTag-win_amd64.whl"; Url = "$torchIndex/torchvision-$tvVer%2B$torchFlavor-$pyTag-$pyTag-win_amd64.whl" }
-        )
-        $wheelPaths = @()
-        foreach ($w in $wheelSpecs) {
-            $dest = Join-Path $wheelDir $w.Name
-            if (-not ((Test-Path -LiteralPath $dest) -and (Get-Item -LiteralPath $dest).Length -gt 50MB)) {
-                Step "下载 $($w.Name) （约 2.4GB，走 .NET 直连避免 pip 卡死）..."
-                if (-not (Get-RemoteFile -Url $w.Url -OutFile $dest -TimeoutSec 1800)) {
-                    Fail "下载失败：$($w.Url)"
-                    Fail "可手工下载后放到 $wheelDir 再重跑本脚本"
-                    exit 1
-                }
-            }
-            $wheelPaths += $dest
-        }
-        Ok "torch wheel 已就绪（本地缓存，跨版本复用）"
+        $installedFlavor = ''
 
-        # --- 2.2 主体依赖 ---
-        Step "安装 torch / torchvision（本地 wheel，零网络）..."
-        $rcTorch = Install-Packages -VenvPy $venvPy -Requirement $wheelPaths -IndexUrl $PypiIndex
-        if ($rcTorch -ne 0) { Fail "torch 安装失败（uv exit=$rcTorch）"; exit 1 }
-        Ok "torch 安装完成"
+        if (-not $CpuOnly) {
+            Step "安装 torch / torchvision（PyPI CPU 版，约 200MB，走镜像很快）..."
+            # 镜像偶尔抽风（索引页超时），重试几次比直接失败划算得多。
+            $torchIndexes = @($PypiIndex)
+            if (-not $SlowNetwork) {
+                $torchIndexes += 'https://mirrors.aliyun.com/pypi/simple'
+                $torchIndexes += 'https://pypi.org/simple'
+            }
+            foreach ($idx in $torchIndexes) {
+                for ($try = 1; $try -le 3; $try++) {
+                    $rcTorch = Install-Packages -VenvPy $venvPy -Requirement @("torch==$torchVer", "torchvision==$tvVer") -IndexUrl $idx
+                    if ($rcTorch -eq 0) { break }
+                    if ($try -lt 3) {
+                        Warn "第 $try 次安装失败（源：$idx），10 秒后重试"
+                        Start-Sleep -Seconds 10
+                    }
+                }
+                if ($rcTorch -eq 0) {
+                    $installedFlavor = 'pypi'
+                    Ok "torch 安装完成（CPU 版，源：$idx，本地兜底引擎可用）"
+                    break
+                }
+                Warn "源 $idx 装不上，换下一个镜像"
+            }
+            if (-not $installedFlavor) {
+                Warn "PyPI 版 torch 安装失败，改走 pytorch wheel 通道"
+            }
+        }
+
+        if (-not $installedFlavor) {
+            # 走 wheel 直下通道：CPU 版约 200MB，CUDA 版约 2.4GB（-WithCuda）
+            $wheelDir = Get-WheelCacheDir
+            $flavors = if ($CpuOnly) { @('cpu') } elseif ($WithCuda) { @('cu121','cpu') } else { @('cpu') }
+            foreach ($flavor in $flavors) {
+                $wheelSpecs = @(
+                    @{ Name = "torch-$torchVer+$flavor-$pyTag-$pyTag-win_amd64.whl" },
+                    @{ Name = "torchvision-$tvVer+$flavor-$pyTag-$pyTag-win_amd64.whl" }
+                )
+                $paths = @()
+                $allOk = $true
+                foreach ($w in $wheelSpecs) {
+                    $dest = Join-Path $wheelDir $w.Name
+                    if (-not (Test-YxzWheelFile -Path $dest)) {
+                        if (Test-Path -LiteralPath $dest) {
+                            Warn "缓存里的 $($w.Name) 不完整，重新下载"
+                            Remove-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue
+                        }
+                        # 阿里云镜像优先（国内直连快），官方源兜底
+                        $encName = $w.Name -replace '\+','%2B'
+                        $mirrors = @(
+                            "https://mirrors.aliyun.com/pytorch-wheels/$flavor/$encName",
+                            "https://download.pytorch.org/whl/$flavor/$encName"
+                        )
+                        $got = $false
+                        foreach ($url in $mirrors) {
+                            Step "下载 $($w.Name)（断点续传，源：$($url.Split('/')[2])）..."
+                            if (Get-RemoteFileResumable -Url $url -OutFile $dest) {
+                                if (Test-YxzWheelFile -Path $dest) { $got = $true; break }
+                                Warn "$($url.Split('/')[2]) 下载下来的文件校验不通过，换下一个源"
+                                Remove-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue
+                            }
+                        }
+                        if (-not $got) { $allOk = $false; break }
+                    }
+                    $paths += $dest
+                }
+                if (-not $allOk) { Warn "$flavor 通道的 torch 拿不到，尝试下一个通道..."; continue }
+                Step "安装 torch / torchvision（本地 wheel，零网络）..."
+                $rcTorch = Install-Packages -VenvPy $venvPy -Requirement $paths -IndexUrl $PypiIndex
+                if ($rcTorch -ne 0) {
+                    Warn "$flavor wheel 安装失败（uv exit=$rcTorch），继续下一个通道"
+                    continue
+                }
+                $installedFlavor = $flavor
+                Ok "torch 安装完成（$flavor 通道）"
+                break
+            }
+        }
+
+        if (-not $installedFlavor) {
+            Warn "torch 未能安装（网络不通），继续安装其余依赖"
+            Warn "云端 Tripo / 混元 3D 主链路照常可用，只是本地 TripoSR 兜底引擎不可用"
+        }
 
         Step "安装后端依赖（uv 解析，通常 1-3 分钟）..."
         $reqFiltered = Join-Path $run 'req-install.txt'
         $lines = Get-Content -LiteralPath $req -Encoding UTF8 | Where-Object { $_ -notmatch '^\s*open-clip-torch==' }
+        if ($installedFlavor -eq 'pypi') {
+            # PyPI 版没有 +cu121 本地版本号，pin 要去掉后缀，
+            # 否则 uv 会去索引里找 +cu121，又得重新下 2.4GB。
+            $lines = $lines | ForEach-Object { $_ -replace '^(torch==2\.5\.1|torchvision==0\.20\.1)\+cu121', '$1' }
+        }
+        elseif ($installedFlavor -eq 'cpu') {
+            $lines = $lines | ForEach-Object { $_ -replace '^(torch==2\.5\.1|torchvision==0\.20\.1)\+cu121', '$1+cpu' }
+        }
+        elseif (-not $installedFlavor) {
+            # 没有 torch 就把依赖 torch 的那批包一起去掉，不然 uv 一定会
+            # 去把 torch 拖回来（那就等于又回到 2.4GB 那一步）。
+            $torchDep = '^(torch|torchvision|torchdiffeq|torchmetrics|torchsde|pytorch-lightning|lightning-utilities|accelerate|diffusers|kornia|peft|timm|hy3dgen)\s*=='
+            $lines = $lines | Where-Object { $_ -notmatch $torchDep }
+        }
         Set-Content -LiteralPath $reqFiltered -Value $lines -Encoding UTF8
         # 注意：这里刻意 *不* 加 --extra-index-url download.pytorch.org。
         # uv 会为每个包去 extra 源查一次索引，该源在国内极慢，会把 1 分钟的
@@ -172,8 +252,12 @@ if ($OnlyModels) {
 
         # --- 2.3 open-clip-torch：pin protobuf<4，与 onnxruntime/protobuf 冲突，
         #     后端运行期不 import open_clip，因此单独 --no-deps 安装 ---
-        Step "安装 open-clip-torch（--no-deps，规避 protobuf 冲突）..."
-        Install-Packages -VenvPy $venvPy -Requirement @('open-clip-torch==2.20.0') -NoDeps | Out-Null
+        if ($installedFlavor) {
+            Step "安装 open-clip-torch（--no-deps，规避 protobuf 冲突）..."
+            Install-Packages -VenvPy $venvPy -Requirement @('open-clip-torch==2.20.0') -NoDeps | Out-Null
+        } else {
+            Warn "没有 torch，跳过 open-clip-torch（后端运行期本来也不 import 它）"
+        }
 
         Set-Content -LiteralPath $stamp -Value $depKey -Encoding ASCII
         Ok "后端依赖安装完成"

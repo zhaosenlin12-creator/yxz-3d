@@ -47,21 +47,16 @@ const lightboxOpen = ref(false)
 const lightboxIndex = ref(0)
 
 function openStudio() {
-  if (!props.sessionId)
+  const item = gallery.value[lightboxIndex.value]
+  if (!item || !props.sessionId)
     return
-  // 合并后的主应用只有一个创作工作台：卡片永远带同一会话进 9418，
-  // 不依赖 localStorage 里当前选的是哪个模式，避免“点了没反应”。
-  const url = new URL('http://127.0.0.1:9418/studio')
+  const index = (props.previews?.length ? props.previews?.findIndex(p => p.src === item.src) : 0) ?? 0
+  const url = new URL('/yxz-studio', typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:5199')
   url.searchParams.set('session', props.sessionId)
-  url.searchParams.set('mode', '3d')
-  url.searchParams.set('n', String(props.previews?.length || 4))
-  url.searchParams.set('prompt', props.caption || '')
-  url.hash = '3d'
-  const win = window.open(url.toString(), '_blank', 'noopener,noreferrer')
-  // A popup blocker (or an embedded shell) can return null; don't leave the
-  // click doing nothing at all.
-  if (!win)
-    window.location.assign(url.toString())
+  url.searchParams.set('image', String(Math.max(0, index)))
+  url.searchParams.set('src', item.src)
+  url.searchParams.set('caption', item.caption || props.caption)
+  window.open(url.toString(), '_blank', 'noopener,noreferrer')
 }
 
 function openLightbox(index: number) {

@@ -80,6 +80,13 @@ const copyText = computed(() => getChatHistoryItemCopyText(props.message as Chat
 const creation = computed(() => props.message.yxzCreation)
 const laserCard = computed(() => props.message.yxzLaserCard)
 const isInternalTool = (toolName: string) => toolName.startsWith('builtIn_')
+// The exhibition tools (yxz_generatePreview / yxz_generate3DModel /
+// yxz_laserCard) are product features, not developer tools: the visitor
+// already gets a real card for them (方案预览 / 3D 模型 / 切割名片).
+// Showing the raw tool name plus its JSON arguments next to the reply
+// reads as leftover debug text, so those blocks stay hidden. The message
+// itself must NOT be hidden - it carries the assistant's actual answer.
+const isVisitorHiddenTool = (toolName: string) => isInternalTool(toolName) || toolName.startsWith('yxz_')
 const hideInternalFailure = computed(() => !creation.value && !laserCard.value
   && props.message.slices?.some(slice => slice.type === 'tool-call' && isInternalTool(slice.toolCall.toolName)))
 </script>
@@ -108,7 +115,7 @@ const hideInternalFailure = computed(() => !creation.value && !laserCard.value
           <div v-if="resolvedSlices.length > 0" class="break-words" text="primary-700 dark:primary-100">
             <template v-for="(slice, sliceIndex) in resolvedSlices" :key="sliceIndex">
               <ChatToolCallBlock
-                v-if="slice.type === 'tool-call' && !isInternalTool(slice.toolCall.toolName)"
+                v-if="slice.type === 'tool-call' && !isVisitorHiddenTool(slice.toolCall.toolName)"
                 :tool-name="slice.toolCall.toolName"
                 :args="slice.toolCall.args"
                 class="mb-2"

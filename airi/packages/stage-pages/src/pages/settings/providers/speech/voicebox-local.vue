@@ -45,7 +45,7 @@ const voiceboxStatus = computed(() => {
     return '正在检测 Voicebox 服务…'
   if (availableVoices.value.length)
     return `已连接，发现 ${availableVoices.value.length} 个声音档案`
-  return '尚未发现声音档案，请先在 Voicebox 创建 Eric。'
+  return '尚未发现声音档案，请先在 Voicebox 里创建一个 Qwen CustomVoice 声音。'
 })
 
 async function handleGenerateSpeech(input: string, voiceId: string) {
@@ -84,9 +84,10 @@ watch(model, async (value) => {
     <template #voice-settings>
       <Callout :label="t('settings.pages.providers.provider.voicebox-local.fields.field.voice.label')">
         <p>{{ t('settings.pages.providers.provider.voicebox-local.fields.field.voice.description') }}</p>
-        <p class="mt-2 text-sm opacity-80">
-          在 Voicebox 中创建 Qwen CustomVoice → Eric（中文男声），再在下方声音档案中选择。Eric 的音色更明亮、有活力，适合宜小智。
-        </p>
+          <p class="mt-2 text-sm opacity-80">
+            本地语音包的声音档案由 Voicebox 自己创建，每台机器的档案 id 都不同。宜小智会优先用你在下方选择的档案；
+            没有选择时会自动使用第一个中文声音档案，所以换一台电脑也不需要重新配置。
+          </p>
       </Callout>
       <FieldInput
         v-model="model"

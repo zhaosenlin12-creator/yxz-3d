@@ -3,10 +3,10 @@ import type { ChatProvider } from '@xsai-ext/providers/utils'
 
 import { YXZCreationWorkbench } from '@proj-airi/stage-ui/components/scenes'
 import { getYXZPrintApiBase } from '@proj-airi/stage-ui/composables/use-yxz-print-preview'
+import { useYXZRequirementMemory } from '@proj-airi/stage-ui/composables/use-yxz-requirement-memory'
 import { useYXZVoiceInput } from '@proj-airi/stage-ui/composables/use-yxz-voice-input'
 import { useChatOrchestratorStore } from '@proj-airi/stage-ui/stores/chat'
 import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
-import { useChatStreamStore } from '@proj-airi/stage-ui/stores/chat/stream-store'
 import { resolveFallbackCandidates } from '@proj-airi/stage-ui/stores/llm'
 import { useConsciousnessStore } from '@proj-airi/stage-ui/stores/modules/consciousness'
 import { useHearingStore } from '@proj-airi/stage-ui/stores/modules/hearing'
@@ -23,6 +23,7 @@ import { toast } from 'vue-sonner'
 import CameraCapture from './CameraCapture.vue'
 
 import { ChatSendTimeoutError, notifyYXZChatRecovery, withChatSendTimeout } from './chat-send-recovery'
+import { useYXZChatTurnGuard } from './use-yxz-chat-turn-guard'
 
 const messageInput = ref('')
 const hearingPopoverOpen = ref(false)
@@ -31,6 +32,7 @@ const workbenchOpen = ref(false)
 const workbenchMode = ref<'laser' | 'print'>('laser')
 const cameraModalOpen = ref(false)
 const uploadedImagePath = ref<string>()
+const imageFileInput = ref<HTMLInputElement>()
 const DOUBLE_ENTER_INTERVAL_MS = 300
 const TRAILING_NEWLINES_REGEX = /[\r\n]+$/
 const SEND_MODES = ['enter', 'ctrl-enter', 'double-enter'] as const
@@ -49,33 +51,11 @@ const quickStartPrompts = [
   '帮我把一个环保创意做成 3D 作品',
 ] as const
 
-// ---- Blueprint 工作模式（并入宜小智对话，不另开应用） ----
-const BP_BASE = 'http://127.0.0.1:9418'
-const WORK_MODES = [
-  { key: 'yxz', label: '宜小智' },
-  { key: 'blueprint', label: '设计蓝图' },
-  { key: 'course', label: '项目课' },
-] as const
-const blueprintPrompts = [
-  '校园纪念徽章：齿轮 + 校徽，直径 60mm',
-  '桌面小摆件：白色宇航服小机器人，手掌大小',
-  '科学课模型：可拆的太阳系八大行星摆件',
-] as const
-const workMode = useLocalStorage<string>('ui/chat/work-mode', 'yxz')
-const courseStudioUrl = `${BP_BASE}/studio?mode=course`
-const inputPlaceholder = computed(() =>
-  workMode.value === 'blueprint'
-    ? '说说你要做的东西：给谁用、多大、什么风格…'
-    : workMode.value === 'course'
-      ? '问项目课的下一步，或说说想先看哪一步…'
-      : t('stage.message'),
-)
-
 const { askPermission } = useSettingsAudioDevice()
 const { selectedAudioInput, audioInputs } = storeToRefs(useSettingsAudioDevice())
 const chatOrchestrator = useChatOrchestratorStore()
 const chatSession = useChatSessionStore()
-const chatStream = useChatStreamStore()
+const requirementMemory = useYXZRequirementMemory()
 const { cancelPendingSends, ingest, onAfterMessageComposed } = chatOrchestrator
 // A turn is in flight: a second tap must not queue another identical turn.
 const sendInFlight = ref(false)
@@ -170,73 +150,9 @@ async function runAutoSend() {
 // A turn can legitimately take minutes: four preview images plus a 3D model.
 // The stall detector must therefore see that the assistant is still working,
 // otherwise a slow-but-healthy turn is aborted and the visitor is left
-// looking at a chat that never answers.
-//
-// The stamp carries everything that changes while a turn runs: the streamed
-// text, the tool calls, and the messages that land in the conversation.
-function chatProgressStamp() {
-  const stream = chatStream.streamingMessage
-  const sessionMessages = messages.value
-  const last = sessionMessages.at(-1)
-  const lastContent = last?.content
-  // The creation card reports its own progress (preview generated, 3D model
-  // at 17%, engine switching) by rewriting the message it lives in, so the
-  // card's progress text is part of the fingerprint too.
-  const lastCreation = findLastCreationCard()
-
-  return [
-    stream?.content?.length ?? 0,
-    stream?.slices?.length ?? 0,
-    stream?.tool_results?.length ?? 0,
-    sessionMessages.length,
-    typeof lastContent === 'string' ? lastContent : '',
-    lastCreation?.status ?? '',
-    lastCreation?.progressMsg ?? '',
-    // The raw provider activity: a reasoning model writes nothing while it
-    // thinks, and the watchdog has to know that the turn is not dead.
-    chatStream.lastActivityAt,
-  ].join('|')
-}
-
-/**
- * The newest 宜小智 creation card in the conversation.
- *
- * The card is rewritten in place while a build runs, and that card does not
- * have to be the last message: the visitor's confirmation ("就这个，开始生成
- * 3D 模型吧") is appended after it.  Looking at the last message only would
- * therefore miss the progress of a running build -- and the watchdog would
- * mistake a healthy 3D build for a frozen chat.
- */
-function findLastCreationCard() {
-  const list = messages.value
-  for (let index = list.length - 1; index >= 0; index--) {
-    const creation = (list[index] as { yxzCreation?: { status?: string, progressMsg?: string } } | undefined)?.yxzCreation
-    if (creation)
-      return creation
-  }
-  return undefined
-}
-
-/**
- * True while the turn is busy with something that produces no chat text.
- *
- * A tool call (four preview images, a 3D build, a laser card) runs for
- * minutes without a single new character in the conversation.  Treating
- * that silence as a stall is what aborted healthy runs and produced the
- * "请切换一个可用模型" message the visitor saw.
- */
-function chatTurnIsBusy() {
-  const stream = chatStream.streamingMessage
-  const toolCalls = stream?.slices?.filter(slice => slice.type === 'tool-call').length ?? 0
-  const toolResults = stream?.tool_results?.length ?? 0
-  if (toolCalls > toolResults)
-    return true
-
-  // A preview or a build that is running rewrites its card with progress
- // messages.
-  const status = findLastCreationCard()?.status
-  return status === 'model-building' || status === 'preview-building'
-}
+// looking at a chat that never answers.  The guard is shared with the
+// narrow layout so the two cannot drift apart again.
+const { chatProgressStamp, chatTurnIsBusy } = useYXZChatTurnGuard()
 
 async function sendMessage(text: string, providerId?: string, model?: string) {
   if (sendInFlight.value) {
@@ -394,46 +310,73 @@ function handleWorkbenchStatus(status: string) {
     workbenchOpen.value = false
 }
 
-// Camera capture: handle photo taken from camera
-async function handleCameraImage(_imageDataUrl: string, blob: Blob) {
+/**
+ * Upload a picture (camera shot or picked file) and remember it as the shape
+ * reference for the next creation round.
+ *
+ * Whatever the visitor already typed travels along with the picture so the
+ * vision model reads the image *together with* the request ("this cat, but as
+ * a lamp") instead of captioning it in isolation.  The returned session id
+ * is what the preview step later asks for image-to-image generation.
+ */
+async function uploadImageBlob(blob: Blob, filename: string, source: 'camera' | 'picker') {
+  const wish = messageInput.value.trim()
+  const formData = new FormData()
+  formData.append('image', blob, filename)
+  formData.append('source', source)
+  formData.append('prompt', wish)
+
+  const uploadingToast = toast.loading('正在上传图片...')
+
   try {
-    // Create form data for upload
-    const formData = new FormData()
-    formData.append('image', blob, 'camera-capture.jpg')
-    formData.append('source', 'camera')
-
-    // Show uploading toast
-    const uploadingToast = toast.loading('正在上传照片...')
-
-    // Upload to backend
     const response = await fetch(`${getYXZPrintApiBase()}/api/upload-image`, {
       method: 'POST',
       body: formData,
     })
 
     if (!response.ok) {
-      throw new Error(`上传失败: ${response.statusText}`)
+      let detail = `上传失败（${response.status}）`
+      try {
+        const raw = await response.json()
+        if (raw && typeof raw.detail === 'string' && raw.detail)
+          detail = raw.detail
+      }
+      catch {
+        // Keep the generic message.
+      }
+      throw new Error(detail)
     }
 
     const result = await response.json()
     uploadedImagePath.value = result.image_path
 
-    // Dismiss uploading toast
-    toast.dismiss(uploadingToast)
+    // The picture becomes the reference of the next creation round.
+    requirementMemory.update({
+      referenceImage: {
+        sessionId: result.session_id,
+        path: result.image_path,
+        description: result.description || '',
+        width: result.width,
+        height: result.height,
+        // Remember which conversation the picture belongs to: a picture
+        // from an earlier chat must not silently become the shape
+        // reference of a brand new request.
+        chatSessionId: chatSession.activeSessionId,
+      },
+    })
 
-    // Show success
-    toast.success('照片已上传', {
+    toast.dismiss(uploadingToast)
+    toast.success('图片已上传', {
       description: result.description || '可以开始创作了',
     })
 
-    // Auto-fill message input with context
-    const description = result.description || '我的照片'
-    messageInput.value = `[已上传照片: ${description}] 帮我用这张照片`
+    // Keep what the visitor already wrote and add the picture context.
+    const description = result.description || '这张图片'
+    const existing = messageInput.value.trim()
+    messageInput.value = existing
+      ? `[参考图片: ${description}] ${existing}`
+      : `[参考图片: ${description}] 帮我把这张图做成一个可以3D打印的作品`
 
-    // Close camera modal
-    cameraModalOpen.value = false
-
-    // Focus on textarea
     await nextTick()
     const textarea = document.querySelector('textarea')
     if (textarea) {
@@ -443,11 +386,42 @@ async function handleCameraImage(_imageDataUrl: string, blob: Blob) {
     }
   }
   catch (error) {
-    console.error('照片上传失败:', error)
-    toast.error('照片上传失败', {
-      description: '请检查网络连接或稍后重试',
+    toast.dismiss(uploadingToast)
+    console.error('图片上传失败:', error)
+    toast.error('图片上传失败', {
+      description: error instanceof Error ? error.message : '请检查网络连接或稍后重试',
     })
   }
+}
+
+// Camera capture: handle photo taken from camera
+async function handleCameraImage(_imageDataUrl: string, blob: Blob) {
+  await uploadImageBlob(blob, 'camera-capture.jpg', 'camera')
+  cameraModalOpen.value = false
+}
+
+// Picked file: the same pipeline as the camera shot.
+function handleImageFileChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  // Allow picking the very same file again.
+  input.value = ''
+  if (!file)
+    return
+  if (!file.type.startsWith('image/')) {
+    toast.error('只能上传图片文件')
+    return
+  }
+  void uploadImageBlob(file, file.name || 'upload.png', 'picker')
+}
+
+function openImagePicker() {
+  imageFileInput.value?.click()
+}
+
+function removeUploadedImage() {
+  uploadedImagePath.value = undefined
+  requirementMemory.update({ referenceImage: null })
 }
 
 function sendFromKeyboard() {
@@ -567,34 +541,8 @@ watch(sendMode, () => {
         'bg-primary-200/20 dark:bg-primary-400/20',
       ]"
     >
-      <!-- 工作模式：宜小智 / 设计蓝图（Blueprint）/ 项目课 -->
-      <div class="flex flex-wrap items-center gap-1.5 border-b border-primary-200/30 px-3 py-2">
-        <span class="text-[10px] tracking-[0.12em] text-primary-600/70 dark:text-primary-200/70">工作模式</span>
-        <button
-          v-for="m in WORK_MODES"
-          :key="m.key"
-          type="button"
-          class="rounded-full px-2.5 py-1 text-[11px] transition"
-          :class="workMode === m.key
-            ? 'bg-primary-600 text-white shadow-sm'
-            : 'border border-primary-300/50 bg-white/70 text-primary-700 hover:bg-white dark:border-primary-500/40 dark:bg-neutral-900/70 dark:text-primary-200'"
-          @click="workMode = m.key"
-        >
-          {{ m.label }}
-        </button>
-        <a
-          v-if="workMode === 'course'"
-          :href="courseStudioUrl"
-          target="_blank"
-          rel="noopener noreferrer"
-          class="ml-auto text-[11px] text-primary-700 underline decoration-dotted dark:text-primary-200"
-        >
-          打开项目课 →
-        </a>
-      </div>
-
       <div
-        v-if="isYXZExhibition && workMode === 'yxz' && !messageInput.trim()"
+        v-if="isYXZExhibition && !messageInput.trim()"
         class="flex flex-wrap gap-1.5 border-b border-primary-200/30 px-3 pb-2 pt-2"
         aria-label="宜小智体验示例"
       >
@@ -617,23 +565,6 @@ watch(sendMode, () => {
         </span>
       </div>
 
-      <div
-        v-if="workMode === 'blueprint' && !messageInput.trim()"
-        class="flex flex-wrap gap-1.5 border-b border-primary-200/30 px-3 pb-2"
-        aria-label="蓝图示例"
-      >
-        <span class="w-full pt-2 text-xs text-primary-600/75 dark:text-primary-200/80">蓝图示例（点一下填入，直接发送就让宜小智出设计稿）：</span>
-        <button
-          v-for="prompt in blueprintPrompts"
-          :key="prompt"
-          type="button"
-          class="border border-primary-300/50 rounded-full bg-white/80 px-2.5 py-1 text-xs text-primary-700 shadow-sm backdrop-blur transition active:scale-95 dark:border-primary-500/40 dark:bg-neutral-900/70 dark:text-primary-200 hover:bg-white"
-          @click="messageInput = prompt"
-        >
-          {{ prompt }}
-        </button>
-      </div>
-
       <!-- Uploaded photo chip: the camera capture result that the agent can use -->
       <div
         v-if="uploadedImagePath"
@@ -645,21 +576,29 @@ watch(sendMode, () => {
           class="h-10 w-10 shrink-0 border border-primary-200/60 rounded-lg object-cover"
         >
         <span class="min-w-0 flex-1 truncate text-xs text-neutral-500 dark:text-neutral-400">
-          照片已上传，可以补充你的创作想法
+          图片已上传，可以补充你的创作想法
         </span>
         <button
           type="button"
           class="shrink-0 rounded-md px-2 py-1 text-xs text-neutral-400 transition hover:bg-neutral-100 dark:hover:bg-neutral-800"
-          @click="uploadedImagePath = undefined"
+          @click="removeUploadedImage"
         >
           移除
         </button>
       </div>
 
+      <input
+        ref="imageFileInput"
+        type="file"
+        accept="image/*"
+        class="hidden"
+        @change="handleImageFileChange"
+      >
+
       <BasicTextarea
         v-model="messageInput"
         :submit-on-enter="false"
-        :placeholder="inputPlaceholder"
+        :placeholder="t('stage.message')"
         text="primary-600 dark:primary-100  placeholder:primary-500 dark:placeholder:primary-200"
         bg="transparent"
         min-h="[100px]" max-h="[300px]" w-full
@@ -733,6 +672,14 @@ watch(sendMode, () => {
                 <div class="i-ph:camera-bold h-4 w-4 text-primary-600 dark:text-primary-300" />
                 <span>拍照创作</span>
                 <small class="text-neutral-400">摄像头拍摄 · AI 识图 · 引导创作</small>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                class="w-full flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-xs outline-none transition-colors hover:bg-primary-100/60 dark:hover:bg-primary-900/40"
+                @select="openImagePicker"
+              >
+                <div class="i-ph:image-square-bold h-4 w-4 text-primary-600 dark:text-primary-300" />
+                <span>上传图片</span>
+                <small class="text-neutral-400">选一张图 · AI 识图 · 照着做预览</small>
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenuPortal>

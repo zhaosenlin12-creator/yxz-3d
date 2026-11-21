@@ -1,4 +1,4 @@
-# =====================================================================
+﻿# =====================================================================
 #  pingdou-workstation 共用工具函数
 #  被 install-new-pc.ps1 / start-all.ps1 dot-source 引用。
 # =====================================================================
@@ -339,6 +339,29 @@ function Get-WheelCacheDir {
     $d = Join-Path (Get-CacheRoot) 'wheels'
     New-Item -ItemType Directory -Force -Path $d | Out-Null
     return $d
+}
+
+# ---- wheel 完整性校验 -------------------------------------------------
+# 换机时最常见的坑：上一次下到一半的 2.4GB torch wheel 被当成"已缓存"，
+# 后面 uv 装的时候才报 zip 损坏，白白重来一遍。这里直接把 wheel 当 zip
+# 打开验证一遍（dist-info/METADATA 在不在），不完整就当没下。
+function Test-YxzWheelFile {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $false }
+    try {
+        $len = (Get-Item -LiteralPath $Path).Length
+        if ($len -lt 1MB) { return $false }
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        $zip = [IO.Compression.ZipFile]::OpenRead($Path)
+        try {
+            foreach ($entry in $zip.Entries) {
+                if ($entry.FullName -like '*.dist-info/METADATA') { return $true }
+            }
+            return $false
+        } finally { $zip.Dispose() }
+    } catch {
+        return $false
+    }
 }
 
 # ---- 找一个空闲端口 ----------------------------------------------------

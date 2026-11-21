@@ -82,6 +82,12 @@ type MinimaxGlobalConfig = z.input<typeof minimaxGlobalConfigSchema>
 
 const minimaxModels: ModelInfo[] = [
   {
+    id: 'MiniMax-M3',
+    name: 'MiniMax M3',
+    provider: 'minimax',
+    description: '当前主力模型：思考与工具调用稳定，响应快',
+  },
+  {
     id: 'MiniMax-M2.7',
     name: 'MiniMax M2.7',
     provider: 'minimax',

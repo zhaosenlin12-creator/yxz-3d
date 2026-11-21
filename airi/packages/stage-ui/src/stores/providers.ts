@@ -113,6 +113,42 @@ function resolveVoiceboxBaseUrl(configured?: unknown): string {
   return raw
 }
 
+/**
+ * Find a usable voice profile in the local Voicebox pack.
+ *
+ * The profile ids are created inside Voicebox, so they differ from one
+ * machine to the next.  A seed file that hard-codes an id therefore breaks
+ * on every fresh install -- which used to leave the local speech fallback
+ * dead with "no profile selected".  When nothing is configured the first
+ * Chinese profile wins, and the answer is cached for the session.
+ */
+const voiceboxProfileCache = new Map<string, string>()
+
+async function resolveVoiceboxProfileId(baseUrl: string): Promise<string> {
+  const cached = voiceboxProfileCache.get(baseUrl)
+  if (cached)
+    return cached
+  try {
+    const response = await fetch(`${baseUrl}/profiles`)
+    if (!response.ok)
+      return ''
+    const raw: unknown = await response.json()
+    if (!Array.isArray(raw))
+      return ''
+    const profiles = raw.filter((item): item is Record<string, unknown> =>
+      !!item && typeof item === 'object' && typeof (item as Record<string, unknown>).id === 'string',
+    )
+    const chinese = profiles.find(item => item.language === 'zh' || item.language === 'zh-CN')
+    const chosen = (chinese ?? profiles[0])?.id as string | undefined
+    if (chosen)
+      voiceboxProfileCache.set(baseUrl, chosen)
+    return chosen ?? ''
+  }
+  catch {
+    return ''
+  }
+}
+
 /** Pull `text` / `voice` out of the OpenAI-style body @xsai generates. */
 function parseOpenAiSpeechBody(rawBody: string | undefined): { text: string, voice?: string } {
   let parsed: Record<string, unknown> = {}
@@ -405,7 +441,10 @@ export const useProvidersStore = defineStore('providers', () => {
                 instruct,
               })
               if (!voiceboxBody.profile_id) {
-                throw new Error('Voicebox 尚未选择声音档案，请先在 Voicebox 创建 Qwen CustomVoice 的 Eric 声音并在宜小智设置中选择。')
+                voiceboxBody.profile_id = await resolveVoiceboxProfileId(baseUrl)
+              }
+              if (!voiceboxBody.profile_id) {
+                throw new Error('本地语音包里没有可用的声音档案，请在 Voicebox 里创建一个 Qwen CustomVoice 声音后重试。')
               }
 
               const response = await fetch(`${baseUrl}/generate/stream`, {
@@ -437,7 +476,7 @@ export const useProvidersStore = defineStore('providers', () => {
             id: 'qwen-custom-voice-1.7B',
             name: 'Qwen CustomVoice 1.7B',
             provider: 'voicebox-local',
-            description: '推荐：中文男声 Eric，支持自然语言语气控制',
+            description: '推荐：Qwen CustomVoice 1.7B，支持自然语言语气控制',
             contextLength: 0,
             deprecated: false,
           },

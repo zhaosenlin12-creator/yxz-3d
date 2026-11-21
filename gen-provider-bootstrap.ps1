@@ -18,6 +18,7 @@
 param(
     [string]$KeysPath,
     [string]$OutputPath,
+    [string]$SeedPath,
     [switch]$Force
 )
 
@@ -26,6 +27,7 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 if (-not $KeysPath) { $KeysPath = Join-Path $root 'cartoon-print-studio\keys.txt' }
 if (-not $OutputPath) { $OutputPath = Join-Path $root 'airi\apps\stage-web\.env.local' }
+if (-not $SeedPath) { $SeedPath = Join-Path $root 'airi\apps\stage-web\public\provider-seed.json' }
 
 function Ok($m) { Write-Host "  [OK] $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "  [!]  $m" -ForegroundColor Yellow }
@@ -91,9 +93,12 @@ $providers['voicebox-local'] = @{
 
 # 免费的 Edge 神经语音作为最后一道兜底：没有 key、不依赖本地语音包，
 # 由本地后端渲染（edge-tts），永远保证宜小智能开口。
+#
+# 这里刻意不写 baseUrl：前端在 createProvider 里会用 getEdgeTtsBaseUrl()
+# 自己去问"后端现在在哪个端口"。写死端口的话，后端被别的程序挤到
+# 8101/8102，或者访客从局域网访问（要走前端 /api 代理），这个兜底就会
+# 一直打空 —— 最后一层保险反而成了故障点。
 $providers['edge-tts-free'] = @{
-    # 本机 8000 被其它项目占用，宜小智后端在本项目里跑 8100
-    baseUrl = 'http://127.0.0.1:8100'
     model   = 'edge-tts'
     voice   = 'zh-CN-XiaoxiaoNeural'
     rate    = '+0%'
@@ -106,7 +111,7 @@ $modules = @{
         # 对话主通道：MiniMax（中国区）。provider-seed.json 也指向它，
         # 两边必须一致 —— 不一致时前端算出来的备用通道是错的。
         activeProvider = 'minimax'
-        activeModel    = 'MiniMax-M2.7'
+        activeModel    = 'MiniMax-M3'
     }
     speech = @{
         # 语音链路：MiniMax 主（音色最全）→ 本地 Voicebox 语音包备 →
@@ -131,7 +136,7 @@ $modules = @{
 if ($providers.ContainsKey('deepseek')) {
     $modules['consciousness'] = @{
         activeProvider = 'minimax'
-        activeModel    = 'MiniMax-M2.7'
+        activeModel    = 'MiniMax-M3'
     }
 }
 
@@ -185,6 +190,33 @@ $bootstrap = [ordered]@{
 
 $json = $bootstrap | ConvertTo-Json -Depth 8 -Compress
 $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+
+# ---- provider-seed.json --------------------------------------------
+#   这个文件和 .env.local 是同一份配置的两个入口：前端启动时先读
+#   .env.local（VITE_LOCAL_PROVIDER_BOOTSTRAP_B64），再读这个 seed，
+#   而 seed 带 override:true，所以 seed 里写的东西会覆盖前者。
+#   以前 seed 只在装机器时生成一次，改端口、改 key 之后它就悄悄过期了
+#   —— 免费 Edge 语音兜底指着旧端口，永远打空。这里每次都重写，
+#   两份配置从此不会走散。
+$seed = [ordered]@{
+    override           = $true
+    speechOverride     = $false
+    speechChainVersion = 2
+    providers          = $providers
+    activeProvider     = $modules['consciousness']['activeProvider']
+    activeModel        = $modules['consciousness']['activeModel']
+    speech             = [ordered]@{
+        provider  = $modules['speech']['activeProvider']
+        model     = $modules['speech']['activeModel']
+        voice     = $modules['speech']['voice']
+        language  = $modules['speech']['language']
+        fallbacks = $modules['speech']['fallbacks']
+    }
+}
+$seedJson = $seed | ConvertTo-Json -Depth 8
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $SeedPath) | Out-Null
+[System.IO.File]::WriteAllText($SeedPath, $seedJson, (New-Object System.Text.UTF8Encoding($false)))
+Ok "已生成 $SeedPath"
 
 # ---- 写文件 ---------------------------------------------------------
 $existing = $null

@@ -15,7 +15,8 @@
 param(
     [string]$SourceRoot,
     [string]$OutDir,
-    [switch]$SkipZip
+    [switch]$SkipZip,
+    [switch]$SkipExe
 )
 
 $ErrorActionPreference = 'Stop'
@@ -121,7 +122,31 @@ if (Test-Path -LiteralPath $rootScripts) {
         -ExcludeDirs @('__pycache__') -ExcludeFiles @('*.log')
     Info "scripts"
 }
+# launcher/ 是 EXE 的源码，换台机器想重新编译时用得上。
+$launcherDir = Join-Path $SourceRoot 'launcher'
+if (Test-Path -LiteralPath $launcherDir) {
+    Copy-Clean -Src $launcherDir -Dst (Join-Path $OutDir 'launcher') `
+        -ExcludeDirs @('__pycache__') -ExcludeFiles @('*.log')
+    Info "launcher"
+}
 Ok "根目录文件"
+
+# 编译一键启动 EXE：双击就能起服务、开网页、停服务。
+# 用 Windows 自带的 csc.exe，换一台机器也能重新编译。
+if (-not $SkipExe) {
+    Write-Host "[6b/8] 编译启动 EXE ..." -ForegroundColor Cyan
+    $launcherBuild = Join-Path $SourceRoot 'build-launcher.ps1'
+    if (Test-Path -LiteralPath $launcherBuild) {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $launcherBuild -SourceRoot $SourceRoot -OutputDir $OutDir
+        if ($LASTEXITCODE -ne 0) { throw "编译启动 EXE 失败" }
+    }
+    else {
+        Warn "未找到 build-launcher.ps1，跳过 EXE 编译"
+    }
+}
+else {
+    Write-Host "[6b/8] 跳过 EXE 编译" -ForegroundColor Cyan
+}
 
 # 本地语音识别模型（faster-whisper）随包带走：换一台电脑、或者现场没有
 # 网络，语音输入照样能用。模型有几百兆，所以不提交 GitHub，只随交付包走。
@@ -158,6 +183,8 @@ $mustHave = @(
     'cartoon-print-studio\backend\tripo_api.py',
     'cartoon-print-studio\backend\hunyuan_cloud_api.py',
     'cartoon-print-studio\backend\edge_tts_api.py',
+    'cartoon-print-studio\backend\llm_client.py',
+    'cartoon-print-studio\backend\api_image.py',
     'cartoon-print-studio\data\edge_voices.json',
     'airi\apps\stage-web\.env.local',
     'airi\apps\stage-web\public\provider-seed.json',
@@ -168,9 +195,12 @@ $mustHave = @(
     'airi\packages\stage-ui\src\assets\yxz\layers\body.png',
     'airi\packages\stage-ui-three\src\components\YXZRealModelScene.vue',
     'airi\packages\stage-ui\src\composables\use-yxz-print-preview.ts',
+    'airi\packages\stage-ui\src\composables\use-yxz-requirement-memory.ts',
     'airi\packages\stage-ui\src\composables\use-yxz-voice-input.ts',
+    'launcher\YXZLauncher.cs',
     'start-all.ps1',
     'stop-all.ps1',
+    'build-launcher.ps1',
     'install-new-pc.ps1',
     'verify-install.ps1',
     'gen-provider-bootstrap.ps1',
@@ -179,6 +209,11 @@ $mustHave = @(
     '停止服务.bat',
     '交付使用说明.md'
 )
+
+# EXE 是交付包的主入口：没有它，双击就用不了。
+if (-not $SkipExe) {
+    $mustHave += '宜小智工作台.exe'
+}
 $missing = @()
 foreach ($rel in $mustHave) {
     if (-not (Test-Path -LiteralPath (Join-Path $OutDir $rel))) { $missing += $rel }
@@ -248,5 +283,8 @@ Write-Host "新电脑：解压覆盖后双击「一键部署并启动.bat」即�
 Write-Host "  依赖缺失会自动调用 install-new-pc.ps1 安装；"
 Write-Host "  启动时自动从 keys.txt 重新生成前端服务商配置。"
 Write-Host "  装完可用 verify-install.ps1 做整机体检。"
+Write-Host ""
+Write-Host "或者：直接双击「宜小智工作台.exe」—— 窗口里点「打开宜小智」即可，"
+Write-Host "  点「停止服务」会干净停掉整套进程并释放端口。"
 Write-Host ""
 Write-Host "提醒：本包含真实 API key，请勿公开传播。" -ForegroundColor Yellow

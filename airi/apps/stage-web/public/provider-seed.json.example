@@ -16,7 +16,7 @@
     }
   },
   "activeProvider": "minimax",
-  "activeModel": "MiniMax-M2.7",
+  "activeModel": "MiniMax-M3",
   "speech": {
     "provider": "minimax-audio-speech",
     "model": "speech-2.5-hd",

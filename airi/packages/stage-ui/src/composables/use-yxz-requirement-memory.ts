@@ -1,3 +1,5 @@
+import type { Ref } from 'vue'
+
 import { ref } from 'vue'
 
 export interface YXZRequirementMemory {
@@ -6,7 +8,26 @@ export interface YXZRequirementMemory {
   style?: string
   audience?: string
   quantity?: number
+  /** The picture the visitor uploaded: the shape reference for the preview. */
+  referenceImage?: YXZReferenceImage
   updatedAt: number
+}
+
+export interface YXZReferenceImage {
+  sessionId: string
+  path: string
+  description: string
+  width?: number
+  height?: number
+  /**
+   * The chat session the picture was uploaded in.
+   *
+   * The picture is the shape reference for the *current* request.  Without
+   * this marker a picture uploaded yesterday was still applied to today's
+   * "make me a blue robot" -- the app then took the image-to-image route
+   * with a picture the visitor never mentioned, which is slower and wrong.
+   */
+  chatSessionId?: string
 }
 
 export interface YXZRequirementPatch {
@@ -15,6 +36,7 @@ export interface YXZRequirementPatch {
   style?: string
   audience?: string
   quantity?: number
+  referenceImage?: YXZReferenceImage | null
 }
 
 export interface YXZRequirementStorage {
@@ -24,6 +46,8 @@ export interface YXZRequirementStorage {
 }
 
 export const YXZ_REQUIREMENT_MEMORY_KEY = 'yxz/requirement-memory/v1'
+
+const sharedStates = new Map<YXZRequirementStorage | undefined, Ref<YXZRequirementMemory | null>>()
 
 function getDefaultStorage(): YXZRequirementStorage | undefined {
   if (typeof window === 'undefined' || !window.localStorage)
@@ -43,6 +67,29 @@ function cleanConstraints(value: unknown) {
   return [...new Set(value.map(cleanText).filter(Boolean))]
 }
 
+function cleanReferenceImage(value: unknown): YXZReferenceImage | undefined {
+  if (!value || typeof value !== 'object')
+    return undefined
+
+  const record = value as Record<string, unknown>
+  const sessionId = cleanText(record.sessionId)
+  const path = cleanText(record.path)
+  if (!sessionId || !path)
+    return undefined
+
+  const width = typeof record.width === 'number' && Number.isFinite(record.width) ? record.width : undefined
+  const height = typeof record.height === 'number' && Number.isFinite(record.height) ? record.height : undefined
+  const chatSessionId = cleanText(record.chatSessionId)
+  return {
+    sessionId,
+    path,
+    description: cleanText(record.description),
+    width,
+    height,
+    chatSessionId: chatSessionId || undefined,
+  }
+}
+
 export function normalizeYXZRequirementMemory(value: unknown): YXZRequirementMemory | null {
   if (!value || typeof value !== 'object')
     return null
@@ -50,7 +97,8 @@ export function normalizeYXZRequirementMemory(value: unknown): YXZRequirementMem
   const record = value as Record<string, unknown>
   const description = cleanText(record.description)
   const constraints = cleanConstraints(record.constraints)
-  if (!description && !constraints.length)
+  const referenceImage = cleanReferenceImage(record.referenceImage)
+  if (!description && !constraints.length && !referenceImage)
     return null
 
   const quantity = typeof record.quantity === 'number' && Number.isFinite(record.quantity) && record.quantity > 0
@@ -63,6 +111,7 @@ export function normalizeYXZRequirementMemory(value: unknown): YXZRequirementMem
     style: cleanText(record.style) || undefined,
     audience: cleanText(record.audience) || undefined,
     quantity,
+    referenceImage,
     updatedAt: typeof record.updatedAt === 'number' && Number.isFinite(record.updatedAt) ? record.updatedAt : Date.now(),
   }
 }
@@ -85,6 +134,7 @@ export function mergeYXZRequirementMemory(current: YXZRequirementMemory | null, 
     ...current,
     ...patch,
     constraints: [...(current?.constraints ?? []), ...(patch.constraints ?? [])],
+    referenceImage: patch.referenceImage === null ? undefined : (patch.referenceImage ?? current?.referenceImage),
     updatedAt: Date.now(),
   })
 
@@ -94,6 +144,7 @@ export function mergeYXZRequirementMemory(current: YXZRequirementMemory | null, 
     style: cleanText(patch.style) || undefined,
     audience: cleanText(patch.audience) || undefined,
     quantity: patch.quantity,
+    referenceImage: patch.referenceImage === null ? undefined : patch.referenceImage,
     updatedAt: Date.now(),
   }
 }
@@ -135,7 +186,16 @@ export function getYXZRequirementNextQuestion(memory: YXZRequirementMemory | nul
 }
 
 export function useYXZRequirementMemory(storage = getDefaultStorage()) {
-  const state = ref<YXZRequirementMemory | null>(loadYXZRequirementMemory(storage))
+  // Several surfaces touch the same memory (the chat panel, the guided
+  // preview panel and the creation tool).  Keeping one ref per storage
+  // means an update made in one place is visible in the others right away
+  // instead of landing on a stale snapshot.
+  let shared = sharedStates.get(storage)
+  if (!shared) {
+    shared = ref<YXZRequirementMemory | null>(loadYXZRequirementMemory(storage))
+    sharedStates.set(storage, shared)
+  }
+  const state = shared
 
   function update(patch: YXZRequirementPatch) {
     state.value = mergeYXZRequirementMemory(state.value, patch)
