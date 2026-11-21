@@ -44,6 +44,10 @@ const elapsedMs = ref(0)
 const model = ref<{ glbUrl: string, stlUrl: string, upAxis: string } | null>(null)
 /** True when a model is on screen but a different design got picked. */
 const modelStale = ref(false)
+/** True when the model was built from one figure of a multi-pose sheet. */
+const modelFromSheet = ref(false)
+/** The picture the model on screen was built from. */
+const modelSourceIndex = ref(-1)
 /** The separate bodies of the current model, for printing them one by one. */
 const parts = ref<YXZModelPart[]>([])
 const errorMessage = ref('')
@@ -248,7 +252,12 @@ async function loadExistingModel() {
       stlUrl: data.stl_url ? `${getYXZPrintApiBase()}${data.stl_url}` : '',
       upAxis: typeof data.up_axis === 'string' ? data.up_axis : 'z',
     }
-    modelStale.value = false
+    // The model belongs to the picture it was built from.  When the visitor
+    // opens the workbench on a different design, that old model must not be
+    // passed off as the model of the design on screen.
+    const builtFor = Number.isInteger(data?.image_index) ? Number(data.image_index) : -1
+    modelSourceIndex.value = builtFor
+    modelStale.value = builtFor >= 0 && builtFor !== activeIndex.value
     progress.value = { percent: 100, message: '已载入本方案此前生成的 3D 模型', step: 'done' }
     void loadParts()
   }
@@ -327,7 +336,7 @@ function selectPreview(item: { index: number, src: string }) {
   // A model is expensive to rebuild, so it is not thrown away silently:
   // the visitor is told that what is on screen belongs to the old design.
   if (model.value)
-    modelStale.value = true
+    modelStale.value = modelSourceIndex.value >= 0 && item.index !== modelSourceIndex.value
 }
 
 // The workbench is usually opened straight from a chat session, which only
@@ -389,6 +398,8 @@ async function startModelBuild() {
   errorMessage.value = ''
   model.value = null
   modelStale.value = false
+  modelFromSheet.value = false
+  modelSourceIndex.value = activeIndex.value
   activeView.value = '3d'
   progress.value = { percent: 2, message: '已收到你的方案，马上开始制作…', step: 'building', stage: 'queued' }
   startElapsedTimer()
@@ -402,6 +413,8 @@ async function startModelBuild() {
       },
     })
     model.value = { glbUrl: result.glbUrl, stlUrl: result.stlUrl, upAxis: 'z' }
+    modelFromSheet.value = result.sheetCropped === true
+    modelSourceIndex.value = activeIndex.value
     progress.value = { percent: 100, message: '3D 模型已经做好啦，可以预览和下载了', step: 'done', stage: 'done' }
     activeView.value = '3d'
     void loadParts()
@@ -745,6 +758,10 @@ function goBack() {
 
           <p v-if="model && modelStale" class="yxz-studio-warn">
             你换了设计稿，现在这个模型还是按上一张做的。要按新的那张重新生成。
+          </p>
+
+          <p v-if="model && modelFromSheet && !modelStale" class="yxz-studio-warn">
+            这张设计稿是多姿势拼图，模型已经按里面的单个造型来做了。
           </p>
 
           <div v-if="model" class="yxz-studio-done">

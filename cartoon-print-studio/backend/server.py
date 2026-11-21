@@ -26,6 +26,7 @@ import sys
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 import provider_health
+import yxz_sheet
 
 
 # The 3D engine chain runs several engines one after another.  Only the
@@ -257,7 +258,64 @@ def resolve_source_png(session_id: str, image_index: int, source_png: Optional[s
     src = os.path.join(previews, f"img_{int(image_index)}.png")
     if not os.path.isfile(src):
         raise HTTPException(404, "preview not found")
-    return src
+    return _single_subject_png(src) or src
+
+
+def _single_subject_png(src: str) -> Optional[str]:
+    """Cut a pose sheet down to the single figure the visitor picked.
+
+    The image providers sometimes answer "four views of this character"
+    with a contact sheet: nine poses of the same figure in one picture.  A
+    3D builder copies the whole grid, so the visitor gets a model of nine
+    robots.  When the picture really is a sheet, the build works from the
+    biggest figure in it instead -- that is the design they chose.
+
+    The cropped copy is kept next to the original so the next build of the
+    same design does not have to do the work again.
+    """
+    folder = os.path.dirname(src)
+    stem = os.path.splitext(os.path.basename(src))[0]
+    cropped = os.path.join(folder, f"subject_{stem}.png")
+    try:
+        if (os.path.isfile(cropped) and os.path.getsize(cropped) > 0
+                and os.path.getmtime(cropped) >= os.path.getmtime(src)):
+            return cropped
+    except OSError:
+        pass
+    try:
+        result = yxz_sheet.crop_to_subject(src, cropped)
+    except Exception as exc:
+        print(f"[3d_source] sheet check failed for {src}: {exc}", flush=True)
+        return None
+    if not result:
+        return None
+    print(f"[3d_source] {os.path.basename(src)} is a pose sheet, "
+          f"building from the single figure instead", flush=True)
+    return result
+
+
+def _record_model_source(session_id: str, image_index: int, source_path: str) -> None:
+    """Remember which picture the finished model was built from.
+
+    The workbench opens straight from a chat, so it often finds a model
+    from an earlier design.  Without this note the visitor would look at
+    that model and think it belongs to the design they just picked.
+    """
+    try:
+        model_dir = os.path.join(session_dir(session_id), "model")
+        os.makedirs(model_dir, exist_ok=True)
+        with open(os.path.join(model_dir, "_build.json"), "w", encoding="utf-8") as handle:
+            json.dump({
+                "image_index": int(image_index),
+                "source": os.path.basename(source_path),
+            }, handle)
+    except Exception as exc:
+        print(f"[3d_build] could not record the source picture: {exc}", flush=True)
+
+
+def _is_sheet_crop(source_path: str) -> bool:
+    """True when the build worked from the figure cut out of a pose sheet."""
+    return os.path.basename(source_path).startswith("subject_")
 
 
 def store_edited_preview(session_id: str, image_index: int, custom_image: Optional[str]) -> Optional[str]:
@@ -1429,15 +1487,25 @@ def previews_from_image(req: PreviewsFromImageReq):
     pdir = os.path.join(sd, "previews")
     os.makedirs(pdir, exist_ok=True)
     ref_path = os.path.join(pdir, "img_0.png")
-    if not os.path.isfile(ref_path):
-        raise HTTPException(404, "没有找到你上传的图片，请重新上传一次")
-    with open(ref_path, "rb") as handle:
-        reference = handle.read()
+    reference = b""
+    reference_missing = False
+    if os.path.isfile(ref_path):
+        with open(ref_path, "rb") as handle:
+            reference = handle.read()
+    else:
+        # The picture the visitor uploaded is gone: the session was cleaned
+        # up, or the browser still remembers an upload from another day.
+        # Answering "not found" would kill the whole turn and leave the
+        # visitor with nothing at all, so the same prompt -- which still
+        # describes the picture -- is rendered as a plain picture instead.
+        reference_missing = True
+        print(f"[previews/from-image] no uploaded picture in {sid}, "
+              "rendering from the description instead", flush=True)
 
     pg = progress.Progress(sid, "previews")
     n = max(1, min(int(req.n or 4), 4))
     render_prompt = _english_render_prompt(req.prompt.strip(), keep_change=True)
-    if "reference" not in render_prompt.lower():
+    if reference and "reference" not in render_prompt.lower():
         render_prompt = (
             "Keep the same character, proportions, pose and colors as the reference picture. "
             + render_prompt
@@ -1473,12 +1541,13 @@ def previews_from_image(req: PreviewsFromImageReq):
         }
 
     try:
-        edited = api_image.edit_previews(reference, prompts, sid=sid)
-        for i, (blob, tag) in enumerate(edited):
-            item = _store(blob, tag, i + 1, tag if tag and "fail" not in tag else "aixj-image")
-            if item:
-                items.append(item)
-                source = tag if tag and "fail" not in tag else source
+        if reference:
+            edited = api_image.edit_previews(reference, prompts, sid=sid)
+            for i, (blob, tag) in enumerate(edited):
+                item = _store(blob, tag, i + 1, tag if tag and "fail" not in tag else "aixj-image")
+                if item:
+                    items.append(item)
+                    source = tag if tag and "fail" not in tag else source
     except Exception as e:
         print(f"[previews/from-image] image-to-image failed: {e}", flush=True)
 
@@ -1517,7 +1586,15 @@ def previews_from_image(req: PreviewsFromImageReq):
     pg.done(f"已按你的图片生成 {len(items)} 张设计稿")
     with open(os.path.join(sd, "prompt.txt"), "w", encoding="utf-8") as f:
         f.write(req.prompt)
-    return {"session_id": sid, "previews": items, "prompt": req.prompt, "source": source}
+    return {
+        "session_id": sid,
+        "previews": items,
+        "prompt": req.prompt,
+        "source": source,
+        # The client drops its stored reference when this is set: the
+        # picture it remembered is not there any more.
+        "reference_missing": reference_missing,
+    }
 
 @app.post("/api/refine")
 def refine_preview_endpoint(req: RefineReq):
@@ -2400,7 +2477,10 @@ def to_3d_build(req: ThreeDBuildReq):
     # design out of a gallery, a wrong number here quietly builds the
     # wrong thing, so the file name is written down every time.
     print(f"[3d_build] session={req.session_id} image_index={req.image_index} "
-          f"source={os.path.basename(source_path)}", flush=True)
+          f"source=img_{req.image_index}.png"
+          + (" (a pose sheet: built from the single figure in it)"
+             if os.path.basename(source_path) != f"img_{req.image_index}.png" else ""),
+          flush=True)
 
     attempts: List[Dict[str, Any]] = []
     last_error: Optional[str] = None
@@ -2498,8 +2578,11 @@ def to_3d_build(req: ThreeDBuildReq):
                         untextured_fallback = result
                         continue
                     result["engine_chain"] = attempts + [{"engine": key, "ok": True}]
+                    result["source_picture"] = os.path.basename(source_path)
+                    result["sheet_cropped"] = _is_sheet_crop(source_path)
                     print(f"[3d_build] done with {key} in "
                           f"{result.get('elapsed_s', 0)}s", flush=True)
+                    _record_model_source(req.session_id, req.image_index, source_path)
                     return result
     finally:
         _PROGRESS_RESET.reset = True
@@ -2510,9 +2593,12 @@ def to_3d_build(req: ThreeDBuildReq):
         result = dict(untextured_fallback)
         result["engine_chain"] = attempts + [{"engine": result.get("engine", "?"),
                                               "ok": True, "note": "untextured"}]
+        result["source_picture"] = os.path.basename(source_path)
+        result["sheet_cropped"] = _is_sheet_crop(source_path)
         print(f"[3d_build] falling back to the untextured model from "
               f"{result.get('engine')}", flush=True)
         pg.done("3D 模型已经做好啦")
+        _record_model_source(req.session_id, req.image_index, source_path)
         return result
 
     pg.fail("这次没能生成出模型，请再试一次")
@@ -3417,12 +3503,24 @@ def get_session_model(sid: str):
 
     if not _has("mesh.glb"):
         return {"session_id": sid, "exists": False}
+    # Which picture the model was built from.  The workbench compares it
+    # with the design the visitor picked, so an older model is not passed
+    # off as the model of the current one.
+    image_index = None
+    try:
+        with open(os.path.join(model_dir, "_build.json"), "r", encoding="utf-8") as handle:
+            built = json.load(handle)
+        if isinstance(built.get("image_index"), int):
+            image_index = int(built["image_index"])
+    except Exception:
+        image_index = None
     return {
         "session_id": sid,
         "exists": True,
         "glb_url": f"/api/export/{sid}/glb",
         "stl_url": f"/api/export/{sid}/stl" if _has("mesh.stl") else None,
         "obj_url": f"/api/export/{sid}/obj" if _has("mesh.obj") else None,
+        "image_index": image_index,
         # The print prep scales the Z axis to the requested height, so a
         # finished model stands upright with Z as its height.
         "up_axis": "z",

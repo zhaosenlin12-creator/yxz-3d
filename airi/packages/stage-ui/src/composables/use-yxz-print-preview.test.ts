@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { buildYXZImageRetryUrl, buildYXZPreviewPrompt, createYXZCartoonModel, createYXZPreview, previewImageSrc, resolveYXZPreviewIndex, waitForYXZBackend, yxzBackendRecovery } from './use-yxz-print-preview'
+import { buildYXZImageRetryUrl, buildYXZPreviewPrompt, createYXZCartoonModel, createYXZPreview, createYXZPreviewFromImage, previewImageSrc, resolveYXZPreviewIndex, waitForYXZBackend, yxzBackendRecovery } from './use-yxz-print-preview'
 
 afterEach(() => {
   yxzBackendRecovery.waitMs = 30_000
@@ -59,6 +59,34 @@ describe('YXZ print preview adapter', () => {
   it('rejects malformed responses instead of rendering untrusted data', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response('{}', { status: 200 }))
     await expect(createYXZPreview({ prompt: '测试' }, fetcher)).rejects.toThrow('数据格式')
+  })
+
+  it('reports a picture that is gone instead of failing the whole turn', async () => {
+    // The browser still remembers an upload the server never got (or that
+    // was cleaned up).  The backend draws the designs from the description
+    // and says so; the client has to drop the dead reference.
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      session_id: 'abc123',
+      prompt: '一个小猫摆件',
+      previews: [{ index: 1, path: '/api/data/abc123/previews/img_1.png' }],
+      reference_missing: true,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+
+    const result = await createYXZPreviewFromImage({ sessionId: 'abc123', prompt: '一个小猫摆件' }, fetcher)
+    expect(result.referenceMissing).toBe(true)
+    expect(result.previews).toHaveLength(1)
+  })
+
+  it('keeps the reference alive when the picture is still there', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      session_id: 'abc123',
+      prompt: '一个小猫摆件',
+      previews: [{ index: 1, path: '/api/data/abc123/previews/img_1.png' }],
+      reference_missing: false,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+
+    const result = await createYXZPreviewFromImage({ sessionId: 'abc123', prompt: '一个小猫摆件' }, fetcher)
+    expect(result.referenceMissing).toBe(false)
   })
 
   it('waits for the backend to come back and repeats the same request', async () => {
@@ -163,6 +191,21 @@ describe('YXZ print preview adapter', () => {
     // refresh or a lost connection cannot kill a model that is being made.
     expect(urls.some(url => url.includes('/api/3d_build'))).toBe(true)
     expect(urls.some(url => url.includes('/api/3d_tripo'))).toBe(false)
+  })
+
+  it('reports a model that was built from one figure of a pose sheet', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      if (String(input).includes('/api/progress/'))
+        return new Response(JSON.stringify({ events: [] }), { status: 200 })
+      return new Response(JSON.stringify({
+        session_id: 'abc123',
+        model_url: '/api/data/abc123/model/mesh.glb',
+        sheet_cropped: true,
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    })
+
+    const result = await createYXZCartoonModel({ sessionId: 'abc123', imageIndex: 1 }, fetcher)
+    expect(result.sheetCropped).toBe(true)
   })
 
   it('sends a canvas-edited image when creating the printable model', async () => {

@@ -28,6 +28,12 @@ export interface YXZPreviewResponse {
   prompt: string
   source?: string
   previews: YXZPreviewItem[]
+  /**
+   * The uploaded picture the request was based on is not in the session
+   * any more.  The pictures were rendered from the description instead, and
+   * the client should forget the picture it still remembers.
+   */
+  referenceMissing?: boolean
 }
 
 export interface YXZPreviewFromImageRequest {
@@ -112,6 +118,11 @@ export interface YXZModelResponse {
   stlUrl: string
   glbUrl: string
   engine?: string
+  /**
+   * The picture was a pose sheet (several poses of the same character in
+   * one square), so the model was built from the single figure in it.
+   */
+  sheetCropped?: boolean
 }
 
 export interface YXZLocalSoftware {
@@ -912,6 +923,7 @@ async function buildYXZModelOnServer(
     glbUrl: absolutePrintApiUrl(`/api/export/${raw.session_id}/glb`),
     stlUrl: absolutePrintApiUrl(`/api/export/${raw.session_id}/stl`),
     engine: typeof raw.engine === 'string' ? raw.engine : '3d',
+    sheetCropped: raw.sheet_cropped === true,
   }
 }
 
@@ -1183,6 +1195,7 @@ async function requestPreviewOnce(
     prompt: typeof raw.prompt === 'string' ? raw.prompt : prompt,
     source: typeof raw.source === 'string' ? raw.source : undefined,
     previews,
+    referenceMissing: false,
   }
 }
 
@@ -1297,6 +1310,7 @@ export async function createYXZPreview(request: YXZPreviewRequest, fetcher: type
         prompt,
         source: 'recovered',
         previews: recovered,
+        referenceMissing: false,
       }
     }
     throw error
@@ -1317,6 +1331,7 @@ export async function createYXZPreview(request: YXZPreviewRequest, fetcher: type
       prompt,
       source: 'recovered',
       previews: recovered,
+      referenceMissing: false,
     }
   }
 
@@ -1380,6 +1395,7 @@ export async function createYXZPreviewFromImage(
           prompt,
           source: 'recovered',
           previews: recovered,
+          referenceMissing: false,
         }
       }
       // Keep the reason of the abort: "signal is aborted without reason"
@@ -1421,6 +1437,7 @@ export async function createYXZPreviewFromImage(
       prompt: typeof raw.prompt === 'string' ? raw.prompt : prompt,
       source: typeof raw.source === 'string' ? raw.source : undefined,
       previews,
+      referenceMissing: raw.reference_missing === true,
     }
   }
   finally {

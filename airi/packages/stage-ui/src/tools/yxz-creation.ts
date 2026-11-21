@@ -418,6 +418,12 @@ export async function createYXZCreationTools() {
                 signal: abortSignal,
                 onProgress,
               })
+          // The picture the browser remembered is not on the server any
+          // more, so the backend drew the designs from the description
+          // instead.  Drop the dead reference: keeping it would send the
+          // next turn down the same broken path.
+          if (reference && result.referenceMissing)
+            memory.update({ referenceImage: null })
           const item = result.previews[0]
           if (!item)
             throw new Error('后台没有返回预览图')
