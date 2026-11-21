@@ -336,7 +336,9 @@ function selectPreview(item: { index: number, src: string }) {
   // A model is expensive to rebuild, so it is not thrown away silently:
   // the visitor is told that what is on screen belongs to the old design.
   if (model.value)
-    modelStale.value = modelSourceIndex.value >= 0 && item.index !== modelSourceIndex.value
+    // An older model does not say which picture it came from, so switching
+    // to another design has to be treated as "it may be the wrong one".
+    modelStale.value = modelSourceIndex.value < 0 || item.index !== modelSourceIndex.value
 }
 
 // The workbench is usually opened straight from a chat session, which only

@@ -70,7 +70,7 @@ Ok "airi"
 Write-Host "[3/7] 拷贝后端 cartoon-print-studio ..." -ForegroundColor Cyan
 Copy-Clean -Src (Join-Path $SourceRoot 'cartoon-print-studio') -Dst (Join-Path $OutDir 'cartoon-print-studio') `
     -ExcludeDirs @('venv', '.venv', 'models', 'logs', 'dist', 'release', 'build',
-                   '__pycache__', '.run', '.pytest_cache', 'data', '.git') `
+                   '__pycache__', '.run', '.pytest_cache', 'data', '.git', 'tests') `
     -ExcludeFiles @('*.log', 'software_paths.json')
 Ok "cartoon-print-studio"
 
