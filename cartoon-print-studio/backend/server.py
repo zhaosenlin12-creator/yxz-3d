@@ -791,6 +791,23 @@ def _cached_tripo_balance():
         return None
     return _BALANCE_CACHE["value"]
 
+
+def _wait_for_tripo_balance(seconds: float = 0.3) -> Optional[Dict[str, Any]]:
+    """Give the background probe a short moment to answer.
+
+    The balance only decides whether the model gets its colours.  It must
+    never hold the request hostage: when the provider is slow the answer
+    is "unknown", and an unknown balance asks for the textured model
+    anyway (Tripo refuses the job itself when it cannot pay).
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        value = _BALANCE_CACHE["value"]
+        if value is not None and (time.time() - _BALANCE_CACHE["ts"]) <= _BALANCE_TTL:
+            return value
+        time.sleep(0.02)
+    return None
+
 @app.get("/api/health")
 def health():
     tripo_info = tripo_api.health()
@@ -2133,19 +2150,14 @@ def to_3d_tripo(req: ThreeDTripoReq):
     bal = _cached_tripo_balance()
     if bal is None:
         # The cache was cold: the balance is UNKNOWN, not zero.  Asking
-        # for it now costs one small request and decides whether the
-        # model comes back painted or as bare grey geometry -- which is
-        # exactly the difference between a toy and a shell.  The old
-        # code read "unknown" as "no credits" and silently asked Tripo
-        # for an untextured model even though the account had more than
-        # a thousand credits waiting.
-        try:
-            bal = tripo_api.get_balance(timeout=10.0, retries=0)
-            if isinstance(bal, dict) and bal.get("ok"):
-                _BALANCE_CACHE["value"] = bal
-                _BALANCE_CACHE["ts"] = time.time()
-        except Exception as e:
-            print(f"[tripo3d] balance lookup failed: {e}", flush=True)
+        # for it here would put a network round trip on the request path
+        # and stall the visitor for seconds whenever Tripo is slow --
+        # that is exactly the "卡住" the workbench must never show.  The
+        # background probe is already on its way, so give it a moment and
+        # then move on: an unknown balance asks for the textured model
+        # anyway, and Tripo refuses the job itself when the account
+        # cannot pay for the texture.
+        bal = _wait_for_tripo_balance()
     # 额度可能暂时查不到（后台探针还没跑完）。这时它是「未知」，不是 0，
     # 更不能是「没定义」—— 之前这里没给默认值，模型生成成功之后组装
     # 响应时直接抛 UnboundLocalError，整个请求变成 500，前端只好换到

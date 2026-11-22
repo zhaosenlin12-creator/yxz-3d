@@ -33,9 +33,11 @@ BASE_V2_GLOBAL = "https://api.tripo3d.ai/v2/openapi"
 
 #: Which platform the current key belongs to. Flipped automatically when a
 #: key is rejected by the active host, and remembered for the next call.
-#: This deployment's tsk_ key is a Tripo v2 key (v3 answers 401), and v2
-#: also accepts it for task creation, so v2 is tried first.
-_api_version = os.environ.get("TRIPO_API_VERSION", "v2").strip() or "v2"
+#: The CN key in this deployment answers on v3 (openapi.tripo3d.com) -- the
+#: balance, the upload and the task creation were all confirmed live -- and
+#: the v2 gateway accepts it too.  v3 is therefore tried first, and the
+#: request ladder falls back to v2 on its own whenever v3 refuses the key.
+_api_version = os.environ.get("TRIPO_API_VERSION", "v3").strip() or "v3"
 BASE = _base_for(_api_version) if "_base_for" in globals() else BASE_V2
 
 
