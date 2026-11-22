@@ -2,19 +2,19 @@ import type { WebSocketEventInputs } from '@proj-airi/server-sdk'
 import type { ChatProvider } from '@xsai-ext/providers/utils'
 import type { CommonContentPart, Message, ToolMessage } from '@xsai/shared-chat'
 
-import type { ChatAssistantMessage, ChatSlices, ChatStreamEventContext, StreamingAssistantMessage } from '../types/chat'
+import type { ChatAssistantMessage, ChatHistoryItem, ChatSlices, ChatStreamEventContext, StreamingAssistantMessage } from '../types/chat'
 import type { StreamEvent, StreamOptions } from './llm'
 
 import { createQueue } from '@proj-airi/stream-kit'
 import { nanoid } from 'nanoid'
 import { defineStore, storeToRefs } from 'pinia'
-import { ref, toRaw } from 'vue'
+import { ref, toRaw, watch } from 'vue'
 
 import { useAnalytics } from '../composables'
 import { useLlmmarkerParser } from '../composables/llm-marker-parser'
 import { categorizeResponse, createStreamingCategorizer } from '../composables/response-categoriser'
-import { buildYXZGuidanceBlock, classifyYXZVisitorIntent, extractYXZVisitorPatch } from '../composables/use-yxz-guidance'
-import { useYXZRequirementMemory } from '../composables/use-yxz-requirement-memory'
+import { buildYXZClarificationReply, buildYXZGuidanceBlock, classifyYXZVisitorIntent, extractYXZVisitorPatch } from '../composables/use-yxz-guidance'
+import { setYXZRequirementScope, useYXZRequirementMemory } from '../composables/use-yxz-requirement-memory'
 import { generateYXZModelFromConfirmation, isYXZModelConfirmationText } from '../tools/yxz-creation'
 import { buildContextPromptMessage } from './chat/context-prompt'
 import { createDatetimeContext, createMinecraftContext } from './chat/context-providers'
@@ -57,7 +57,8 @@ const YXZ_SYSTEM_GUIDANCE = `你是“宜小智AI智能创造系统”的宜小�
 - 需求够了 → 立刻调用 yxz_generatePreview 出 4 张预览图，并说明你看的是哪个方案。不要让访客手动点“开始创作”。
 - 访客说“再出一次 / 换一批 / 再看看 / 重新生成” → 这是要新一版预览，沿用已确认的需求重新调用 yxz_generatePreview，不要重新问需求。
 - 访客说“发送预览 / 出图 / 给我看看 / 先看效果” → 同样理解成“现在就生成预览图”。
-- 访客只是提问、或者在表达困惑和不满（“你???”、“怎么还没好”、“不是这个”） → **先回一句话**，问清楚哪里不对劲或者回答问题。**不要**自作主张去出图。
+- 访客只是提问（“打印要多久”、“多少钱”） → **只回答问题**，一句话讲清楚。**不要**出图，也不要调用任何出图工具。
+- 访客在表达困惑和不满（“你???”、“怎么还没好”、“不是这个”） → **先回一句话**，问清楚哪里不对劲。**不要**自作主张去出图。
 - 访客看到预览并明确同意（“就这个 / 可以 / 做一个 3D / 开始生成”）→ 才调用 yxz_generate3DModel。
 - 未经确认不要自动打印、不要替访客登录任何软件、不要承诺取件。
 
@@ -74,6 +75,7 @@ const YXZ_SYSTEM_GUIDANCE = `你是“宜小智AI智能创造系统”的宜小�
   1. **绝对不要说“已经出来了”“就在上面的卡片里”**。工具失败的时候卡片里什么都没有，说出来就是在骗访客。
   2. 一句话说明这次没生成成功，然后自己重试一次；重试还是不行，就请访客补充细节或换个说法。
   3. 不要把报错原文念给访客听。
+- 出图工具返回「这一句不该出图」时：说明访客这一句是在提问或是在表达困惑，直接回答或回应，**不要说已经出图了**。
 - 访客问的是活动、宜昌、展台、你是谁这类问题：用上面的知识正常回答，不要硬拐回创作。
 - 访客只发了一个词或一句话：先用一句话复述你理解到的方案，再问那一个最关键的问题。`
 
@@ -106,6 +108,38 @@ interface QueuedSend {
   }
 }
 
+/**
+ * What the visitor can actually see on screen right now.
+ *
+ * The reply to a confused visitor has to match the screen: telling
+ * somebody "预览已经出来了" when nothing was drawn is the one thing the
+ * assistant must never do, and a reply built from the cards themselves
+ * cannot say that by accident.
+ */
+export function describeYXZSessionCards(messages: ChatHistoryItem[]): { hasPreview: boolean, isBuilding: boolean } {
+  let hasPreview = false
+  let isBuilding = false
+
+  for (const message of messages) {
+    if (message.role !== 'assistant')
+      continue
+
+    const creation = message.yxzCreation
+    if (!creation || creation.kind !== 'yxz-creation')
+      continue
+
+    if (creation.status === 'preview-building' || creation.status === 'model-building') {
+      isBuilding = true
+      continue
+    }
+
+    if (creation.status === 'preview' && creation.preview?.src)
+      hasPreview = true
+  }
+
+  return { hasPreview, isBuilding }
+}
+
 export interface QueuedSendSnapshot {
   sessionId: string
   generation: number
@@ -127,6 +161,13 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
   const contextObservability = useContextObservabilityStore()
   const { activeSessionId } = storeToRefs(chatSession)
   const { streamingMessage } = storeToRefs(chatStream)
+
+  // The requirement memory belongs to one conversation.  Every conversation
+  // gets its own, so a new chat really does start with a clean sheet and
+  // yesterday's "圆润可爱" cannot follow the visitor into today's request.
+  watch(activeSessionId, (sessionId) => {
+    setYXZRequirementScope(sessionId)
+  }, { immediate: true })
 
   const sending = ref(false)
   const pendingQueuedSends = ref<QueuedSend[]>([])
@@ -225,6 +266,10 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     const isForegroundSession = () => sessionId === activeSessionId.value
 
     const buildingMessage: StreamingAssistantMessage = { role: 'assistant', content: '', slices: [], tool_results: [], createdAt: Date.now(), id: nanoid() }
+
+    // Set when the visitor's message is a complaint or a muddle: the
+    // answer is produced locally and the model is not called at all.
+    let yxzClarification: string | undefined
 
     const updateUI = () => {
       if (isForegroundSession()) {
@@ -411,9 +456,10 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
         const intent = classifyYXZVisitorIntent(sendingMessage)
         const visitorPatch = extractYXZVisitorPatch(sendingMessage, intent)
         if (Object.keys(visitorPatch).length)
-          memory.update(visitorPatch)
+          memory.update(visitorPatch, sessionId)
 
-        const guidanceBlock = buildYXZGuidanceBlock(memory.state.value, intent)
+        const sessionMemory = memory.stateFor(sessionId)
+        const guidanceBlock = buildYXZGuidanceBlock(sessionMemory, intent)
         const yxzGuidance = guidanceBlock
           ? `${YXZ_SYSTEM_GUIDANCE}\n\n${guidanceBlock}`
           : YXZ_SYSTEM_GUIDANCE
@@ -423,6 +469,19 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
           newMessages[0] = { ...first, content: `${first.content}\n${yxzGuidance}` }
         else
           newMessages.unshift({ role: 'system', content: yxzGuidance })
+
+        // A visitor who is confused ("你???", "怎么还没好") does not need a
+        // model round-trip to be answered -- the answer is in the state of
+        // the screen, and a round-trip that ends in "刚才这一句我没接住"
+        // is what made the app feel broken.  Answering here keeps the
+        // reply instant and, more importantly, keeps it honest: the reply
+        // is built from what is actually on screen.
+        if (intent === 'confused' && !options.attachments?.length) {
+          yxzClarification = buildYXZClarificationReply({
+            ...describeYXZSessionCards(chatSession.getSessionMessages(sessionId)),
+            description: sessionMemory?.description ?? '',
+          })
+        }
       }
 
       const contextsSnapshot = chatContext.getContextsSnapshot()
@@ -479,65 +538,76 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       // standing in front of the screen: a silent, frozen chat looks like a
       // crash.  We keep the failure, finish the turn and say something.
       let streamFailure: Error | undefined
-      try {
-        await llmStore.stream(options.model, options.chatProvider, newMessages as Message[], {
-          headers,
-          providerId: options.providerId ?? activeProvider.value,
-          scope: 'consciousness',
-          tools: options.tools,
-          abortSignal: abortController.signal,
-          // NOTICE: xsai stream may emit `finish` before tool steps continue, so keep waiting until
-          // the final non-tool finish to avoid ending the chat turn with no assistant reply.
-          waitForTools: true,
-          onAttemptStart: ({ providerId }) => {
-            if (!providerId || providerId === effectiveProviderId || fullText)
-              return
-
-            effectiveProviderId = providerId
-            categorizer = createStreamingCategorizer(effectiveProviderId)
-          },
-          onStreamEvent: async (event: StreamEvent) => {
-            // Every raw event proves the turn is alive.  The chat watchdog
-            // watches this stamp instead of the visible text, so a model
-            // that thinks for a while -- or a tool that renders images for
-            // a minute -- is never mistaken for a frozen chat.
-            chatStream.touchActivity()
-            switch (event.type) {
-              case 'tool-call':
-                toolCallQueue.enqueue({
-                  type: 'tool-call',
-                  toolCall: event,
-                })
-
-                break
-              case 'tool-result':
-                toolCallQueue.enqueue({
-                  type: 'tool-call-result',
-                  id: event.toolCallId,
-                  result: event.result,
-                })
-
-                break
-              case 'text-delta':
-                fullText += event.text
-                await parser.consume(event.text)
-                break
-              case 'finish':
-                break
-              case 'error':
-                // Record it and let the stream wind down.  Throwing here
-                // used to abort the whole turn, which is exactly the
-                // "回答到一半就卡住" the visitor kept hitting.
-                streamFailure = event.error ?? new Error('Stream error')
-                console.error('[chat] stream reported an error', streamFailure)
-                break
-            }
-          },
-        })
+      if (yxzClarification) {
+        // No model round-trip: the answer is already known, and asking the
+        // model to phrase it would only add seconds to a moment the visitor
+        // experiences as "the app is broken".
+        fullText = yxzClarification
+        buildingMessage.content = yxzClarification
+        buildingMessage.slices = [{ type: 'text', text: yxzClarification }]
+        updateUI()
       }
-      catch (error) {
-        streamFailure = error instanceof Error ? error : new Error(String(error))
-        console.error('[chat] turn failed', streamFailure)
+      else {
+        try {
+          await llmStore.stream(options.model, options.chatProvider, newMessages as Message[], {
+            headers,
+            providerId: options.providerId ?? activeProvider.value,
+            scope: 'consciousness',
+            tools: options.tools,
+            abortSignal: abortController.signal,
+            // NOTICE: xsai stream may emit `finish` before tool steps continue, so keep waiting until
+            // the final non-tool finish to avoid ending the chat turn with no assistant reply.
+            waitForTools: true,
+            onAttemptStart: ({ providerId }) => {
+              if (!providerId || providerId === effectiveProviderId || fullText)
+                return
+
+              effectiveProviderId = providerId
+              categorizer = createStreamingCategorizer(effectiveProviderId)
+            },
+            onStreamEvent: async (event: StreamEvent) => {
+              // Every raw event proves the turn is alive.  The chat watchdog
+              // watches this stamp instead of the visible text, so a model
+              // that thinks for a while -- or a tool that renders images for
+              // a minute -- is never mistaken for a frozen chat.
+              chatStream.touchActivity()
+              switch (event.type) {
+                case 'tool-call':
+                  toolCallQueue.enqueue({
+                    type: 'tool-call',
+                    toolCall: event,
+                  })
+
+                  break
+                case 'tool-result':
+                  toolCallQueue.enqueue({
+                    type: 'tool-call-result',
+                    id: event.toolCallId,
+                    result: event.result,
+                  })
+
+                  break
+                case 'text-delta':
+                  fullText += event.text
+                  await parser.consume(event.text)
+                  break
+                case 'finish':
+                  break
+                case 'error':
+                  // Record it and let the stream wind down.  Throwing here
+                  // used to abort the whole turn, which is exactly the
+                  // "回答到一半就卡住" the visitor kept hitting.
+                  streamFailure = event.error ?? new Error('Stream error')
+                  console.error('[chat] stream reported an error', streamFailure)
+                  break
+              }
+            },
+          })
+        }
+        catch (error) {
+          streamFailure = error instanceof Error ? error : new Error(String(error))
+          console.error('[chat] turn failed', streamFailure)
+        }
       }
 
       await parser.end()

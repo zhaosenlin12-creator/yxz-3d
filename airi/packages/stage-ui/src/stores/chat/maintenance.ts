@@ -21,7 +21,7 @@ export const useChatMaintenanceStore = defineStore('chat-maintenance', () => {
     // memory has to go with it, otherwise the picture that was uploaded
     // in the old conversation keeps being used as the shape reference of
     // the next one.
-    useYXZRequirementMemory().clear()
+    useYXZRequirementMemory().clear(sessionId)
   }
 
   return {

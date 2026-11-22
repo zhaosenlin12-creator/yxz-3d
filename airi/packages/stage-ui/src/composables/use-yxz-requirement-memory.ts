@@ -1,6 +1,6 @@
 import type { Ref } from 'vue'
 
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 export interface YXZRequirementMemory {
   description: string
@@ -21,6 +21,15 @@ export interface YXZRequirementMemory {
   /** The picture the visitor uploaded: the shape reference for the preview. */
   referenceImage?: YXZReferenceImage
   updatedAt: number
+  /**
+   * The conversation this memory belongs to.
+   *
+   * The memory used to be one global blob in localStorage, so the style
+   * a visitor asked for yesterday followed them into today's request and
+   * the assistant looked like it was answering somebody else.  Every
+   * conversation now keeps its own memory.
+   */
+  chatSessionId?: string
 }
 
 export interface YXZReferenceImage {
@@ -62,7 +71,38 @@ export interface YXZRequirementStorage {
 
 export const YXZ_REQUIREMENT_MEMORY_KEY = 'yxz/requirement-memory/v1'
 
-const sharedStates = new Map<YXZRequirementStorage | undefined, Ref<YXZRequirementMemory | null>>()
+/**
+ * The conversation the memory currently belongs to.
+ *
+ * Every conversation keeps its own memory, so starting a new one starts
+ * with a clean sheet.  The chat store keeps this in sync with the active
+ * session; the panels and tools read it so they all see the same thing.
+ */
+export const YXZ_DEFAULT_REQUIREMENT_SCOPE = 'global'
+
+export const yxzRequirementScope = ref<string>(YXZ_DEFAULT_REQUIREMENT_SCOPE)
+
+export function setYXZRequirementScope(scopeId?: string | null) {
+  const next = resolveScope(scopeId)
+  if (yxzRequirementScope.value !== next)
+    yxzRequirementScope.value = next
+}
+
+function resolveScope(scopeId?: string | null) {
+  return (scopeId ?? '').trim() || YXZ_DEFAULT_REQUIREMENT_SCOPE
+}
+
+/** How many conversations keep their own memory around. */
+const YXZ_MAX_REMEMBERED_SCOPES = 12
+
+const scopedStates = new Map<YXZRequirementStorage | undefined, Map<string, Ref<YXZRequirementMemory | null>>>()
+
+/**
+ * Which conversation owns the memory that predates the per-conversation
+ * split.  It is claimed once, by the first conversation that asks for it,
+ * so a stale global memory can never leak into a second conversation.
+ */
+let legacyOwner: string | null = null
 
 function getDefaultStorage(): YXZRequirementStorage | undefined {
   if (typeof window === 'undefined' || !window.localStorage)
@@ -133,20 +173,82 @@ export function normalizeYXZRequirementMemory(value: unknown): YXZRequirementMem
     deliverable: cleanText(record.deliverable) || undefined,
     referenceImage,
     updatedAt: typeof record.updatedAt === 'number' && Number.isFinite(record.updatedAt) ? record.updatedAt : Date.now(),
+    chatSessionId: cleanText(record.chatSessionId) || undefined,
   }
 }
 
-export function loadYXZRequirementMemory(storage = getDefaultStorage()) {
+interface YXZScopeStore {
+  scopes: Record<string, YXZRequirementMemory>
+  /** Memory written before conversations were separated. */
+  legacy?: YXZRequirementMemory
+}
+
+function readScopeStore(storage: YXZRequirementStorage | undefined): YXZScopeStore | null {
   if (!storage)
     return null
 
   try {
     const raw = storage.getItem(YXZ_REQUIREMENT_MEMORY_KEY)
-    return raw ? normalizeYXZRequirementMemory(JSON.parse(raw)) : null
+    if (!raw)
+      return null
+
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object')
+      return null
+
+    const record = parsed as Record<string, unknown>
+    if (record.version === 2 && record.scopes && typeof record.scopes === 'object') {
+      const scopes: Record<string, YXZRequirementMemory> = {}
+      for (const [key, value] of Object.entries(record.scopes as Record<string, unknown>)) {
+        const memory = normalizeYXZRequirementMemory(value)
+        if (memory)
+          scopes[key] = memory
+      }
+      return { scopes }
+    }
+
+    // The old format: one flat memory shared by every conversation.
+    const legacy = normalizeYXZRequirementMemory(record)
+    return legacy ? { scopes: {}, legacy } : { scopes: {} }
   }
   catch {
     return null
   }
+}
+
+function writeScopeStore(storage: YXZRequirementStorage | undefined, store: YXZScopeStore) {
+  if (!storage)
+    return
+
+  try {
+    storage.setItem(YXZ_REQUIREMENT_MEMORY_KEY, JSON.stringify({ version: 2, scopes: store.scopes }))
+  }
+  catch {
+    // Storage can be unavailable in private browsing or embedded webviews.
+  }
+}
+
+export function loadYXZRequirementMemory(storage = getDefaultStorage(), scopeId?: string) {
+  const scope = resolveScope(scopeId ?? yxzRequirementScope.value)
+  const store = readScopeStore(storage)
+  if (!store)
+    return null
+
+  const scoped = store.scopes[scope]
+  if (scoped)
+    return scoped
+
+  if (!store.legacy)
+    return null
+
+  // The pre-split memory belongs to one conversation only: the first one
+  // that asks for it.  Everybody else starts clean.
+  if (legacyOwner === null)
+    legacyOwner = scope
+  if (legacyOwner !== scope)
+    return null
+
+  return store.legacy
 }
 
 export function mergeYXZRequirementMemory(current: YXZRequirementMemory | null, patch: YXZRequirementPatch): YXZRequirementMemory {
@@ -174,28 +276,37 @@ export function mergeYXZRequirementMemory(current: YXZRequirementMemory | null, 
   }
 }
 
-export function saveYXZRequirementMemory(memory: YXZRequirementMemory, storage = getDefaultStorage()) {
-  if (!storage)
-    return
+export function saveYXZRequirementMemory(memory: YXZRequirementMemory, storage = getDefaultStorage(), scopeId?: string) {
+  const scope = resolveScope(scopeId ?? yxzRequirementScope.value)
+  const store = readScopeStore(storage) ?? { scopes: {} }
+  const scopes: Record<string, YXZRequirementMemory> = { ...store.scopes }
 
-  try {
-    storage.setItem(YXZ_REQUIREMENT_MEMORY_KEY, JSON.stringify(memory))
+  scopes[scope] = {
+    ...memory,
+    chatSessionId: scope === YXZ_DEFAULT_REQUIREMENT_SCOPE ? undefined : scope,
   }
-  catch {
-    // Storage can be unavailable in private browsing or embedded webviews.
-  }
+
+  // The pre-split memory is pinned to the conversation that claimed it
+  // instead of floating between all of them.
+  if (store.legacy && legacyOwner && !scopes[legacyOwner])
+    scopes[legacyOwner] = store.legacy
+
+  const kept = Object.entries(scopes)
+    .sort((a, b) => (b[1].updatedAt ?? 0) - (a[1].updatedAt ?? 0))
+    .slice(0, YXZ_MAX_REMEMBERED_SCOPES)
+
+  writeScopeStore(storage, { scopes: Object.fromEntries(kept) })
 }
 
-export function clearYXZRequirementMemory(storage = getDefaultStorage()) {
-  if (!storage)
+export function clearYXZRequirementMemory(storage = getDefaultStorage(), scopeId?: string) {
+  const scope = resolveScope(scopeId ?? yxzRequirementScope.value)
+  const store = readScopeStore(storage)
+  if (!store)
     return
 
-  try {
-    storage.removeItem(YXZ_REQUIREMENT_MEMORY_KEY)
-  }
-  catch {
-    // Ignore unavailable storage; the in-memory state is still cleared by the composable.
-  }
+  const scopes = { ...store.scopes }
+  delete scopes[scope]
+  writeScopeStore(storage, { scopes })
 }
 
 // The question plan lives in use-yxz-guidance.ts, next to the slot table that
@@ -205,26 +316,49 @@ export { getYXZRequirementNextQuestion } from './use-yxz-guidance'
 
 export function useYXZRequirementMemory(storage = getDefaultStorage()) {
   // Several surfaces touch the same memory (the chat panel, the guided
-  // preview panel and the creation tool).  Keeping one ref per storage
-  // means an update made in one place is visible in the others right away
-  // instead of landing on a stale snapshot.
-  let shared = sharedStates.get(storage)
-  if (!shared) {
-    shared = ref<YXZRequirementMemory | null>(loadYXZRequirementMemory(storage))
-    sharedStates.set(storage, shared)
-  }
-  const state = shared
+  // preview panel and the creation tool).  Keeping one ref per storage and
+  // scope means an update made in one place is visible in the others right
+  // away instead of landing on a stale snapshot.
+  const scopedState = (scope: string) => {
+    const scopeId = resolveScope(scope)
+    let byScope = scopedStates.get(storage)
+    if (!byScope) {
+      byScope = new Map<string, Ref<YXZRequirementMemory | null>>()
+      scopedStates.set(storage, byScope)
+    }
 
-  function update(patch: YXZRequirementPatch) {
-    state.value = mergeYXZRequirementMemory(state.value, patch)
-    saveYXZRequirementMemory(state.value, storage)
-    return state.value
-  }
-
-  function clear() {
-    state.value = null
-    clearYXZRequirementMemory(storage)
+    let state = byScope.get(scopeId)
+    if (!state) {
+      state = ref<YXZRequirementMemory | null>(loadYXZRequirementMemory(storage, scopeId))
+      byScope.set(scopeId, state)
+    }
+    return state
   }
 
-  return { state, update, clear }
+  // The active conversation decides which memory is visible, so switching
+  // conversations swaps the whole memory over -- including in the panels
+  // that only ever read `.value`.
+  const state = computed(() => scopedState(yxzRequirementScope.value).value)
+
+  function update(patch: YXZRequirementPatch, scope: string = yxzRequirementScope.value) {
+    const scopeId = resolveScope(scope)
+    const target = scopedState(scopeId)
+    target.value = mergeYXZRequirementMemory(target.value, patch)
+    saveYXZRequirementMemory(target.value, storage, scopeId)
+    return target.value
+  }
+
+  function clear(scope: string = yxzRequirementScope.value) {
+    const scopeId = resolveScope(scope)
+    const target = scopedState(scopeId)
+    target.value = null
+    clearYXZRequirementMemory(storage, scopeId)
+  }
+
+  /** The memory of one specific conversation. */
+  function stateFor(scope: string) {
+    return scopedState(scope).value
+  }
+
+  return { state, stateFor, update, clear }
 }

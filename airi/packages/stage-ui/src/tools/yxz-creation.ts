@@ -385,6 +385,16 @@ export async function createYXZCreationTools() {
               message: '访客这一句不是要出图，是在表达困惑或不满。请先回应他，问清楚哪里不对劲，不要再出图。',
             }
           }
+          // A question is a question.  "打印要多久" used to send the app
+          // off drawing another picture -- the visitor asked how long
+          // printing takes and got a design instead of an answer.  The
+          // tool refuses, so the model can only answer.
+          if (intent === 'question') {
+            return {
+              status: 'not-requested',
+              message: '访客这一句是在提问，不是要出图。请直接回答问题，不要出图，也不要说已经出图了。',
+            }
+          }
         }
         const memory = useYXZRequirementMemory()
         // Keep the structured slots in sync with the free text. The prompt

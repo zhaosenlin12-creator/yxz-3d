@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  buildYXZClarificationReply,
   buildYXZGuidanceBlock,
   classifyYXZVisitorIntent,
   extractYXZRequirementSignals,
@@ -102,6 +103,33 @@ describe('yXZ visitor intent', () => {
     expect(classifyYXZVisitorIntent('展台是几点开始')).toBe('question')
   })
 
+  it('reads a question about the making as a question, not as a brief', () => {
+    expect(classifyYXZVisitorIntent('打印要多久')).toBe('question')
+    expect(classifyYXZVisitorIntent('3D打印多长时间能好')).toBe('question')
+    expect(classifyYXZVisitorIntent('这个要多少钱')).toBe('question')
+  })
+
+  it('reads a colour change as a change, not as a question', () => {
+    expect(classifyYXZVisitorIntent('换成蓝色可以吗')).toBe('refine')
+    expect(classifyYXZVisitorIntent('颜色要深一点')).toBe('refine')
+  })
+
+  it('still reads a brief that names a colour as a brief', () => {
+    expect(classifyYXZVisitorIntent('我要做一个蓝色的摆件')).toBe('new-requirement')
+  })
+
+  it('keeps the brief when a complaint carries one', () => {
+    expect(classifyYXZVisitorIntent('怎么还没好，我要个小熊')).toBe('new-requirement')
+    // An explicit redraw wins: the visitor said what they want.
+    expect(classifyYXZVisitorIntent('不是这个，我要重新生成')).toBe('regenerate')
+  })
+
+  it('still reads a bare complaint as a complaint', () => {
+    expect(classifyYXZVisitorIntent('你???')).toBe('confused')
+    expect(classifyYXZVisitorIntent('怎么还没好')).toBe('confused')
+    expect(classifyYXZVisitorIntent('不是这个')).toBe('confused')
+  })
+
   it('keeps a complaint out of the requirement memory', () => {
     const patch = extractYXZVisitorPatch('你???', 'confused')
     expect(Object.keys(patch)).toHaveLength(0)
@@ -122,5 +150,28 @@ describe('yXZ visitor intent', () => {
     const block = buildYXZGuidanceBlock(null, 'confused')
     expect(block).toContain('【访客这句的意思】')
     expect(block).toContain('不要自作主张重新出图')
+  })
+})
+
+describe('yXZ clarification of a confused visitor', () => {
+  it('says the preview is there when it is', () => {
+    const reply = buildYXZClarificationReply({ hasPreview: true, isBuilding: false })
+    expect(reply).toContain('预览已经出来了')
+  })
+
+  it('never claims a preview that is not on screen', () => {
+    const reply = buildYXZClarificationReply({ hasPreview: false, isBuilding: false, description: '小熊摆件' })
+    expect(reply).not.toContain('预览已经出来了')
+    expect(reply).toContain('小熊摆件')
+  })
+
+  it('tells the visitor the picture is still being made', () => {
+    const reply = buildYXZClarificationReply({ hasPreview: false, isBuilding: true })
+    expect(reply).toContain('还在生成中')
+  })
+
+  it('asks what to make when nothing is known yet', () => {
+    const reply = buildYXZClarificationReply({ hasPreview: false, isBuilding: false })
+    expect(reply).toContain('你想做点什么')
   })
 })

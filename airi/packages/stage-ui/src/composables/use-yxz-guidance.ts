@@ -405,8 +405,21 @@ const YXZ_CONFUSED_RE = /^[\s?？!！。.…·、,，~～]*$|你[?？]+|怎么(?
 /** The visitor is describing a product rather than talking about the app. */
 const YXZ_MAKE_RE = /(?:做|制作|设计|定制|建模|打印)(?:出|个|一个|款|只|张|样|点)?|想要|我要|想做|帮我做|来一?个|生成一?个|做个|做个/
 
+/**
+ * "打印要多久" is a question about the making, not a brief.
+ *
+ * It has to be recognised before the make-verb rule, because "打印" is
+ * one of the make verbs and the visitor would otherwise get a picture
+ * instead of an answer -- the exact "答非所问" the booth visitors
+ * complained about.
+ */
+const YXZ_ASK_DURATION_RE = /多久|多长时间|什么时候|几天|几号|多大|多重|多贵|多少钱/
+
+/** The visitor named a subject: "我要个小熊", "帮我做个机器人". */
+const YXZ_BRIEF_RE = /我要|我想|想做|我想要|帮我(?:做|来|定)|来一?个|做个|做个/
+
 /** A change to the picture that was already made. */
-const YXZ_REFINE_RE = /换(?:个|成|一下)?(?:颜色|配色|造型|风格|材料)|改成|调整|加大|缩小|大一点|小一点|加(?:个|点|上)|去掉|不要/
+const YXZ_REFINE_RE = /换(?:个|成|一下)?(?:颜色|配色|造型|风格|材料)|改成|调整|加大|缩小|大一点|小一点|加(?:个|点|上)|去掉|不要|换(?:个|成|一下)?[^，。,.\s]{1,6}色|改成[^，。,.\s]{1,6}色|要[^，。,.\s]{1,4}色|(?:深|浅|亮|暗|厚|薄|长|短|大|小)一点/
 
 /** A plain question about the exhibition or about the making. */
 const YXZ_QUESTION_RE = /[?？]\s*$|吗\s*$|呢\s*$|怎么|如何|为什么|能不能|可不可以|好不好|行不行|是不是|哪些|哪个|多少|几点|什么时候|哪里|在哪|几点钟/
@@ -424,24 +437,53 @@ export function classifyYXZVisitorIntent(text: string): YXZVisitorIntent {
   if (!value)
     return 'question'
 
-  if (YXZ_CONFUSED_RE.test(value))
-    return 'confused'
   if (YXZ_REGENERATE_RE.test(value))
     return 'regenerate'
+
+  if (YXZ_CONFUSED_RE.test(value)) {
+    // A complaint that still carries a brief is a brief: "怎么还没好，我要
+    // 个小熊" has to produce the cat, not a clarification question.
+    if (!/[?？]\s*$/.test(value) && value.length >= 8 && YXZ_BRIEF_RE.test(value))
+      return 'new-requirement'
+
+    return 'confused'
+  }
+
+  if (YXZ_ASK_DURATION_RE.test(value))
+    return 'question'
+
   if (YXZ_MAKE_RE.test(value))
     return 'new-requirement'
+
   if (YXZ_REFINE_RE.test(value))
     return 'refine'
+
   if (YXZ_QUESTION_RE.test(value))
     return 'question'
+
   return 'new-requirement'
+}
+
+/**
+ * The subject a visitor named, if the message really names one.
+ *
+ * Kept apart from the complaint handling on purpose: a muddle that still
+ * says "我要个小熊" has to keep that subject, otherwise the visitor has
+ * to repeat themselves.
+ */
+export function extractYXZVisitorBrief(text: string): YXZRequirementPatch {
+  const value = (text ?? '').trim()
+  if (!value || value.length < 6 || !YXZ_MAKE_RE.test(value))
+    return {}
+
+  return { description: value }
 }
 
 /** One line that tells the model what this message is. */
 const YXZ_INTENT_HINTS: Record<YXZVisitorIntent, string> = {
   'regenerate': '访客要的是「再来一版」：沿用已经确认的需求重新出图，不要重新问需求。',
   'confused': '访客在表达困惑或不满：先用一句话回应，问清楚哪里不对劲，不要自作主张重新出图，也不要说已经出好了。',
-  'question': '访客在提问：先回答问题，别把提问当成出图指令。',
+  'question': '访客在提问：只回答这个问题，一句话讲清楚。不要调用任何出图或制作工具，不要重新出图，也不要说已经出图了。',
   'refine': '访客在提修改意见：把改动并入需求后重新出图。',
   'new-requirement': '访客在描述新需求：看下面还缺什么，只补问最关键的那一个。',
 }
@@ -480,8 +522,50 @@ export function extractYXZVisitorPatch(text: string, intent: YXZVisitorIntent): 
     patch.constraints = [value]
 
   // The subject is only taken from a sentence that really describes one.
-  if (intent === 'new-requirement' && value.length >= 6 && YXZ_MAKE_RE.test(value))
-    patch.description = value
+  if (intent === 'new-requirement') {
+    const brief = extractYXZVisitorBrief(value)
+    if (brief.description)
+      patch.description = brief.description
+  }
 
   return patch
+}
+
+/**
+ * What the visitor can see right now.
+ */
+export interface YXZClarificationContext {
+  /** A finished preview card is on screen. */
+  hasPreview: boolean
+  /** A preview or a 3D model is still being generated. */
+  isBuilding: boolean
+  /** The subject the visitor already gave, if any. */
+  description?: string
+}
+
+/**
+ * The answer to a visitor who is confused or unhappy.
+ *
+ * This is written in code on purpose.  The model used to receive the
+ * complaint, decide on its own that it should draw again, and either
+ * start a long generation or fall back to "刚才这一句我没接住" -- both
+ * of which cost the visitor seconds and told them nothing.  The screen
+ * already knows what happened, so the reply is built from the screen.
+ *
+ * Two rules it must never break:
+ *   - never claim a preview exists when it does not;
+ *   - never start a new generation from here.
+ */
+export function buildYXZClarificationReply(context: YXZClarificationContext): string {
+  if (context.isBuilding)
+    return '还在生成中，稍等一下就好，我盯着进度。'
+
+  if (context.hasPreview)
+    return '预览已经出来了，是这一版跟你想的不一样吗？告诉我要改哪儿——造型、配色、大小都行，我马上改。'
+
+  const description = (context.description ?? '').trim()
+  if (description)
+    return `我记着你要做的是「${description}」。是想再补充点细节，还是我直接出预览图给你看？`
+
+  return '你想做点什么呀？说一句话就行，比如「一个校园纪念徽章」。'
 }
