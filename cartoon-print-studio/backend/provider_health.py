@@ -199,6 +199,32 @@ def report_failure(provider: str, kind: str = "unknown", detail: str = "") -> fl
         return cooldown
 
 
+def report_partial_failure(provider: str, kind: str = "unknown", detail: str = "") -> None:
+    """Record a failure that only took out one key of a multi-key service.
+
+    AIXJ, MiniMax and jojo are all used with more than one key.  When one
+    of them runs out of credit the other keys keep working, so opening the
+    whole circuit for the provider throws away a service that is still
+    perfectly usable -- and that is how "one dead key" turned into "no
+    preview at all" on the exhibition machine.  The circuit stays closed;
+    only the bookkeeping remembers what happened.
+    """
+    name = (provider or "").strip()
+    if not name:
+        return
+    with _LOCK:
+        _load_locked()
+        record = _STATE.setdefault(name, _default_record())
+        record["last_error"] = (detail or "")[:400]
+        record["last_failure_kind"] = kind
+        record["last_failure"] = time.time()
+        # The service is still usable, but the visitor should see it as
+        # "one key short" rather than "all good".
+        if record.get("state") != "open":
+            record["state"] = "degraded"
+        _save_locked()
+
+
 def reset(provider: str) -> None:
     """Forget everything about one provider (used by an operator)."""
     name = (provider or "").strip()

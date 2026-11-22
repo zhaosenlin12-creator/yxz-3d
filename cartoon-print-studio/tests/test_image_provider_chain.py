@@ -142,5 +142,69 @@ class ProviderChainTests(unittest.TestCase):
         self.assertEqual(source, "aixj-image")
 
 
+class SingleKeyFailureTests(unittest.TestCase):
+    """One spent key must not take the whole provider down with it.
+
+    AIXJ, MiniMax and jojo are all used with more than one key.  When the
+    shared circuit breaker was opened by a single key it also threw away
+    the keys that still worked, and the chain ended up with nothing --
+    which is how "one key ran out of credit" turned into "no preview at
+    all" in the middle of the exhibition.
+    """
+
+    def test_a_spent_key_reports_a_partial_failure_while_a_key_is_left(self):
+        with patch.object(api_image, "MINIMAX_IMAGE_KEYS", ["sk-spent", "sk-good"]), \
+             patch.object(api_image, "_MINIMAX_DEAD_KEYS", {"sk-spent"}):
+            api_image._report_key_dead("minimax", "quota", "HTTP 402")
+
+            # The breaker must not have been opened: the second key works.
+            self.assertFalse(api_image._provider_is_open("minimax"))
+
+    def test_the_last_dead_key_does_take_the_provider_out_of_the_chain(self):
+        with patch.object(api_image, "MINIMAX_IMAGE_KEYS", ["sk-spent"]), \
+             patch.object(api_image, "_MINIMAX_DEAD_KEYS", {"sk-spent"}):
+            api_image._report_key_dead("minimax", "quota", "HTTP 402")
+
+            # Nothing is left to try, so the provider has to be skipped.
+            self.assertFalse(api_image._provider_has_live_key("minimax"))
+
+    def test_a_provider_without_a_usable_key_is_reported_as_such(self):
+        with patch.object(api_image, "AIXJ_IMAGE_KEYS", ["sk-dead"]), \
+             patch.object(api_image, "_AIXJ_DEAD_KEYS", {"sk-dead"}):
+            self.assertFalse(api_image._provider_has_live_key("aixj"))
+
+    def test_a_provider_with_a_usable_key_is_kept(self):
+        with patch.object(api_image, "MINIMAX_IMAGE_KEYS", ["sk-dead", "sk-good"]), \
+             patch.object(api_image, "_MINIMAX_DEAD_KEYS", {"sk-dead"}):
+            self.assertTrue(api_image._provider_has_live_key("minimax"))
+
+
+class ProviderSkipTests(unittest.TestCase):
+    """A provider that is known to be down must not be dialled at all."""
+
+    def test_an_open_provider_is_not_called(self):
+        called = []
+
+        def _aixj(*args, **kwargs):
+            called.append("aixj")
+            return None
+
+        def _minimax(*args, **kwargs):
+            called.append("minimax")
+            return [(PNG, "minimax#1"), (PNG, "minimax#2")]
+
+        with patch.object(api_image, "_provider_is_open",
+                          side_effect=lambda name: name == "aixj"), \
+             patch.object(api_image, "_provider_has_live_key", return_value=True), \
+             patch.object(api_image, "_try_aixj_image", _aixj), \
+             patch.object(api_image, "_try_minimax_image", _minimax):
+            source, items = api_image.generate_previews(["p"] * 2, prefer="auto")
+
+        self.assertNotIn("aixj", called)
+        self.assertIn("minimax", called)
+        self.assertEqual(source, "minimax-image")
+        self.assertEqual(len(items), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

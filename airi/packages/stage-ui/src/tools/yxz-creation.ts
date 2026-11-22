@@ -6,7 +6,7 @@ import { nanoid } from 'nanoid'
 import { z } from 'zod'
 
 import { buildYXZPreviewPrompt, createYXZCartoonModel, createYXZLaserBackground, createYXZLaserCard, createYXZPreview, createYXZPreviewFromImage, hasYXZUploadedPicture, previewImageSrc } from '../composables/use-yxz-print-preview'
-import { extractYXZRequirementSignals } from '../composables/use-yxz-guidance'
+import { classifyYXZVisitorIntent, extractYXZRequirementSignals } from '../composables/use-yxz-guidance'
 import { useYXZRequirementMemory } from '../composables/use-yxz-requirement-memory'
 import { useChatSessionStore } from '../stores/chat/session-store'
 import { shortId } from '../utils/uuid'
@@ -364,6 +364,28 @@ export async function createYXZCreationTools() {
       }).strict(),
       execute: async ({ description, constraints }, options) => {
         const abortSignal = options?.abortSignal
+        // The visitor's own words decide whether a preview is wanted at
+        // all.  The model used to read every message as "draw it again",
+        // so a "你???" after a failed preview started another long
+        // generation and the visitor got a second picture they never
+        // asked for.  Refusing here is the only reliable place: the
+        // model can be told not to do something, but it can also be told
+        // to do it and then quietly do it anyway.
+        const latestUser = (() => {
+          const sessions = useChatSessionStore()
+          const messages = sessions.getSessionMessages(sessions.activeSessionId)
+          return [...messages].reverse().find(message => message.role === 'user')
+        })()
+        const latestUserText = typeof latestUser?.content === 'string' ? latestUser.content : ''
+        if (latestUserText) {
+          const intent = classifyYXZVisitorIntent(latestUserText)
+          if (intent === 'confused') {
+            return {
+              status: 'not-requested',
+              message: '访客这一句不是要出图，是在表达困惑或不满。请先回应他，问清楚哪里不对劲，不要再出图。',
+            }
+          }
+        }
         const memory = useYXZRequirementMemory()
         // Keep the structured slots in sync with the free text. The prompt
         // block is rebuilt from these fields, so a slot that is only
@@ -451,12 +473,20 @@ export async function createYXZCreationTools() {
           const preview = toCard(item)
           const previews = result.previews.map(toCard)
           appendCreationCard({ sessionId: result.sessionId, description, options: constraints, preview, previews, status: 'preview' })
+          // A draft from the local fallback is not the same thing as a
+          // finished render, and the visitor has to be told which one
+          // they are looking at.
+          const draft = result.source === 'local-design'
+            || result.source === 'placeholder'
+            || result.source === 'sd-local'
           return {
             status: 'preview-ready',
             sessionId: result.sessionId,
             imageIndex: preview.index,
             previewUrl: preview.src,
-            message: '预览图已在聊天中展示。请询问用户是否采用并生成 3D 模型。',
+            message: draft
+              ? '预览图已在聊天中展示，但这是本地草稿（云端出图服务此刻不可用）。请如实告诉用户这是草稿、可以继续提修改意见，然后询问是否采用并生成 3D 模型。'
+              : '预览图已在聊天中展示。请询问用户是否采用并生成 3D 模型。',
           }
         }
         catch (error) {
@@ -471,7 +501,11 @@ export async function createYXZCreationTools() {
           })
           return {
             status: 'preview-failed',
-            message: `预览图这次没能生成出来（${reason}）。请把情况告诉用户，并说明可以说「再试一次」重新出图，或者补充一下产品细节（用途、造型、尺寸、颜色）后再试。`,
+            // The wording matters more than it looks: the model reads this
+            // string and turns it into what the visitor sees.  When it
+            // said "预览图已生成" the assistant told the visitor the
+            // picture was ready while the chat stayed empty.
+            message: `预览图这次没能生成出来（${reason}）。请明确告诉用户这次没有出图成功，不要说已经出来或已经生成。然后自己再重试一次；如果重试仍然失败，就请用户补充一下产品细节（用途、造型、尺寸、颜色）后再试。`,
           }
         }
       },

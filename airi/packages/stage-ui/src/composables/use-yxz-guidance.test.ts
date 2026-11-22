@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 
 import {
   buildYXZGuidanceBlock,
+  classifyYXZVisitorIntent,
   extractYXZRequirementSignals,
+  extractYXZVisitorPatch,
   getYXZMissingRequirementSlots,
   isYXZRequirementReady,
   planYXZRequirementStep,
@@ -74,5 +76,51 @@ describe('yXZ requirement guidance', () => {
     expect(signals.style).toBeUndefined()
     expect(signals.palette).toBeUndefined()
     expect(signals.size).toBeUndefined()
+  })
+})
+
+describe('yXZ visitor intent', () => {
+  it('reads a complaint as a complaint, not as "draw it again"', () => {
+    expect(classifyYXZVisitorIntent('你???')).toBe('confused')
+    expect(classifyYXZVisitorIntent('怎么还没好')).toBe('confused')
+    expect(classifyYXZVisitorIntent('啥情况')).toBe('confused')
+    expect(classifyYXZVisitorIntent('不是这个')).toBe('confused')
+  })
+
+  it('reads "again please" as a redraw', () => {
+    expect(classifyYXZVisitorIntent('再出一次')).toBe('regenerate')
+    expect(classifyYXZVisitorIntent('换一批看看')).toBe('regenerate')
+    expect(classifyYXZVisitorIntent('重新生成')).toBe('regenerate')
+  })
+
+  it('reads a product request as a requirement even when it ends with a question mark', () => {
+    expect(classifyYXZVisitorIntent('能帮我做个圣诞树摆件吗')).toBe('new-requirement')
+    expect(classifyYXZVisitorIntent('我想做一个可爱的桌面小猫摆件')).toBe('new-requirement')
+  })
+
+  it('reads a plain question as a question', () => {
+    expect(classifyYXZVisitorIntent('展台是几点开始')).toBe('question')
+  })
+
+  it('keeps a complaint out of the requirement memory', () => {
+    const patch = extractYXZVisitorPatch('你???', 'confused')
+    expect(Object.keys(patch)).toHaveLength(0)
+  })
+
+  it('remembers what the visitor said about the look', () => {
+    const patch = extractYXZVisitorPatch('圆润可爱，不要文字', 'new-requirement')
+    expect(patch.style).toBe('圆润可爱')
+    expect(patch.constraints).toEqual(['圆润可爱，不要文字'])
+  })
+
+  it('does not let a complaint overwrite the confirmed subject', () => {
+    const patch = extractYXZVisitorPatch('你???', 'confused')
+    expect(patch.description).toBeUndefined()
+  })
+
+  it('tells the model what the message means', () => {
+    const block = buildYXZGuidanceBlock(null, 'confused')
+    expect(block).toContain('【访客这句的意思】')
+    expect(block).toContain('不要自作主张重新出图')
   })
 })

@@ -13,7 +13,7 @@ import { ref, toRaw } from 'vue'
 import { useAnalytics } from '../composables'
 import { useLlmmarkerParser } from '../composables/llm-marker-parser'
 import { categorizeResponse, createStreamingCategorizer } from '../composables/response-categoriser'
-import { buildYXZGuidanceBlock } from '../composables/use-yxz-guidance'
+import { buildYXZGuidanceBlock, classifyYXZVisitorIntent, extractYXZVisitorPatch } from '../composables/use-yxz-guidance'
 import { useYXZRequirementMemory } from '../composables/use-yxz-requirement-memory'
 import { generateYXZModelFromConfirmation, isYXZModelConfirmationText } from '../tools/yxz-creation'
 import { buildContextPromptMessage } from './chat/context-prompt'
@@ -47,17 +47,17 @@ const YXZ_SYSTEM_GUIDANCE = `你是“宜小智AI智能创造系统”的宜小�
 【怎么把需求问清楚】
 按顺序看访客还缺什么，**一次只问一个**：
 1. 做什么（对象 / 主题）
-2. 风格（圆润可爱 / 简洁极简 / 科技硬朗 / 卡通夸张）
-3. 配色（单色 / 白 + 一个撞色 / 渐变）
-4. 用途（放哪里、送给谁）
-5. 尺寸、材质、数量 —— 这几项**不要问**，直接按默认走（桌面款 9cm、PLA 单色、1 个），需要时在回复里一句话说明即可。
+2. 风格或配色（圆润可爱 / 简洁极简 / 科技硬朗 / 卡通夸张；单色 / 白 + 一个撞色 / 渐变）
 
-只要“做什么”加上一个视觉信息（风格 / 配色 / 用途任一）齐了，就立刻出预览，不要继续追问。已经问过并回答过的，绝对不要问第二遍——改用“那我们按 XX 来”直接往下走。
+用途、尺寸、材质、数量、受众这几项**永远不要问**，直接按默认走（桌面款 9cm、PLA 单色、1 个），需要时在回复里一句话说明即可。
+
+“做什么”加上风格或配色任一确定了，就立刻出预览，不要继续追问。已经问过并回答过的，绝对不要问第二遍——改用“那我们按 XX 来”直接往下走。
 
 【什么时候动手】
 - 需求够了 → 立刻调用 yxz_generatePreview 出 4 张预览图，并说明你看的是哪个方案。不要让访客手动点“开始创作”。
 - 访客说“再出一次 / 换一批 / 再看看 / 重新生成” → 这是要新一版预览，沿用已确认的需求重新调用 yxz_generatePreview，不要重新问需求。
 - 访客说“发送预览 / 出图 / 给我看看 / 先看效果” → 同样理解成“现在就生成预览图”。
+- 访客只是提问、或者在表达困惑和不满（“你???”、“怎么还没好”、“不是这个”） → **先回一句话**，问清楚哪里不对劲或者回答问题。**不要**自作主张去出图。
 - 访客看到预览并明确同意（“就这个 / 可以 / 做一个 3D / 开始生成”）→ 才调用 yxz_generate3DModel。
 - 未经确认不要自动打印、不要替访客登录任何软件、不要承诺取件。
 
@@ -70,7 +70,10 @@ const YXZ_SYSTEM_GUIDANCE = `你是“宜小智AI智能创造系统”的宜小�
 5. 生成后告诉他三条路：预览卡里下载切割 SVG、用 xTool 打开切割、或点「打开创作面板」继续编辑并产出 3D。
 
 【出问题时怎么说】
-- 出图失败或超时：说“这次没生成出来，我再试一次就好”，然后自己重试或换一条可用通道——不要把报错原文念给访客听。
+- 出图工具返回失败（预览图没能生成出来）时：
+  1. **绝对不要说“已经出来了”“就在上面的卡片里”**。工具失败的时候卡片里什么都没有，说出来就是在骗访客。
+  2. 一句话说明这次没生成成功，然后自己重试一次；重试还是不行，就请访客补充细节或换个说法。
+  3. 不要把报错原文念给访客听。
 - 访客问的是活动、宜昌、展台、你是谁这类问题：用上面的知识正常回答，不要硬拐回创作。
 - 访客只发了一个词或一句话：先用一句话复述你理解到的方案，再问那一个最关键的问题。`
 
@@ -398,7 +401,19 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
         // visitor already answered.  Without it the model re-asks the size
         // it was told two turns ago -- which is exactly what makes a
         // conversation feel like it is not listening.
-        const guidanceBlock = buildYXZGuidanceBlock(useYXZRequirementMemory().state.value)
+        //
+        // The memory used to be written by the preview tool alone, so
+        // nothing was known about the visitor until a picture had already
+        // been drawn.  Reading their own words into it here -- and telling
+        // the model what this particular message means -- is what keeps
+        // "你???" from being read as "draw it again".
+        const memory = useYXZRequirementMemory()
+        const intent = classifyYXZVisitorIntent(sendingMessage)
+        const visitorPatch = extractYXZVisitorPatch(sendingMessage, intent)
+        if (Object.keys(visitorPatch).length)
+          memory.update(visitorPatch)
+
+        const guidanceBlock = buildYXZGuidanceBlock(memory.state.value, intent)
         const yxzGuidance = guidanceBlock
           ? `${YXZ_SYSTEM_GUIDANCE}\n\n${guidanceBlock}`
           : YXZ_SYSTEM_GUIDANCE
@@ -546,7 +561,19 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
         .slice(sessionMessagesForSend.length)
         .some(message => message.role === 'assistant' && (message.yxzCreation || message.yxzLaserCard))
 
-      if (!isStaleGeneration() && buildingMessage.slices.length > 0 && (spokeWords || !producedCard)) {
+      // The model sometimes ends a turn right after a tool call without
+      // saying a word.  The visitor is left staring at an empty bubble
+      // that looks exactly like the app froze, so the turn gets one
+      // usable sentence instead.
+      if (!spokeWords && !producedCard && !shouldAbort()) {
+        const fallback = '刚才这一句我没接住。你可以再说一次，或者直接告诉我：是想调整刚才那版预览的造型和配色，还是直接做成 3D 模型？'
+        buildingMessage.content = fallback
+        buildingMessage.slices = [...buildingMessage.slices, { type: 'text', text: fallback }]
+        updateUI()
+      }
+
+      const spokeAfterFallback = buildingMessage.slices.some(slice => slice.type === 'text' && (slice.text ?? '').trim().length > 0)
+      if (!isStaleGeneration() && buildingMessage.slices.length > 0 && (spokeAfterFallback || !producedCard)) {
         chatSession.appendSessionMessage(sessionId, toRaw(buildingMessage))
       }
 

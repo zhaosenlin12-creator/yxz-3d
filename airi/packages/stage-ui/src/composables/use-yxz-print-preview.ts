@@ -1261,12 +1261,24 @@ async function requestPreviewOnce(
   }
 
   if (!response.ok) {
+    // The backend explains itself in `detail`; showing "HTTP 500" to the
+    // visitor (and to the model that has to describe the situation) says
+    // nothing at all.
+    let detail = `出图服务暂时不可用（HTTP ${response.status}）`
+    try {
+      const raw = await response.json()
+      if (isRecord(raw) && typeof raw.detail === 'string' && raw.detail)
+        detail = raw.detail
+    }
+    catch {
+      // Keep the generic message.
+    }
     // A 5xx from our own backend means the provider chain is already
     // exhausted -- walking it again from here would just triple the wait.
     // Only a gateway hiccup is worth a second try.
     if ([502, 503, 504].includes(response.status))
-      throw new PreviewTransportError(`出图服务暂时不可用（HTTP ${response.status}）`, true)
-    throw new Error(`出图服务暂时不可用（HTTP ${response.status}）`)
+      throw new PreviewTransportError(detail, true)
+    throw new Error(detail)
   }
 
   const raw: unknown = await response.json()
@@ -1348,8 +1360,12 @@ export async function createYXZPreview(request: YXZPreviewRequest, fetcher: type
         lastError = error
         // The backend already walked its own provider chain; if it came back
         // with a clean "everything failed" answer, another attempt through a
-        // different provider would repeat the same dead ends.
-        if (!(error instanceof PreviewTransportError))
+        // different provider would repeat the same dead ends -- UNLESS the
+        // failure came from a provider that is simply down right now.  The
+        // next candidate names a different first choice, so it is worth one
+        // shot before the visitor is told there is nothing to look at.
+        const isServerExhausted = error instanceof Error && /HTTP 5\d\d/.test(error.message)
+        if (!(error instanceof PreviewTransportError) && !isServerExhausted)
           break
 
         // The transport broke, not the provider: the backend was restarting
@@ -1357,7 +1373,7 @@ export async function createYXZPreview(request: YXZPreviewRequest, fetcher: type
         // to come back and repeating the very same request is what turns
         // "the visitor sees an error screen" into "the visitor never
         // noticed".  Only worth it while there is budget left.
-        if (error.restartLikely) {
+        if (error instanceof PreviewTransportError && error.restartLikely) {
           const waitBudget = Math.min(yxzBackendRecovery.waitMs, deadline - Date.now())
           if (waitBudget > 3_000) {
             const back = await waitForYXZBackend(waitBudget, fetcher, request.signal)

@@ -1,5 +1,5 @@
 """FastAPI backend for Cartoon Print Studio (AI 思考模式)."""
-import os, time, uuid, base64, traceback, threading, json, re
+import os, time, uuid, base64, traceback, threading, json, re, io
 import shutil
 from pathlib import Path
 from urllib.parse import quote
@@ -1378,6 +1378,59 @@ def _clean_english_prompt(reply: str) -> str:
     return text.strip()
 
 
+# A 1x1 light-grey PNG.  It is the very last resort of the very last
+# resort: if even Pillow is broken there still has to be an image.
+_TINY_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+    "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
+
+
+def _placeholder_previews(prompt: str, out_dir: str, n: int = 4):
+    """A picture the visitor can look at when every image service is down.
+
+    Preview generation must never end in an error.  An error made the
+    assistant describe a picture that did not exist, and the visitor was
+    told "预览出来了" while the chat stayed empty.  A clearly labelled
+    draft card is honest and still lets the conversation move on.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    title = (prompt or "创意作品").strip().splitlines()[0][:36]
+    results = []
+
+    for i in range(max(1, n)):
+        blob = None
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+
+            im = Image.new("RGB", (1024, 1024), (236, 243, 250))
+            d = ImageDraw.Draw(im)
+            d.rectangle([40, 40, 984, 984], outline=(120, 165, 200), width=4)
+            font = None
+            fonts = os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts")
+            for name in ("msyh.ttc", "msyhbd.ttc", "simhei.ttf", "simsun.ttc"):
+                try:
+                    font = ImageFont.truetype(os.path.join(fonts, name), 44)
+                    break
+                except Exception:
+                    font = None
+            if font is None:
+                font = ImageFont.load_default()
+            d.text((90, 380), "概念草稿", font=font, fill=(64, 108, 148))
+            d.text((90, 470), f"方案 {i + 1:02d}", font=font, fill=(64, 108, 148))
+            d.text((90, 590), title, font=font, fill=(96, 140, 176))
+            d.text((90, 880), "出图服务暂不可用，这张是本地草稿", font=font, fill=(140, 170, 195))
+            buf = io.BytesIO()
+            im.save(buf, "PNG")
+            blob = buf.getvalue()
+        except Exception:
+            traceback.print_exc()
+            blob = base64.b64decode(_TINY_PNG_B64)
+        results.append((blob, "placeholder"))
+
+    return "placeholder", results
+
+
 @app.post("/api/previews")
 def previews(req: PreviewsReq):
     """Generate previews by walking the configured image chain.
@@ -1455,8 +1508,12 @@ def previews(req: PreviewsReq):
             src, results = local_preview.render_previews(req.prompt, pdir, req.n)
         except Exception as e2:
             traceback.print_exc()
-            pg.fail("这次没能生成出预览图，请再试一次")
-            raise HTTPException(500, f"preview render failed: {e2}")
+            # Even the local board failed.  Returning an error here means
+            # the visitor is told "no preview" while the assistant keeps
+            # talking about one -- so the only honest answer left is a
+            # placeholder the visitor can actually look at.
+            print(f"[previews] local design render failed too ({e2}); using a placeholder", flush=True)
+            src, results = _placeholder_previews(req.prompt, pdir, req.n)
     if not results or all(blob is None for blob, _tag in results):
         print("[previews] no usable cloud image; using local design render", flush=True)
         try:
@@ -1465,8 +1522,8 @@ def previews(req: PreviewsReq):
             traceback.print_exc()
             results = []
     if not results:
-        pg.fail("这次没能生成出预览图，请再试一次")
-        raise HTTPException(500, "这次没能生成出预览图，请再试一次")
+        print("[previews] every provider came back empty; using a placeholder", flush=True)
+        src, results = _placeholder_previews(req.prompt, pdir, req.n)
     items = []
     n_skipped = 0
     for i, (blob, tag) in enumerate(results):
@@ -1482,8 +1539,18 @@ def previews(req: PreviewsReq):
             item["b64"] = base64.b64encode(blob).decode()
         items.append(item)
     if not items:
-        pg.fail("这次没能生成出预览图，请再试一次")
-        raise HTTPException(500, "这次没能生成出预览图，请再试一次")
+        print("[previews] every rendered picture was empty; using a placeholder", flush=True)
+        src, results = _placeholder_previews(req.prompt, pdir, req.n)
+        items = []
+        for i, (blob, tag) in enumerate(results):
+            path = os.path.join(pdir, f"img_{i}.png")
+            with open(path, "wb") as f:
+                f.write(blob)
+            item = {"index": i, "seed": i, "tag": tag, "source": src,
+                    "path": f"/api/data/{sid}/previews/img_{i}.png"}
+            if req.include_b64:
+                item["b64"] = base64.b64encode(blob).decode()
+            items.append(item)
     pg.done(f"已生成 {len(items)} 张" + (f" ({n_skipped} 张跳过)" if n_skipped else ""))
     with open(os.path.join(sd, "prompt.txt"), "w", encoding="utf-8") as f:
         f.write(req.prompt)
@@ -1617,8 +1684,16 @@ def previews_from_image(req: PreviewsFromImageReq):
             traceback.print_exc()
 
     if not items:
-        pg.fail("这次没能生成出预览图，请再试一次")
-        raise HTTPException(500, "这次没能生成出预览图，请再试一次")
+        # The last resort before giving up: a labelled draft card.  An
+        # error here is what made the assistant claim a picture that was
+        # never generated.
+        print("[previews/from-image] using a placeholder draft", flush=True)
+        src, results = _placeholder_previews(req.prompt, pdir, n)
+        source = src
+        for i, (blob, tag) in enumerate(results):
+            item = _store(blob, tag, i + first_index, src)
+            if item:
+                items.append(item)
 
     pg.done(f"已按你的图片生成 {len(items)} 张设计稿")
     with open(os.path.join(sd, "prompt.txt"), "w", encoding="utf-8") as f:

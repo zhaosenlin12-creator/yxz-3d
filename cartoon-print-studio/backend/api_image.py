@@ -297,6 +297,60 @@ def _report_provider(name: str, kind: str, detail: str = "") -> None:
         pass
 
 
+def _report_key_failure(name: str, kind: str, detail: str = "") -> None:
+    """Report a failure that only took out one key of a multi-key service.
+
+    The image services are used with more than one key, so a single key
+    running out of credit says nothing about the others.  Reporting it as
+    a full provider failure opened the shared circuit and made the chain
+    skip a service that still had a working key.
+    """
+    try:
+        import provider_health
+        provider_health.report_partial_failure(name, kind, detail)
+    except Exception:
+        pass
+
+
+def _provider_has_live_key(name: str) -> bool:
+    """True when at least one key of this provider is still usable."""
+    if name == "aixj":
+        return any(key not in _AIXJ_DEAD_KEYS for key in AIXJ_IMAGE_KEYS)
+    if name == "minimax":
+        return any(key not in _MINIMAX_DEAD_KEYS for key in MINIMAX_IMAGE_KEYS)
+    if name == "jojo":
+        return any(key not in _JOJO_DEAD_KEYS for key in JOJO_KEYS)
+    return True
+
+
+def _report_key_dead(name: str, kind: str, detail: str = "") -> None:
+    """Report that one key of a provider is gone.
+
+    The shared circuit is only opened when the last usable key is gone:
+    until then the provider still works and must stay in the chain.
+    """
+    if _provider_has_live_key(name):
+        _report_key_failure(name, kind, detail)
+    else:
+        _report_provider(name, kind, detail)
+
+
+def _provider_is_open(name: str) -> bool:
+    """True when the shared breaker says this provider must be skipped.
+
+    The breaker is the one place that remembers "this service died ten
+    minutes ago".  The chain has to ask it before dialling out: a key
+    whose balance is gone answers with an error after a dozen seconds,
+    and four of those in a row is more than a minute of the visitor
+    watching a frozen bubble.
+    """
+    try:
+        import provider_health
+        return bool(provider_health.is_open(name))
+    except Exception:
+        return False
+
+
 def _aixj_image_call(prompt, *, n=1, size="1024x1024", model=AIXJ_IMAGE_MODEL,
                      timeout=150, sid=None) -> Optional[List[bytes]]:
     """Call AIXJ images/generations (OpenAI-compatible) with per-key retry.
@@ -348,7 +402,7 @@ def _aixj_image_call(prompt, *, n=1, size="1024x1024", model=AIXJ_IMAGE_MODEL,
                 ) or ("invalid" in low and "key" in low)
                 if dead:
                     _AIXJ_DEAD_KEYS.add(key)
-                    _report_provider("aixj", "quota", f"HTTP {e.code}")
+                    _report_key_dead("aixj", "quota", f"HTTP {e.code}")
                     print(f"[aixj] key {ki+1}/{n_keys} DEAD (HTTP {e.code}): {err[:120]}", flush=True)
                     payload = None
                     break
@@ -441,7 +495,7 @@ def _jojo_call(prompt: str, *, n: int = 1, size: str = "1024x1024",
             ) or any(x in err for x in ("\u4f59\u989d", "\u4f59\u989d\u4e0d\u8db3")):
                 _JOJO_DEAD_KEYS.add(key)
                 _JOJO_DEAD_UNTIL[key] = _t.time() + 3600
-                _report_provider("jojo", "quota", f"HTTP {e.code}")
+                _report_key_dead("jojo", "quota", f"HTTP {e.code}")
                 print(f"[jojo] key {ki+1}/{n_keys} DEAD (HTTP {e.code}): {err[:120]} - skipping rest of run", flush=True)
                 if sid:
                     _pg.Progress(sid, "previews").emit("jojo-key-dead", 5, "某个出图服务暂时不可用，正在跳过…")
@@ -671,7 +725,12 @@ def _minimax_image_call(prompt, *, n=1, size="1024x1024", model=None,
                     err = str(e.reason)
                 # invalid api key -> abandon this key, jump to next
                 if e.code in (401, 403) or "2049" in err or "invalid api key" in err.lower():
-                    _report_provider("minimax", "auth", f"HTTP {e.code}")
+                    # Retire the key as well: leaving it out of the dead
+                    # list meant every single picture tried it again and
+                    # paid for the round trip.
+                    _MINIMAX_DEAD_KEYS.add(key)
+                    _MINIMAX_DEAD_UNTIL[key] = time.time() + 3600
+                    _report_key_dead("minimax", "auth", f"HTTP {e.code}")
                     print(f"[minimax-image] key {ki+1}/{n_keys} rejected: {err[:120]}")
                     break
                 if e.code == 402:
@@ -680,7 +739,7 @@ def _minimax_image_call(prompt, *, n=1, size="1024x1024", model=None,
                     print(f"[minimax-image] key {ki+1}/{n_keys} out of balance")
                     _MINIMAX_DEAD_KEYS.add(key)
                     _MINIMAX_DEAD_UNTIL[key] = time.time() + 3600
-                    _report_provider("minimax", "quota", "HTTP 402")
+                    _report_key_dead("minimax", "quota", "HTTP 402")
                     break
                 _report_provider("minimax", "server", f"HTTP {e.code}")
                 print(f"[minimax-image] key {ki+1}/{n_keys} HTTP {e.code} {route_name}: {err[:120]}")
@@ -697,7 +756,7 @@ def _minimax_image_call(prompt, *, n=1, size="1024x1024", model=None,
                     # pictures go straight to a key that can still pay.
                     _MINIMAX_DEAD_KEYS.add(key)
                     _MINIMAX_DEAD_UNTIL[key] = time.time() + 3600
-                    _report_provider("minimax", "quota", str(base.get("status_msg"))[:120])
+                    _report_key_dead("minimax", "quota", str(base.get("status_msg"))[:120])
                     print(f"[minimax-image] key {ki+1}/{n_keys} out of credit, retiring it for an hour", flush=True)
                     if sid:
                         _pg.Progress(sid, "previews").emit(
@@ -713,7 +772,7 @@ def _minimax_image_call(prompt, *, n=1, size="1024x1024", model=None,
                     print(f"[minimax-image] key {ki+1}/{n_keys} out of credit ({route_name})")
                     _MINIMAX_DEAD_KEYS.add(key)
                     _MINIMAX_DEAD_UNTIL[key] = time.time() + 3600
-                    _report_provider("minimax", "quota", message[:120])
+                    _report_key_dead("minimax", "quota", message[:120])
                     break
                 print(f"[minimax-image] {route_name} key {ki+1}/{n_keys} error: {message[:160]}")
                 continue
@@ -790,6 +849,12 @@ def _try_aixj_image(prompts, size, sid=None, deadline=None):
                 f"正在生成第 {i+1}/{n_total} 张预览…")
         res = _aixj_image_call(p, n=1, size=size, timeout=150, sid=sid)
         if not res:
+            # The key may have run out of credit while this batch was in
+            # flight.  Trying it again only repeats the same error and
+            # eats into the budget the next provider needs.
+            if not _provider_has_live_key("aixj"):
+                print(f"[api_image] aixj prompt {i+1} failed, the key is out of credit")
+                return (None, f"aixj#fail{i+1}")
             # transient TLS handshake timeouts happen under concurrency;
             # one retry usually succeeds.  The retry is skipped once the
             # deadline has passed -- otherwise a dead provider burns
@@ -915,6 +980,17 @@ def generate_previews(prompts, *, prefer="auto", size="1024x1024", sid=None,
         if items and time.time() >= deadline:
             print("[api_image] budget spent, keeping the earlier result")
             return labels.get(chain[0], "image"), items
+
+        # A provider that is known to be down must not be dialled at all.
+        # Calling it anyway costs a dozen seconds per picture before the
+        # error comes back, and four of those is more than a minute of
+        # the visitor watching a frozen bubble.
+        if _provider_is_open(name):
+            print(f"[api_image] {name} is on cooldown, skipping it")
+            continue
+        if not _provider_has_live_key(name):
+            print(f"[api_image] {name} has no usable key left, skipping it")
+            continue
 
         if name == "aixj":
             m = _try_aixj_image(prompts, size, sid=sid, deadline=deadline)

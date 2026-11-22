@@ -1,4 +1,5 @@
 import type { YXZRequirementMemory } from './use-yxz-requirement-memory'
+import type { YXZRequirementPatch } from './use-yxz-requirement-memory'
 
 /**
  * 宜小智的创作需求采集框架。
@@ -145,9 +146,15 @@ export function getYXZMissingRequirementSlots(memory: YXZRequirementMemory | nul
 /**
  * Enough information to draw something the visitor recognises?
  *
- * A subject plus one visual or contextual signal is the bar. Everything
- * else has a default and is better answered by the model in one short
- * sentence ("我先按 9cm 桌面款做") than by another round of questions.
+ * A subject plus one *visual* signal is the bar: the style, the colours
+ * or an explicit look the visitor spelled out ("不要文字", "要圆润").
+ * Purpose and audience used to count as well, which made the readiness
+ * check disagree with the model: "摆在书桌上" was enough for the code
+ * to say "go and draw", while the model still asked for a style -- and
+ * from the visitor's side that looked like the app was making things up.
+ *
+ * Everything else has a default and is better answered by the model in
+ * one short sentence ("我先按 9cm 桌面款做") than by another question.
  */
 export function isYXZRequirementReady(memory: YXZRequirementMemory | null): boolean {
   if (!memory?.description)
@@ -157,8 +164,6 @@ export function isYXZRequirementReady(memory: YXZRequirementMemory | null): bool
   return Boolean(
     memory.style
     || memory.palette
-    || memory.purpose
-    || memory.audience
     || constraints.length,
   )
 }
@@ -207,9 +212,18 @@ export function getYXZRequirementNextQuestion(memory: YXZRequirementMemory | nul
  * Two halves on purpose: what is settled (never ask again) and what is
  * still open (assume the default, mention it in one line).
  */
-export function buildYXZGuidanceBlock(memory: YXZRequirementMemory | null): string {
+export function buildYXZGuidanceBlock(memory: YXZRequirementMemory | null, intent?: YXZVisitorIntent): string {
+  const lines: string[] = []
+
+  if (intent) {
+    lines.push(
+      '【访客这句的意思】',
+      YXZ_INTENT_HINTS[intent],
+    )
+  }
+
   if (!memory)
-    return ''
+    return lines.join('\n')
 
   const confirmed: string[] = []
   for (const slot of YXZ_REQUIREMENT_SLOTS) {
@@ -221,28 +235,25 @@ export function buildYXZGuidanceBlock(memory: YXZRequirementMemory | null): stri
   if (memory.constraints?.length)
     confirmed.push(`- 其他要求：${memory.constraints.join('、')}`)
 
-  if (!confirmed.length)
-    return ''
+  if (confirmed.length)
+    lines.push('【本次创作已确认的需求】', ...confirmed)
 
-  const missing = getYXZMissingRequirementSlots(memory)
-    .filter(slot => slot.fallback)
-    .map(slot => `- ${slot.label}：默认${slot.fallback}`)
+  if (confirmed.length) {
+    const missing = getYXZMissingRequirementSlots(memory)
+      .filter(slot => slot.fallback)
+      .map(slot => `- ${slot.label}：默认${slot.fallback}`)
 
-  const lines = [
-    '【本次创作已确认的需求】',
-    ...confirmed,
-  ]
+    if (missing.length) {
+      lines.push(
+        '【尚未确认，按默认处理即可】',
+        ...missing,
+      )
+    }
 
-  if (missing.length) {
     lines.push(
-      '【尚未确认，按默认处理即可】',
-      ...missing,
+      '已确认的信息不要重复提问；缺失项若不影响出图就直接按默认值做，并在回复里用一句话说明。',
     )
   }
-
-  lines.push(
-    '已确认的信息不要重复提问；缺失项若不影响出图就直接按默认值做，并在回复里用一句话说明。',
-  )
 
   return lines.join('\n')
 }
@@ -368,3 +379,109 @@ export function extractYXZRequirementSignals(text: string): {
 }
 
 export { slotByField }
+
+/**
+ * What the visitor's own message is asking for.
+ *
+ * The model used to read every message as "the requirements changed, go
+ * and draw something".  A visitor who typed "你???" after a failed
+ * preview therefore got another long image generation and a cheerful
+ * answer about a picture that was never made.  Deciding this in code --
+ * where it can be tested -- keeps the assistant honest.
+ */
+export type YXZVisitorIntent
+  = | 'regenerate'
+    | 'confused'
+    | 'question'
+    | 'refine'
+    | 'new-requirement'
+
+/** "再出一次 / 换一批 / 重新生成" -- the same brief, drawn again. */
+const YXZ_REGENERATE_RE = /再(?:出|来|试|做)一?次|再来一?张|换一?批|再看看|重新(?:生成|出图|做|来|设计)|再生成|重新来/
+
+/** "你??? / 怎么还没好 / 不是这个" -- the visitor is unhappy or lost. */
+const YXZ_CONFUSED_RE = /^[\s?？!！。.…·、,，~～]*$|你[?？]+|怎么(?:还|没|不)|什么(?:情况|意思|回事)|啥(?:情况|意思)|怎么回事|怎么这样|不是(?:这个|我要|我想|这样)|不对|错了|失败|没(?:有)?(?:出来|生成|反应|动静)|卡住|不动|听不懂/
+
+/** The visitor is describing a product rather than talking about the app. */
+const YXZ_MAKE_RE = /(?:做|制作|设计|定制|建模|打印)(?:出|个|一个|款|只|张|样|点)?|想要|我要|想做|帮我做|来一?个|生成一?个|做个|做个/
+
+/** A change to the picture that was already made. */
+const YXZ_REFINE_RE = /换(?:个|成|一下)?(?:颜色|配色|造型|风格|材料)|改成|调整|加大|缩小|大一点|小一点|加(?:个|点|上)|去掉|不要/
+
+/** A plain question about the exhibition or about the making. */
+const YXZ_QUESTION_RE = /[?？]\s*$|吗\s*$|呢\s*$|怎么|如何|为什么|能不能|可不可以|好不好|行不行|是不是|哪些|哪个|多少|几点|什么时候|哪里|在哪|几点钟/
+
+/**
+ * Read one visitor message.
+ *
+ * The order matters: a complaint ("怎么还没好") is also a question and
+ * also contains "怎么", and a "make me one" request is often phrased as
+ * a question ("能帮我做个摆件吗").  Both have to be recognised before the
+ * generic question rule gets a chance to swallow them.
+ */
+export function classifyYXZVisitorIntent(text: string): YXZVisitorIntent {
+  const value = (text ?? '').trim()
+  if (!value)
+    return 'question'
+
+  if (YXZ_CONFUSED_RE.test(value))
+    return 'confused'
+  if (YXZ_REGENERATE_RE.test(value))
+    return 'regenerate'
+  if (YXZ_MAKE_RE.test(value))
+    return 'new-requirement'
+  if (YXZ_REFINE_RE.test(value))
+    return 'refine'
+  if (YXZ_QUESTION_RE.test(value))
+    return 'question'
+  return 'new-requirement'
+}
+
+/** One line that tells the model what this message is. */
+const YXZ_INTENT_HINTS: Record<YXZVisitorIntent, string> = {
+  'regenerate': '访客要的是「再来一版」：沿用已经确认的需求重新出图，不要重新问需求。',
+  'confused': '访客在表达困惑或不满：先用一句话回应，问清楚哪里不对劲，不要自作主张重新出图，也不要说已经出好了。',
+  'question': '访客在提问：先回答问题，别把提问当成出图指令。',
+  'refine': '访客在提修改意见：把改动并入需求后重新出图。',
+  'new-requirement': '访客在描述新需求：看下面还缺什么，只补问最关键的那一个。',
+}
+
+/**
+ * What the visitor's own words add to the requirement.
+ *
+ * The memory used to be written by the preview tool only, so the system
+ * prompt carried nothing about the visitor until a picture had already
+ * been drawn -- and the model then had to guess, differently every time,
+ * whether the subject was still open.
+ */
+export function extractYXZVisitorPatch(text: string, intent: YXZVisitorIntent): YXZRequirementPatch {
+  const patch: YXZRequirementPatch = {}
+  const value = (text ?? '').trim()
+  if (!value)
+    return patch
+
+  // A complaint, a question or "again please" carries no new requirement.
+  if (intent === 'confused' || intent === 'question' || intent === 'regenerate')
+    return patch
+
+  const signals = extractYXZRequirementSignals(value)
+  if (signals.style)
+    patch.style = signals.style
+  if (signals.palette)
+    patch.palette = signals.palette
+  if (signals.size)
+    patch.size = signals.size
+  if (signals.purpose)
+    patch.purpose = signals.purpose
+
+  // The visitor's own hard requirements ("不要文字", "要点蓝色") are kept
+  // word for word: the model needs the original phrasing, not a label.
+  if (/(?:不要|别|不加|去掉|没有|不能|必须|一定|要加|加点|加上|带|换成|改成)/.test(value))
+    patch.constraints = [value]
+
+  // The subject is only taken from a sentence that really describes one.
+  if (intent === 'new-requirement' && value.length >= 6 && YXZ_MAKE_RE.test(value))
+    patch.description = value
+
+  return patch
+}
