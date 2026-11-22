@@ -1506,6 +1506,9 @@ def previews_from_image(req: PreviewsFromImageReq):
     ref_path = os.path.join(pdir, "img_0.png")
     reference = b""
     reference_missing = False
+    # The designs of a session that starts with an upload are numbered from
+    # 1, because img_0.png is the picture the visitor uploaded.
+    first_index = 1
     if os.path.isfile(ref_path):
         with open(ref_path, "rb") as handle:
             reference = handle.read()
@@ -1518,6 +1521,16 @@ def previews_from_image(req: PreviewsFromImageReq):
         reference_missing = True
         print(f"[previews/from-image] no uploaded picture in {sid}, "
               "rendering from the description instead", flush=True)
+        # Writing those designs into the stale session would overwrite the
+        # pictures the visitor already picked, and it would make the client
+        # replace the card of the earlier turn instead of adding a new one.
+        # The designs get a session of their own; nothing is uploaded there,
+        # so they are numbered from 0.
+        sid = uuid.uuid4().hex[:12]
+        sd = session_dir(sid)
+        pdir = os.path.join(sd, "previews")
+        os.makedirs(pdir, exist_ok=True)
+        first_index = 0
 
     pg = progress.Progress(sid, "previews")
     n = max(1, min(int(req.n or 4), 4))
@@ -1561,7 +1574,7 @@ def previews_from_image(req: PreviewsFromImageReq):
         if reference:
             edited = api_image.edit_previews(reference, prompts, sid=sid)
             for i, (blob, tag) in enumerate(edited):
-                item = _store(blob, tag, i + 1, tag if tag and "fail" not in tag else "aixj-image")
+                item = _store(blob, tag, i + first_index, tag if tag and "fail" not in tag else "aixj-image")
                 if item:
                     items.append(item)
                     source = tag if tag and "fail" not in tag else source
@@ -1578,7 +1591,7 @@ def previews_from_image(req: PreviewsFromImageReq):
             )
             source = src
             for i, (blob, tag) in enumerate(results):
-                item = _store(blob, tag, i + 1, src)
+                item = _store(blob, tag, i + first_index, src)
                 if item:
                     items.append(item)
         except Exception as e:
@@ -1590,7 +1603,7 @@ def previews_from_image(req: PreviewsFromImageReq):
             src, results = local_preview.render_previews(req.prompt, pdir, n)
             source = src
             for i, (blob, tag) in enumerate(results):
-                item = _store(blob, tag, i + 1, src)
+                item = _store(blob, tag, i + first_index, src)
                 if item:
                     items.append(item)
         except Exception:
@@ -3667,7 +3680,14 @@ def get_session_previews(sid: str):
     # img_0.png and writes the generated designs next to it from img_1.png.
     # The workbench has to know that, otherwise "design 1" is really the
     # picture the visitor uploaded.
-    uploaded_index = 0 if os.path.isfile(os.path.join(sd, "_source.json")) else -1
+    # The upload marker and the picture itself have to agree: a session that
+    # was cleaned up can keep its marker while img_0.png is already gone.
+    # Reporting "uploaded" for a picture that is not there sends the client
+    # down the image-to-image route with a reference the server cannot use.
+    uploaded_index = 0 if (
+        os.path.isfile(os.path.join(sd, "_source.json"))
+        and os.path.isfile(os.path.join(preview_dir, "img_0.png"))
+    ) else -1
     return {"session_id": sid, "previews": items, "uploaded_index": uploaded_index}
 
 

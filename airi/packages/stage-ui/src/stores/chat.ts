@@ -495,7 +495,17 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
         updateUI()
       }
 
-      if (!isStaleGeneration() && buildingMessage.slices.length > 0) {
+      // A turn that ends in a tool call can leave an assistant bubble that
+      // holds nothing but a reasoning block.  When the turn produced a
+      // creation card that card already carries the answer, so an empty
+      // bubble underneath it only makes the conversation look stuck --
+      // exactly what the visitor reported as "回完之后卡死".
+      const spokeWords = buildingMessage.slices.some(slice => slice.type === 'text' && (slice.text ?? '').trim().length > 0)
+      const producedCard = chatSession.getSessionMessages(sessionId)
+        .slice(sessionMessagesForSend.length)
+        .some(message => message.role === 'assistant' && (message.yxzCreation || message.yxzLaserCard))
+
+      if (!isStaleGeneration() && buildingMessage.slices.length > 0 && (spokeWords || !producedCard)) {
         chatSession.appendSessionMessage(sessionId, toRaw(buildingMessage))
       }
 

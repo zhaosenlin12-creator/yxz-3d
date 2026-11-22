@@ -340,6 +340,38 @@ export async function fetchSessionPreviews(
   }
 }
 
+/**
+ * Is the picture the visitor uploaded still on the server?
+ *
+ * The browser keeps the uploaded picture in its requirement memory, but the
+ * server cleans sessions up, so the memory can point at a picture that is
+ * long gone.  Generating with such a reference makes the backend fall back
+ * to plain text rendering *inside the old session*: the new card then
+ * replaces the card of the earlier turn far up in the chat and the bubble
+ * of the current turn stays empty -- the visitor sees a reply that says
+ * nothing and no new picture.  Asking the server first lets the caller
+ * drop the stale picture and start a clean session instead.
+ */
+export async function hasYXZUploadedPicture(
+  sessionId: string,
+  fetcher: typeof fetch = fetch,
+): Promise<boolean> {
+  if (!sessionId)
+    return false
+  try {
+    const response = await fetcher(`${getYXZPrintApiBase()}/api/sessions/${encodeURIComponent(sessionId)}/previews`, {
+      cache: 'no-store',
+    })
+    if (!response.ok)
+      return false
+    const raw: unknown = await response.json().catch(() => undefined)
+    return isRecord(raw) && raw.uploaded_index === 0
+  }
+  catch {
+    return false
+  }
+}
+
 function sleep(ms: number, signal?: AbortSignal) {
   return new Promise<void>((resolve) => {
     if (signal?.aborted) {

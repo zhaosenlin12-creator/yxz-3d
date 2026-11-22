@@ -124,7 +124,11 @@ class WorkbenchSmokeTests(unittest.TestCase):
             elapsed = time.perf_counter() - started
 
         self.assertTrue(entered.wait(timeout=1))
-        self.assertLess(elapsed, 0.5)
+        # The probe above blocks for three seconds.  The request must not
+        # wait for it, so anything well below that proves the point.  The
+        # bound stays loose on purpose: the wait is a wall-clock deadline
+        # and a busy machine must not turn it into a flaky failure.
+        self.assertLess(elapsed, 2.0)
         self.assertNotEqual(raised.exception.status_code, 402)
         generate.assert_called_once()
 

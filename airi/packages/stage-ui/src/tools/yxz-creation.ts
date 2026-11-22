@@ -5,7 +5,7 @@ import { tool } from '@xsai/tool'
 import { nanoid } from 'nanoid'
 import { z } from 'zod'
 
-import { buildYXZPreviewPrompt, createYXZCartoonModel, createYXZLaserBackground, createYXZLaserCard, createYXZPreview, createYXZPreviewFromImage, previewImageSrc } from '../composables/use-yxz-print-preview'
+import { buildYXZPreviewPrompt, createYXZCartoonModel, createYXZLaserBackground, createYXZLaserCard, createYXZPreview, createYXZPreviewFromImage, hasYXZUploadedPicture, previewImageSrc } from '../composables/use-yxz-print-preview'
 import { useYXZRequirementMemory } from '../composables/use-yxz-requirement-memory'
 import { useChatSessionStore } from '../stores/chat/session-store'
 import { shortId } from '../utils/uuid'
@@ -373,13 +373,24 @@ export async function createYXZCreationTools() {
         // 出图根本不是用户说的那个东西。
         const activeSessionId = useChatSessionStore().activeSessionId
         const storedReference = memory.state.value?.referenceImage
-        const reference = storedReference
+        let reference = storedReference
           && (!storedReference.chatSessionId || storedReference.chatSessionId === activeSessionId)
           ? storedReference
           : undefined
         if (storedReference && !reference) {
           // The picture belongs to an earlier conversation: forget it so it
           // cannot leak into the next request either.
+          memory.update({ referenceImage: null })
+        }
+        // The browser can still remember a picture the server has already
+        // thrown away.  Generating with that stale reference makes the
+        // backend render the designs inside the OLD session, so the new
+        // card replaces the card of the earlier turn far up in the chat and
+        // the bubble of this turn stays empty -- the visitor sees a reply
+        // with nothing in it.  Drop the dead picture first and start a
+        // clean session, so the new card lands right below this message.
+        if (reference && !(await hasYXZUploadedPicture(reference.sessionId))) {
+          reference = undefined
           memory.update({ referenceImage: null })
         }
         // The backend session id is generated here so the chat can follow the
