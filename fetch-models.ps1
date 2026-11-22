@@ -122,6 +122,17 @@ if (Want 'asr') {
           -OutFile (Join-Path $dir 'tokenizer.json') -MinSize 100000 -Label '语音识别词表'
     Fetch -Repo 'Systran/faster-whisper-small' -File 'vocabulary.txt' `
           -OutFile (Join-Path $dir 'vocabulary.txt') -MinSize 10000 -Label '语音识别词表'
+
+    $fastDir = Join-Path $root 'cartoon-print-studio\models\asr\faster-whisper-base'
+    New-Item -ItemType Directory -Force -Path $fastDir | Out-Null
+    Fetch -Repo 'Systran/faster-whisper-base' -File 'model.bin' `
+          -OutFile (Join-Path $fastDir 'model.bin') -MinSize 120000000 -Label '语音识别快模型 (faster-whisper base)'
+    Fetch -Repo 'Systran/faster-whisper-base' -File 'config.json' `
+          -OutFile (Join-Path $fastDir 'config.json') -MinSize 1000 -Label '语音识别快模型配置'
+    Fetch -Repo 'Systran/faster-whisper-base' -File 'tokenizer.json' `
+          -OutFile (Join-Path $fastDir 'tokenizer.json') -MinSize 100000 -Label '语音识别快模型词表'
+    Fetch -Repo 'Systran/faster-whisper-base' -File 'vocabulary.txt' `
+          -OutFile (Join-Path $fastDir 'vocabulary.txt') -MinSize 10000 -Label '语音识别快模型词表'
 }
 
 Write-Host ""

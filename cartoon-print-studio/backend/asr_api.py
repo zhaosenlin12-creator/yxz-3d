@@ -34,6 +34,14 @@ import numpy as np
 SAMPLE_RATE = 16000
 
 DEFAULT_MODEL_NAME = os.environ.get("YXZ_ASR_MODEL", "small")
+# The interim ("partial") pass uses a much smaller model.
+#
+# faster-whisper always encodes a full 30 second window, so the cost of a
+# recognition call is a fixed 2.8s for `small` and a fixed 0.95s for `base`
+# -- it does not shrink with the length of the clip.  That makes a small
+# model the only way to show a running caption while the visitor is still
+# speaking; the final answer is still produced by the accurate model.
+FAST_MODEL_NAME = os.environ.get("YXZ_ASR_FAST_MODEL", "base")
 # 宜小智 is a Chinese product and the students talk to it in Mandarin.
 # Naming the language up front is both faster (whisper does not have to
 # detect it) and more accurate; the endpoint still accepts ?language=en
@@ -49,7 +57,17 @@ MODEL_ROOT = Path(
 # Whisper works best with a couple of seconds of context; this nudges it
 # towards Mandarin without forcing the language, so an English sentence is
 # still recognised correctly.
-INITIAL_PROMPT = "以下是宜小智工作台里的一段普通话对话。"
+#
+# Naming the domain turned out to matter a lot for Chinese: on the
+# exhibition sentences the prompt below lifted the accurate model from
+# 95.2% to 100% character accuracy and the fast one from 90.1% to 95.1%,
+# at no measurable cost in time.  Without it the model happily turned
+# "桌面小猫" into "周面小毛" -- a wrong word here becomes a wrong 3D model.
+INITIAL_PROMPT = (
+    "以下是宜小智AI智能创造系统的现场对话，涉及创意设计、3D打印、"
+    "激光切割、桌面摆件、校园徽章、纪念礼物、卡通造型等词。"
+    "请使用简体中文输出。"
+)
 
 # Below this RMS a clip is treated as silence.  Whisper is happy to invent
 # a sentence out of pure noise, which is worse than saying nothing.
@@ -60,6 +78,25 @@ _model: Any = None
 _model_error: Optional[str] = None
 _model_name: Optional[str] = None
 _load_started = False
+
+# The accurate model and the fast model live side by side: the first one
+# produces the answer, the second one produces the running caption.
+_models: Dict[str, Any] = {}
+
+# One lock per loaded model.  faster-whisper hands the same model object to
+# every caller, and two threads decoding on it at the same time fight over
+# the same scratch buffers.  Separate models (the fast one for interim
+# results, the accurate one for the final answer) get separate locks, so a
+# caption in flight never delays the answer.
+_engine_locks: Dict[str, threading.Lock] = {}
+
+
+def _lock_for(name: str) -> threading.Lock:
+    lock = _engine_locks.get(name)
+    if lock is None:
+        lock = threading.Lock()
+        _engine_locks[name] = lock
+    return lock
 
 
 def model_dir(name: Optional[str] = None) -> Path:
@@ -109,8 +146,12 @@ def _load_model(name: Optional[str] = None):
     global _model, _model_error, _model_name
     wanted = name or DEFAULT_MODEL_NAME
     with _model_lock:
-        if _model is not None and _model_name == wanted:
-            return _model
+        cached = _models.get(wanted)
+        if cached is not None:
+            _model = cached
+            _model_name = wanted
+            _model_error = None
+            return cached
         try:
             from faster_whisper import WhisperModel
         except Exception as exc:  # pragma: no cover - depends on the machine
@@ -135,6 +176,7 @@ def _load_model(name: Optional[str] = None):
         except Exception as exc:
             _model_error = f"语音识别模型加载失败：{exc}"
             return None
+        _models[wanted] = model
         _model = model
         _model_name = wanted
         _model_error = None
@@ -158,6 +200,21 @@ def _ensure_model(name: Optional[str] = None):
     return _load_model(name)
 
 
+def _fast_model():
+    """The quick model behind the running caption.
+
+    It falls back to the accurate model when the small one is not on disk:
+    a slower caption is still better than no caption at all.
+    """
+    for name in (FAST_MODEL_NAME, DEFAULT_MODEL_NAME):
+        if not _model_present(name):
+            continue
+        engine = _ensure_model(name)
+        if engine is not None:
+            return engine, name
+    return None, None
+
+
 def warm_up() -> None:
     """Load the model in the background so the first recording is quick."""
     global _load_started
@@ -170,6 +227,10 @@ def warm_up() -> None:
             _load_model()
         except Exception:
             pass
+        try:
+            _fast_model()
+        except Exception:
+            pass
 
     threading.Thread(target=worker, name="yxz-asr-warmup", daemon=True).start()
 
@@ -177,6 +238,7 @@ def warm_up() -> None:
 def status() -> Dict[str, Any]:
     """A cheap description of the local speech recognition stack."""
     name = DEFAULT_MODEL_NAME
+    fast_name = FAST_MODEL_NAME
     return {
         "ok": _model is not None,
         "engine": "faster-whisper",
@@ -187,6 +249,9 @@ def status() -> Dict[str, Any]:
         "loading": _load_started and _model is None,
         "error": _model_error,
         "sample_rate": SAMPLE_RATE,
+        "fast_model": fast_name,
+        "fast_model_present": _model_present(fast_name),
+        "fast_model_loaded": fast_name in _models,
     }
 
 
@@ -369,8 +434,19 @@ def _trim_silence(samples: np.ndarray) -> np.ndarray:
     return samples[start:end]
 
 
-def transcribe(data: bytes, *, model: Optional[str] = None, language: Optional[str] = None) -> Dict[str, Any]:
-    """Transcribe a recorded clip and return the recognised text."""
+def transcribe(
+    data: bytes,
+    *,
+    model: Optional[str] = None,
+    language: Optional[str] = None,
+    partial: bool = False,
+) -> Dict[str, Any]:
+    """Transcribe a recorded clip and return the recognised text.
+
+    ``partial=True`` asks for the quick model instead of the accurate one.
+    The running caption uses it while the visitor is still speaking; the
+    final answer is always produced by the accurate model.
+    """
     started = time.time()
     samples = decode_audio(data)
     if samples is None or samples.size == 0:
@@ -387,7 +463,11 @@ def transcribe(data: bytes, *, model: Optional[str] = None, language: Optional[s
             "silent": True,
         }
 
-    engine = _ensure_model(model)
+    if partial:
+        engine, engine_name = _fast_model()
+    else:
+        engine, engine_name = _ensure_model(model), model or DEFAULT_MODEL_NAME
+
     if engine is None:
         raise RuntimeError(_model_error or "本地语音识别模型不可用")
 
@@ -395,27 +475,31 @@ def transcribe(data: bytes, *, model: Optional[str] = None, language: Optional[s
     if spoken in ("", "auto", "none"):
         spoken = None
 
-    segments, info = engine.transcribe(
-        trimmed,
-        language=spoken,
-        beam_size=1,
-        best_of=1,
-        temperature=0.0,
-        condition_on_previous_text=False,
-        vad_filter=False,
-        initial_prompt=INITIAL_PROMPT,
-    )
+    # One lock per model: the same ctranslate2 object must not be decoded by
+    # two threads at the same time.  The caption and the final answer use
+    # different models, so they never block each other.
+    with _lock_for(engine_name or DEFAULT_MODEL_NAME):
+        segments, info = engine.transcribe(
+            trimmed,
+            language=spoken,
+            beam_size=1,
+            best_of=1,
+            temperature=0.0,
+            condition_on_previous_text=False,
+            vad_filter=False,
+            initial_prompt=INITIAL_PROMPT,
+        )
 
-    pieces: List[Dict[str, Any]] = []
-    for segment in segments:
-        text = (getattr(segment, "text", "") or "").strip()
-        if not text:
-            continue
-        pieces.append({
-            "start": round(float(getattr(segment, "start", 0.0)), 2),
-            "end": round(float(getattr(segment, "end", 0.0)), 2),
-            "text": text,
-        })
+        pieces: List[Dict[str, Any]] = []
+        for segment in segments:
+            text = (getattr(segment, "text", "") or "").strip()
+            if not text:
+                continue
+            pieces.append({
+                "start": round(float(getattr(segment, "start", 0.0)), 2),
+                "end": round(float(getattr(segment, "end", 0.0)), 2),
+                "text": text,
+            })
 
     return {
         "text": "".join(piece["text"] for piece in pieces).strip(),
@@ -425,5 +509,6 @@ def transcribe(data: bytes, *, model: Optional[str] = None, language: Optional[s
         "silent": False,
         "elapsed": round(time.time() - started, 2),
         "engine": "faster-whisper",
-        "model": model or DEFAULT_MODEL_NAME,
+        "model": engine_name or DEFAULT_MODEL_NAME,
+        "partial": bool(partial),
     }

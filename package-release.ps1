@@ -199,6 +199,19 @@ else {
     Warn "未找到本地语音识别模型（首次启动时会自动下载）"
 }
 
+# 快模型（base）出实时字幕，1 秒内出字；small 出最终答案。
+# 两个都在才够快，缺 base 的话语音输入会退回"说完等三秒"的老样子。
+$asrFastModel = Join-Path $SourceRoot 'cartoon-print-studio\models\asr\faster-whisper-base'
+if (Test-Path -LiteralPath $asrFastModel) {
+    Copy-Clean -Src $asrFastModel -Dst (Join-Path $OutDir 'cartoon-print-studio\models\asr\faster-whisper-base') `
+        -ExcludeDirs @('.cache') `
+        -ExcludeFiles @('*.metadata', '*.lock', '*.incomplete', '.gitignore', 'CACHEDIR.TAG')
+    Info "models\asr\faster-whisper-base"
+}
+else {
+    Warn "未找到语音识别快模型（实时字幕会退回慢速模式）"
+}
+
 # keys.txt 必须随包走（不提交 GitHub，但转移电脑必需）。
 $keySrc = Join-Path $SourceRoot 'cartoon-print-studio\keys.txt'
 if (Test-Path -LiteralPath $keySrc) {

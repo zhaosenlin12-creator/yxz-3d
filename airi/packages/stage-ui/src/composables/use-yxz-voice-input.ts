@@ -33,6 +33,29 @@ const MIME_CANDIDATES = [
 /** Above this level the microphone is considered to be hearing the user. */
 const VOICE_LEVEL = 0.035
 
+/**
+ * How long the room has to stay quiet before the recording ends.
+ *
+ * The old value was 3.5s, which meant every single utterance was followed
+ * by three and a half seconds of dead air before anything happened.  A
+ * student who says "就这个吧" waits those 3.5s and then another three
+ * seconds for the transcription.  1.5s is long enough for the pause
+ * somebody takes between two clauses, and short enough that the pause
+ * does not feel like the app is stuck.
+ */
+const DEFAULT_SILENCE_TIMEOUT_MS = 1500
+
+/**
+ * How often the running caption is refreshed while the visitor speaks.
+ *
+ * The quick model answers in about a second, so a caption that refreshes
+ * every 1.1s keeps the screen busy without piling requests on the CPU.
+ */
+const CAPTION_INTERVAL_MS = 1100
+
+/** Below this much audio there is nothing worth captioning yet. */
+const CAPTION_MIN_AUDIO_MS = 900
+
 function errorText(error: unknown): string {
   if (error instanceof Error)
     return error.message
@@ -71,6 +94,17 @@ export function useYXZVoiceInput(options: YXZVoiceInputOptions = {}) {
   const level = ref(0)
   const elapsed = ref(0)
   const message = ref('')
+  /**
+   * The provisional text of what is being said right now.
+   *
+   * It is produced by the quick model while the visitor is still talking,
+   * so the screen shows their words within about a second instead of
+   * staying blank for three.  The accurate model replaces it a moment
+   * later with the final answer.
+ */
+  const partialText = ref('')
+  /** How long the current transcription has been running. */
+  const transcribingFor = ref(0)
 
   let stream: MediaStream | null = null
   let recorder: MediaRecorder | null = null
@@ -82,6 +116,11 @@ export function useYXZVoiceInput(options: YXZVoiceInputOptions = {}) {
   let lastVoiceAt = 0
   let heardVoice = false
   let finishing = false
+  let captionTimer = 0
+  let captionBusy = false
+  let captionGeneration = 0
+  let captionController: AbortController | null = null
+  let transcriptionTimer = 0
 
   function supported(): boolean {
     return typeof navigator !== 'undefined'
@@ -98,6 +137,8 @@ export function useYXZVoiceInput(options: YXZVoiceInputOptions = {}) {
   function teardown() {
     cancelFrame(frame)
     frame = 0
+    clearTimeout(captionTimer)
+    captionTimer = 0
     level.value = 0
     try {
       recorder?.stream.getTracks().forEach(track => track.stop())
@@ -153,7 +194,7 @@ export function useYXZVoiceInput(options: YXZVoiceInputOptions = {}) {
       else if (heardVoice) {
         // Long enough for a student to think about the next word, short
         // enough that the recording does not drag on after they stop.
-        const silenceLimit = options.silenceTimeoutMs ?? 3500
+        const silenceLimit = options.silenceTimeoutMs ?? DEFAULT_SILENCE_TIMEOUT_MS
         if (silenceLimit > 0 && now - lastVoiceAt > silenceLimit) {
           void stop()
           return
@@ -242,13 +283,19 @@ export function useYXZVoiceInput(options: YXZVoiceInputOptions = {}) {
 
     state.value = 'recording'
     elapsed.value = 0
+    partialText.value = ''
+    scheduleCaption()
     return true
   }
 
-  async function transcribe(blob: Blob): Promise<YXZVoiceInputResult> {
+  async function transcribe(blob: Blob, partial = false, external?: AbortSignal): Promise<YXZVoiceInputResult> {
     const base = getYXZPrintApiBase()
-    const url = `${base}/api/asr/transcribe?language=${encodeURIComponent(options.language ?? 'zh')}`
+    const query = new URLSearchParams({ language: options.language ?? 'zh' })
+    if (partial)
+      query.set('partial', '1')
+    const url = `${base}/api/asr/transcribe?${query.toString()}`
     const controller = new AbortController()
+    external?.addEventListener('abort', () => controller.abort(), { once: true })
     const timer = setTimeout(() => controller.abort(), 120_000)
     try {
       const response = await fetch(url, {
@@ -273,10 +320,74 @@ export function useYXZVoiceInput(options: YXZVoiceInputOptions = {}) {
     }
   }
 
+  /**
+   * Ask the quick model what has been said so far.
+   *
+   * Only one caption request is in flight at a time, and a caption that
+   * arrives after the recording ended is dropped -- by then the accurate
+   * answer is on its way and the old caption would only make the text
+   * flicker backwards.
+   */
+  async function refreshCaption() {
+    if (captionBusy || state.value !== 'recording' || !chunks.length)
+      return
+
+    const recordedFor = performance.now() - startedAt
+    if (recordedFor < CAPTION_MIN_AUDIO_MS)
+      return
+
+    const generation = captionGeneration
+    const mimeType = recorder?.mimeType || 'audio/webm'
+    const blob = new Blob(chunks, { type: mimeType })
+    if (blob.size < 512)
+      return
+
+    const controller = new AbortController()
+    captionController = controller
+    captionBusy = true
+    try {
+      const result = await transcribe(blob, true, controller.signal)
+      if (generation !== captionGeneration)
+        return
+      if (result.text)
+        partialText.value = result.text
+    }
+    catch {
+      // A caption is a nice-to-have; a failed one must never interrupt
+      // the recording.
+    }
+    finally {
+      captionBusy = false
+      if (captionController === controller)
+        captionController = null
+    }
+  }
+
+  function scheduleCaption() {
+    clearTimeout(captionTimer)
+    captionTimer = setTimeout(() => {
+      void refreshCaption().finally(() => {
+        if (state.value === 'recording')
+          scheduleCaption()
+      })
+    }, CAPTION_INTERVAL_MS) as unknown as number
+  }
+
   async function stop(): Promise<string> {
     if (state.value !== 'recording' || finishing)
       return ''
     finishing = true
+    // Any caption still on its way belongs to the recording that just
+    // ended; letting it land would overwrite the accurate answer.
+    captionGeneration += 1
+    clearTimeout(captionTimer)
+    captionTimer = 0
+    // Abort the caption that is still in flight.  It would otherwise keep
+    // the CPU busy for another second and delay the answer the visitor is
+    // actually waiting for.
+    captionController?.abort()
+    captionController = null
+    captionBusy = false
 
     const mimeType = recorder?.mimeType || 'audio/webm'
     try {
@@ -299,20 +410,35 @@ export function useYXZVoiceInput(options: YXZVoiceInputOptions = {}) {
     }
 
     state.value = 'transcribing'
+    transcribingFor.value = 0
+    clearInterval(transcriptionTimer)
+    transcriptionTimer = setInterval(() => {
+      transcribingFor.value += 100
+    }, 100) as unknown as number
     try {
       const result = await transcribe(blob)
       finishing = false
+      clearInterval(transcriptionTimer)
+      transcriptionTimer = 0
+      transcribingFor.value = 0
       if (!result.text) {
+        partialText.value = ''
         fail('没有听清，请再说一遍')
         return ''
       }
       state.value = 'idle'
       message.value = ''
+      // The accurate answer replaces the provisional caption.
+      partialText.value = ''
       options.onText?.(result.text)
       return result.text
     }
     catch (error) {
       finishing = false
+      clearInterval(transcriptionTimer)
+      transcriptionTimer = 0
+      transcribingFor.value = 0
+      partialText.value = ''
       const aborted = (error as { name?: string })?.name === 'AbortError'
       fail(aborted ? '语音识别超时了，请再说一次' : `语音识别失败：${errorText(error)}`)
       return ''
@@ -321,6 +447,14 @@ export function useYXZVoiceInput(options: YXZVoiceInputOptions = {}) {
 
   function cancel() {
     finishing = true
+    captionGeneration += 1
+    clearTimeout(captionTimer)
+    captionTimer = 0
+    captionController?.abort()
+    captionController = null
+    captionBusy = false
+    clearInterval(transcriptionTimer)
+    transcriptionTimer = 0
     try {
       if (recorder && recorder.state !== 'inactive')
         recorder.stop()
@@ -329,6 +463,8 @@ export function useYXZVoiceInput(options: YXZVoiceInputOptions = {}) {
     chunks = []
     teardown()
     finishing = false
+    partialText.value = ''
+    transcribingFor.value = 0
     state.value = 'idle'
   }
 
@@ -342,6 +478,8 @@ export function useYXZVoiceInput(options: YXZVoiceInputOptions = {}) {
     level,
     elapsed,
     message,
+    partialText,
+    transcribingFor,
     supported,
     start,
     stop,

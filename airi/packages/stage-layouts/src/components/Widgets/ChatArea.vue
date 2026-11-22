@@ -507,6 +507,8 @@ const isVoiceRecording = computed(() => voice.state.value === 'recording')
 const voiceState = voice.state
 const voiceLevel = voice.level
 const voiceElapsed = voice.elapsed
+const voicePartialText = voice.partialText
+const voiceTranscribingFor = voice.transcribingFor
 
 async function toggleVoiceRecording() {
   if (voice.state.value === 'recording') {
@@ -585,6 +587,49 @@ watch(sendMode, () => {
         >
           移除
         </button>
+      </div>
+
+      <!--
+        Live caption of what is being said.
+
+        While the visitor talks, the quick recognition model puts their words
+        on screen within about a second.  Without it the input box simply
+        sits there for three seconds and the visitor concludes the
+        microphone is broken.
+      -->
+      <div
+        v-if="isVoiceRecording || voiceState === 'transcribing'"
+        class="yxz-voice-caption flex items-start gap-2 border-b border-primary-200/30 px-3 py-2"
+      >
+        <span
+          class="mt-1 h-2 w-2 shrink-0 rounded-full"
+          :class="isVoiceRecording ? 'animate-pulse bg-rose-500' : 'bg-primary-500'"
+        />
+        <div class="min-w-0 flex-1">
+          <p
+            v-if="voicePartialText"
+            class="truncate text-sm font-medium text-neutral-700 dark:text-neutral-200"
+          >
+            {{ voicePartialText }}
+          </p>
+          <p
+            v-else
+            class="text-sm text-neutral-500 dark:text-neutral-400"
+          >
+            {{ isVoiceRecording ? '正在听…' : '正在识别…' }}
+          </p>
+          <p
+            v-if="voiceState === 'transcribing'"
+            class="mt-0.5 text-[11px] text-neutral-400"
+          >
+            正在整理成最终文字
+          </p>
+        </div>
+        <span
+          class="shrink-0 text-[11px] tabular-nums text-neutral-400"
+        >
+          {{ isVoiceRecording ? `${voiceElapsed.toFixed(0)}s` : `${(voiceTranscribingFor / 1000).toFixed(1)}s` }}
+        </span>
       </div>
 
       <input

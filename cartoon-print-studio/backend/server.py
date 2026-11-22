@@ -905,10 +905,15 @@ async def asr_transcribe(request: Request):
     The body is the raw audio the browser recorded (webm/opus, mp4/aac or
     wav).  A multipart upload with a ``file`` field is accepted too, so
     the endpoint is easy to try by hand.
+
+    ``?partial=1`` returns a quick, provisional transcript: it uses the
+    small model so a running caption can appear while the visitor is still
+    speaking.  The final answer always goes through the accurate model.
     """
     content_type = (request.headers.get("content-type") or "").lower()
     data = b""
     language = request.query_params.get("language") or None
+    partial = (request.query_params.get("partial") or "").lower() in ("1", "true", "yes")
 
     if "multipart/form-data" in content_type:
         form = await request.form()
@@ -926,7 +931,9 @@ async def asr_transcribe(request: Request):
     from starlette.concurrency import run_in_threadpool
 
     try:
-        result = await run_in_threadpool(asr_api.transcribe, data, language=language)
+        result = await run_in_threadpool(
+            asr_api.transcribe, data, language=language, partial=partial
+        )
     except Exception as exc:
         raise HTTPException(503, f"本地语音识别失败：{exc}")
     return result
