@@ -41,6 +41,12 @@ describe('yXZ requirement memory', () => {
 
   it('guides the next missing requirement instead of asking everything at once', () => {
     expect(getYXZRequirementNextQuestion(null)).toContain('什么')
-    expect(getYXZRequirementNextQuestion({ description: '小熊', constraints: [], updatedAt: 1 })).toContain('放在哪里')
+    // The subject alone is not enough: the next thing worth asking is the
+    // one that changes the drawing most, which is the style.
+    expect(getYXZRequirementNextQuestion({ description: '小熊', constraints: [], updatedAt: 1 })).toContain('圆润可爱')
+    // Once the look is settled the plan is done -- asking more would be
+    // an interview instead of a conversation.
+    const settled = mergeYXZRequirementMemory(null, { description: '小熊', style: '圆润可爱' })
+    expect(getYXZRequirementNextQuestion(settled)).toContain('确认预览')
   })
 })

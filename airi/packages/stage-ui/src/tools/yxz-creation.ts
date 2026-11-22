@@ -6,6 +6,7 @@ import { nanoid } from 'nanoid'
 import { z } from 'zod'
 
 import { buildYXZPreviewPrompt, createYXZCartoonModel, createYXZLaserBackground, createYXZLaserCard, createYXZPreview, createYXZPreviewFromImage, hasYXZUploadedPicture, previewImageSrc } from '../composables/use-yxz-print-preview'
+import { extractYXZRequirementSignals } from '../composables/use-yxz-guidance'
 import { useYXZRequirementMemory } from '../composables/use-yxz-requirement-memory'
 import { useChatSessionStore } from '../stores/chat/session-store'
 import { shortId } from '../utils/uuid'
@@ -280,7 +281,7 @@ export async function createYXZCreationTools() {
   return Promise.all([
     tool({
       name: 'yxz_laserCard',
-      description: '宜小智专用：用户要做激光切割卡片（活动名片 / 作品卡 / 桌牌等平面切割物料）时调用。卡片尺寸固定为 100 × 56.25 mm 长方形，背面是带活动主题大字的宜昌主视觉，正面是用户自己的 2D 作品预览图加姓名与个人信息（先用 yxz_generatePreview 生成）。请在用户已确认切割方向、作品与个人信息（姓名 / 身份 / 单位 / 联系方式）之后再调用；若还没有作品预览图，先调用 yxz_generatePreview。',
+      description: '宜小智专用：制作激光切割卡片（活动名片 / 作品卡 / 桌牌等平面切割物料）。\n调用顺序：先用 yxz_generatePreview 做出作品预览图 → 一次性问清姓名（必填）、身份、单位、联系方式 → 再调用本工具，并把预览返回的 sessionId 作为 previewSessionId 传入。\n卡片尺寸固定 100 × 56.25 mm 长方形，背面是带活动主题大字的宜昌主视觉，正面是访客自己的作品预览图加个人信息。\n生成后告诉访客三条路：在预览卡里下载切割 SVG、用 xTool 打开切割、或点「打开创作面板」继续编辑并产出 3D。',
       parameters: z.object({
         name: z.string().min(1).max(12).describe('卡片正面的姓名'),
         title: z.string().max(20).describe('身份/职位，可空'),
@@ -356,15 +357,19 @@ export async function createYXZCreationTools() {
     }),
     tool({
       name: 'yxz_generatePreview',
-      description: '宜小智专用：在用户说清产品、用途和主要风格后，直接调用已连接的 3D 打印后台生成产品预览图。不要要求用户手动点“开始创作”。一次生成 4 张备选预览，结果会自动出现在聊天卡片，用户可点图放大、切换查看。',
+      description: '宜小智专用：生成作品的 2D 设计稿预览图。\n什么时候用：访客已经说清“做什么”并且给了一个视觉信息（风格、配色或用途任意一个）之后，立刻调用它出图——不要让访客去点“开始创作”按钮。\n什么时候不用：访客还在补信息时不要调用；先按规则问那一个最关键的问题。\n访客说“再出一次 / 换一批 / 再看看 / 重新生成”时，沿用已经确认的需求再调一次，不要重新提问。\n一次生成 4 张备选预览，结果会自动出现在聊天卡片里，访客可以点图放大、切换查看。',
       parameters: z.object({
-        description: z.string().min(3).max(500).describe('中文产品描述，包含对象、用途、关键造型'),
-        constraints: z.array(z.string()).max(8).describe('用户已确认的风格、尺寸、颜色和打印约束'),
+        description: z.string().min(3).max(500).describe('中文产品描述：做什么 + 关键造型特征。把访客已经说过的信息都写进来，不要漏掉配色和尺寸。'),
+        constraints: z.array(z.string()).max(8).describe('访客已确认的风格、配色、尺寸和打印约束，逐条列出；没有就留空数组。'),
       }).strict(),
       execute: async ({ description, constraints }, options) => {
         const abortSignal = options?.abortSignal
         const memory = useYXZRequirementMemory()
-        memory.update({ description, constraints })
+        // Keep the structured slots in sync with the free text. The prompt
+        // block is rebuilt from these fields, so a slot that is only
+        // mentioned in prose would otherwise be invisible to the model.
+        const signals = extractYXZRequirementSignals([description, ...constraints].join(' '))
+        memory.update({ description, constraints, ...signals })
         // 上传过照片时，预览要跟着那张照片走：图片是造型参考，描述是
  // 「想把它改成什么」。没有上传照片就走普通的文生图链路。
         //
@@ -473,7 +478,7 @@ export async function createYXZCreationTools() {
     }),
     tool({
       name: 'yxz_generate3DModel',
-      description: '宜小智专用：仅当用户看到预览并明确同意制作 3D 模型时调用。调用已连接的打印后台生成 GLB/STL；不要谎称没有 3D 能力，也不要自动启动打印机。',
+      description: '宜小智专用：把访客选中的那张设计稿做成可以 3D 打印的立体模型（GLB / STL）。\n什么时候用：访客已经看到预览图，并且明确表示要做 3D（“就这个 / 可以 / 做一个 3D / 开始生成”）。\n什么时候不用：访客还没有看到预览，或者只是在对方案提修改意见——那时候应该重新调 yxz_generatePreview 出新一版。\n不要谎称没有 3D 能力，也不要自动启动打印机或替访客打开软件。',
       parameters: z.object({
         sessionId: z.string().min(1).describe('yxz_generatePreview 返回的 sessionId'),
         imageIndex: z.number().int().min(0).describe('yxz_generatePreview 返回的 imageIndex'),

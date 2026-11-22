@@ -8,6 +8,16 @@ export interface YXZRequirementMemory {
   style?: string
   audience?: string
   quantity?: number
+  /** What the piece is for — decides size and how much detail it carries. */
+  purpose?: string
+  /** Main colours. */
+  palette?: string
+  /** Printable size. */
+  size?: string
+  /** Print material / finish. */
+  material?: string
+  /** Which deliverable the visitor is heading for. */
+  deliverable?: string
   /** The picture the visitor uploaded: the shape reference for the preview. */
   referenceImage?: YXZReferenceImage
   updatedAt: number
@@ -36,6 +46,11 @@ export interface YXZRequirementPatch {
   style?: string
   audience?: string
   quantity?: number
+  purpose?: string
+  palette?: string
+  size?: string
+  material?: string
+  deliverable?: string
   referenceImage?: YXZReferenceImage | null
 }
 
@@ -111,6 +126,11 @@ export function normalizeYXZRequirementMemory(value: unknown): YXZRequirementMem
     style: cleanText(record.style) || undefined,
     audience: cleanText(record.audience) || undefined,
     quantity,
+    purpose: cleanText(record.purpose) || undefined,
+    palette: cleanText(record.palette) || undefined,
+    size: cleanText(record.size) || undefined,
+    material: cleanText(record.material) || undefined,
+    deliverable: cleanText(record.deliverable) || undefined,
     referenceImage,
     updatedAt: typeof record.updatedAt === 'number' && Number.isFinite(record.updatedAt) ? record.updatedAt : Date.now(),
   }
@@ -144,6 +164,11 @@ export function mergeYXZRequirementMemory(current: YXZRequirementMemory | null, 
     style: cleanText(patch.style) || undefined,
     audience: cleanText(patch.audience) || undefined,
     quantity: patch.quantity,
+    purpose: cleanText(patch.purpose) || undefined,
+    palette: cleanText(patch.palette) || undefined,
+    size: cleanText(patch.size) || undefined,
+    material: cleanText(patch.material) || undefined,
+    deliverable: cleanText(patch.deliverable) || undefined,
     referenceImage: patch.referenceImage === null ? undefined : patch.referenceImage,
     updatedAt: Date.now(),
   }
@@ -173,17 +198,10 @@ export function clearYXZRequirementMemory(storage = getDefaultStorage()) {
   }
 }
 
-export function getYXZRequirementNextQuestion(memory: YXZRequirementMemory | null) {
-  if (!memory?.description)
-    return '你想把什么做成宜小智作品？可以先说主题、角色或用途。'
-  if (!memory.audience)
-    return '这个作品主要放在哪里或送给谁？我会据此调整尺寸和细节。'
-  if (!memory.style)
-    return '你希望它更偏圆润可爱、简洁极简，还是保留更多辨识度？'
-  if (!memory.quantity)
-    return '需要制作几个？数量会影响后续打印安排。'
-  return '需求已经比较完整，可以确认预览并进入 3D 制作。'
-}
+// The question plan lives in use-yxz-guidance.ts, next to the slot table that
+// explains *why* each question is asked and in which order. It is re-exported
+// here so the existing callers keep working unchanged.
+export { getYXZRequirementNextQuestion } from './use-yxz-guidance'
 
 export function useYXZRequirementMemory(storage = getDefaultStorage()) {
   // Several surfaces touch the same memory (the chat panel, the guided

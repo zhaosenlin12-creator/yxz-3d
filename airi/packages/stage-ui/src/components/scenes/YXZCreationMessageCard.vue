@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 
 import { resolveYXZPreviewIndex, yxzPreviewPageUrl } from '../../composables/use-yxz-print-preview'
 import { retryYXZModelBuild } from '../../tools/yxz-creation'
@@ -48,6 +48,13 @@ const copied = ref(false)
 const retrying = ref(false)
 const retryError = ref('')
 const modelPreviewUrl = computed(() => props.modelUrl ? yxzPreviewPageUrl(props.modelUrl, props.sessionId) : '')
+
+// Progressive disclosure: a chat bubble has to stay scannable while the
+// conversation keeps going. L1 shows what matters at a glance, L2 keeps the
+// browsing aids one click away, L3 hides the technical leftovers.
+const detailsOpen = ref(false)
+const advancedOpen = ref(false)
+const detailsRef = ref<HTMLElement | null>(null)
 
 const gallery = computed<YXZCardPreviewItem[]>(() => {
   const items = props.previews?.length
@@ -141,6 +148,24 @@ async function copyPreviewAddress() {
     copied.value = false
   }
 }
+
+/**
+ * Revealing a layer has to bring it into view.
+ *
+ * The chat panel scrolls independently, so a card near the bottom of the
+ * thread expands *below* the fold: the visitor taps "查看详情", nothing
+ * appears to happen, and the conclusion is that the button is broken.
+ * Scrolling the newly revealed block into view is what makes the
+ * disclosure feel like an answer rather than a dead control.
+ */
+async function toggleDetails() {
+  detailsOpen.value = !detailsOpen.value
+  if (!detailsOpen.value)
+    return
+
+  await nextTick()
+  detailsRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+}
 </script>
 
 <template>
@@ -148,7 +173,7 @@ async function copyPreviewAddress() {
     <div class="yxz-creation-card-heading">
       <div>
         <span class="yxz-creation-card-eyebrow">宜小智创作方案</span>
-        <strong>{{ caption }}</strong>
+        <strong class="yxz-creation-card-caption" :class="{ 'is-open': detailsOpen }">{{ caption }}</strong>
       </div>
       <span class="yxz-creation-card-badge" :class="`is-${status}`">{{ badgeText }}</span>
     </div>
@@ -178,48 +203,98 @@ async function copyPreviewAddress() {
       @click="openLightbox(0)"
       @keydown.enter="openLightbox(0)"
     >
-    <div v-if="previewSrc" class="yxz-creation-card-zoom-hint">
-      <button type="button" @click="openLightbox(0)">
-        点击放大预览
-      </button>
-      <a :href="previewSrc" target="_blank" rel="noopener noreferrer">在新页面打开</a>
-      <button v-if="sessionId && status !== 'model-building' && status !== 'preview-building'" type="button" class="yxz-creation-card-studio" @click="openStudio">
+
+    <!-- L1: the one action that matters right now, plus a way into the rest. -->
+    <div class="yxz-creation-card-primary-row">
+      <button
+        v-if="sessionId && status !== 'model-building' && status !== 'preview-building'"
+        type="button"
+        class="yxz-creation-card-studio"
+        @click="openStudio"
+      >
         打开创作面板
       </button>
-      <span v-if="gallery.length > 1">共 {{ gallery.length }} 张</span>
-    </div>
-    <div v-if="gallery.length > 1" class="yxz-creation-card-thumbs">
       <button
-        v-for="(item, index) in gallery"
-        :key="item.src"
         type="button"
-        class="yxz-creation-card-thumb"
-        :class="{ 'is-active': index === lightboxIndex }"
-        @click="openLightbox(index)"
+        class="yxz-creation-card-secondary"
+        :aria-expanded="detailsOpen"
+        @click="toggleDetails"
       >
-        <img :src="item.src" :alt="item.caption || `设计稿 ${index + 1}`">
+        {{ detailsOpen ? '收起详情' : '查看详情' }}
+        <span v-if="!detailsOpen && gallery.length > 1" class="yxz-creation-card-count">共 {{ gallery.length }} 张</span>
       </button>
+      <a
+        v-if="modelUrl"
+        :href="modelPreviewUrl"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="yxz-creation-card-link"
+      >
+        打开 3D 预览
+      </a>
+      <a
+        v-if="stlUrl"
+        :href="`${stlUrl}${stlUrl.includes('?') ? '&' : '?'}download=1`"
+        download
+        rel="noreferrer"
+        class="yxz-creation-card-link"
+      >
+        下载 STL
+      </a>
     </div>
-    <p v-if="description" class="yxz-creation-card-description">
-      {{ description }}
-    </p>
-    <div v-if="interactive && status !== 'model-building' && status !== 'preview-building' && status !== 'failed'" class="yxz-creation-card-actions">
-      <button type="button" class="yxz-creation-card-primary" @click="emit('adopt')">
-        采用这个方案
-      </button>
-      <button type="button" class="yxz-creation-card-secondary" @click="emit('redescribe')">
-        重新描述
-      </button>
-    </div>
-    <div v-if="modelUrl || stlUrl" class="yxz-creation-card-links">
-      <a v-if="modelUrl" :href="modelPreviewUrl" target="_blank" rel="noopener noreferrer">打开 3D 预览</a>
-      <a v-if="stlUrl" :href="`${stlUrl}${stlUrl.includes('?') ? '&' : '?'}download=1`" download rel="noreferrer">下载 STL</a>
-    </div>
-    <div v-if="modelUrl" class="yxz-creation-card-address">
-      <span>预览地址：{{ modelPreviewUrl }}</span>
-      <button type="button" @click="copyPreviewAddress">
-        {{ copied ? '已复制' : '复制地址' }}
-      </button>
+
+    <!-- L2: browse the alternatives, read the full brief, decide. -->
+    <div v-if="detailsOpen" ref="detailsRef" class="yxz-creation-card-details">
+      <div v-if="gallery.length > 1" class="yxz-creation-card-thumbs">
+        <button
+          v-for="(item, index) in gallery"
+          :key="item.src"
+          type="button"
+          class="yxz-creation-card-thumb"
+          :class="{ 'is-active': index === lightboxIndex }"
+          @click="openLightbox(index)"
+        >
+          <img :src="item.src" :alt="item.caption || `设计稿 ${index + 1}`">
+        </button>
+      </div>
+
+      <p v-if="description" class="yxz-creation-card-description">
+        {{ description }}
+      </p>
+
+      <div class="yxz-creation-card-zoom-hint">
+        <button type="button" @click="openLightbox(0)">
+          点击放大预览
+        </button>
+        <a :href="previewSrc" target="_blank" rel="noopener noreferrer">在新页面打开</a>
+      </div>
+
+      <div v-if="interactive && status !== 'model-building' && status !== 'preview-building' && status !== 'failed'" class="yxz-creation-card-actions">
+        <button type="button" class="yxz-creation-card-primary" @click="emit('adopt')">
+          采用这个方案
+        </button>
+        <button type="button" class="yxz-creation-card-secondary" @click="emit('redescribe')">
+          重新描述
+        </button>
+      </div>
+
+      <!-- L3: the technical leftovers. -->
+      <div v-if="modelUrl" class="yxz-creation-card-advanced">
+        <button
+          type="button"
+          class="yxz-creation-card-advanced-toggle"
+          :aria-expanded="advancedOpen"
+          @click="advancedOpen = !advancedOpen"
+        >
+          {{ advancedOpen ? '收起技术信息' : '技术信息' }}
+        </button>
+        <div v-if="advancedOpen" class="yxz-creation-card-address">
+          <span>预览地址：{{ modelPreviewUrl }}</span>
+          <button type="button" @click="copyPreviewAddress">
+            {{ copied ? '已复制' : '复制地址' }}
+          </button>
+        </div>
+      </div>
     </div>
 
     <Teleport to="body">
@@ -274,8 +349,7 @@ async function copyPreviewAddress() {
 }
 
 .yxz-creation-card-heading,
-.yxz-creation-card-actions,
-.yxz-creation-card-links {
+.yxz-creation-card-actions {
   display: flex;
   gap: .55rem;
   align-items: center;
@@ -297,6 +371,98 @@ async function copyPreviewAddress() {
 .yxz-creation-card-heading strong {
   color: #15547c;
   font-size: .9rem;
+}
+
+.yxz-creation-card-caption {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.yxz-creation-card-caption.is-open {
+  display: block;
+  overflow: visible;
+}
+
+.yxz-creation-card-primary-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .45rem;
+  align-items: center;
+}
+
+.yxz-creation-card-primary-row .yxz-creation-card-studio {
+  border: 1px solid #18a8e0;
+  border-radius: .55rem;
+  background: rgba(24, 168, 224, .1);
+  color: #087eae;
+  padding: .4rem .7rem;
+  cursor: pointer;
+  font-size: .75rem;
+  font-weight: 600;
+}
+
+.yxz-creation-card-primary-row .yxz-creation-card-studio:hover {
+  background: rgba(24, 168, 224, .18);
+}
+
+.yxz-creation-card-primary-row .yxz-creation-card-secondary {
+  display: inline-flex;
+  gap: .35rem;
+  align-items: center;
+  border: 1px solid #b5dce9;
+  border-radius: .55rem;
+  background: rgba(255, 255, 255, .72);
+  color: #15547c;
+  padding: .4rem .7rem;
+  cursor: pointer;
+  font-size: .75rem;
+}
+
+.yxz-creation-card-count {
+  color: #6b8798;
+  font-size: .68rem;
+}
+
+.yxz-creation-card-link {
+  border: 1px solid #b5dce9;
+  border-radius: .55rem;
+  background: rgba(255, 255, 255, .72);
+  color: #087eae;
+  padding: .4rem .7rem;
+  font-size: .75rem;
+  text-decoration: none;
+}
+
+.yxz-creation-card-link:hover {
+  background: rgba(24, 168, 224, .1);
+}
+
+.yxz-creation-card-details {
+  display: flex;
+  flex-direction: column;
+  gap: .6rem;
+  padding-top: .55rem;
+  border-top: 1px dashed rgba(24, 168, 224, .28);
+}
+
+.yxz-creation-card-advanced {
+  display: flex;
+  flex-direction: column;
+  gap: .35rem;
+}
+
+.yxz-creation-card-advanced-toggle {
+  align-self: flex-start;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: #6b8798;
+  cursor: pointer;
+  font-size: .66rem;
+  text-decoration: underline;
 }
 
 .yxz-creation-card-badge {
@@ -371,16 +537,6 @@ async function copyPreviewAddress() {
   border: 1px solid #b5dce9;
   background: rgba(255, 255, 255, .72);
   color: #15547c;
-}
-
-.yxz-creation-card-links {
-  justify-content: flex-start;
-  font-size: .73rem;
-}
-
-.yxz-creation-card-links a {
-  color: #087eae;
-  text-decoration: underline;
 }
 
 .yxz-creation-card-address {
@@ -499,21 +655,6 @@ async function copyPreviewAddress() {
   cursor: pointer;
   font-size: .7rem;
   text-decoration: underline;
-}
-
-.yxz-creation-card-zoom-hint .yxz-creation-card-studio {
-  margin-left: .2rem;
-  padding: .18rem .4rem;
-  border: 1px solid #18a8e0;
-  border-radius: .45rem;
-  background: rgba(24, 168, 224, .08);
-  color: #087eae;
-  text-decoration: none;
-  font-weight: 600;
-}
-
-.yxz-creation-card-zoom-hint .yxz-creation-card-studio:hover {
-  background: rgba(24, 168, 224, .16);
 }
 
 .yxz-lightbox {

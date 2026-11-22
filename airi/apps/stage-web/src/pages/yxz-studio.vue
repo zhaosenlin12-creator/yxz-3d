@@ -542,13 +542,26 @@ function goBack() {
       </div>
     </section>
 
-    <!-- Preset printable models (3 poses, built with Tripo / Hunyuan3D) -->
-    <section v-if="presets.length || presetsError" class="yxz-studio-presets" aria-label="宜小智预制模型示例">
-      <header class="yxz-studio-presets-head">
-        <strong>宜小智预制 3D 模型示例</strong>
-        <small>可 3D 打印的成品 · 点击预览，可直接下载 STL 交给打印机</small>
+    <!--
+      Preset printable models (3 poses, built with Tripo / Hunyuan3D).
+
+      This is reference material, not the work area: four full-size cards
+      used to fill the whole first screen and pushed the actual editor below
+      the fold. It now sits behind a closed disclosure so the studio opens
+      on the thing the visitor came to do.
+    -->
+    <details v-if="presets.length || presetsError" class="yxz-studio-presets">
+      <summary class="yxz-studio-presets-head">
+        <span class="yxz-studio-presets-titles">
+          <strong>宜小智预制 3D 模型示例</strong>
+          <small>{{ presets.length ? `${presets.length} 款可直接打印的成品 · 点击预览，可下载 STL` : '可 3D 打印的成品示例' }}</small>
+        </span>
+        <span class="yxz-studio-presets-toggle" aria-hidden="true">
+          <span class="is-closed">展开</span>
+          <span class="is-open">收起</span>
+        </span>
         <button v-if="presetsError" type="button" class="yxz-studio-presets-retry" @click="loadPresets">重试</button>
-      </header>
+      </summary>
       <p v-if="presetsError" class="yxz-studio-presets-error">{{ presetsError }} —— 请确认后端已启动（默认 8000 端口）。</p>
       <div class="yxz-studio-presets-grid">
         <article v-for="p in presets" :key="p.id" class="yxz-studio-preset">
@@ -579,7 +592,7 @@ function goBack() {
           </div>
         </article>
       </div>
-    </section>
+    </details>
 
     <main class="yxz-studio-main">
       <!-- Central working area -->
@@ -1085,6 +1098,46 @@ function goBack() {
   background: rgba(13, 37, 66, .55);
 }
 
+.yxz-studio-presets > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.yxz-studio-presets > summary::-webkit-details-marker {
+  display: none;
+}
+
+.yxz-studio-presets-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.yxz-studio-presets-toggle {
+  margin-left: auto;
+  border: 1px solid rgba(96, 165, 250, .4);
+  border-radius: 999px;
+  padding: 2px 10px;
+  color: #8fb8dd;
+  font-size: 12px;
+}
+
+.yxz-studio-presets-toggle .is-open {
+  display: none;
+}
+
+.yxz-studio-presets[open] .yxz-studio-presets-toggle {
+  color: #dff1ff;
+}
+
+.yxz-studio-presets[open] .yxz-studio-presets-toggle .is-closed {
+  display: none;
+}
+
+.yxz-studio-presets[open] .yxz-studio-presets-toggle .is-open {
+  display: inline;
+}
+
 /* --- the design strip: pick the picture that becomes the model ------- */
 .yxz-studio-designs {
   max-width: 1320px;
@@ -1164,9 +1217,12 @@ function goBack() {
 
 .yxz-studio-presets-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.yxz-studio-presets[open] .yxz-studio-presets-head {
   margin-bottom: 12px;
 }
 
