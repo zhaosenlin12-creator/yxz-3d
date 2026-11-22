@@ -385,7 +385,19 @@ function Get-FreePort {
 function Get-FileSha256 {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { return '' }
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    # .NET 直接算，不用 Get-FileHash 这个 cmdlet：有些启动方式（比如
+    # Start-Process 带输出重定向）拿不到 PowerShell 的模块自动加载，
+    # cmdlet 会直接报 "无法将 Get-FileHash 识别为 cmdlet"，脚本就断在
+    # 那里。.NET 的接口在任何宿主里都在。
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $stream = $null
+    try {
+        $stream = [IO.File]::OpenRead($Path)
+        return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '')
+    } finally {
+        if ($stream) { $stream.Dispose() }
+        $sha.Dispose()
+    }
 }
 
 function Get-TextSha256 {

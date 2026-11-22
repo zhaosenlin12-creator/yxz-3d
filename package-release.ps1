@@ -29,6 +29,23 @@ function Ok($m) { Write-Host "  [OK] $m" -ForegroundColor Green }
 function Info($m) { Write-Host "  [$m]" -ForegroundColor DarkCyan }
 function Warn($m) { Write-Host "  [!]  $m" -ForegroundColor Yellow }
 
+# SHA256 用 .NET 直接算。Get-FileHash 是个 cmdlet，要靠 PowerShell 的模块
+# 自动加载；有些启动方式（Start-Process 带输出重定向）加载不到，它就会报
+# "无法将 Get-FileHash 识别为 cmdlet"，脚本直接断在最后一步，.sha256
+# 也没写出来。.NET 的接口在任何宿主里都可用。
+function Get-Sha256 {
+    param([string]$Path)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $stream = $null
+    try {
+        $stream = [IO.File]::OpenRead($Path)
+        return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '')
+    } finally {
+        if ($stream) { $stream.Dispose() }
+        $sha.Dispose()
+    }
+}
+
 function Copy-Clean {
     param([string]$Src, [string]$Dst, [string[]]$ExcludeDirs, [string[]]$ExcludeFiles)
     if (-not (Test-Path -LiteralPath $Src)) {
@@ -291,7 +308,7 @@ Write-Host "生成 ZIP ..." -ForegroundColor Cyan
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 Compress-Archive -Path (Join-Path $OutDir '*') -DestinationPath $zip -CompressionLevel Optimal
 Ok ("ZIP: {0} ({1:N1} MB)" -f $zip, ((Get-Item $zip).Length / 1MB))
-$sha = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+$sha = Get-Sha256 -Path $zip
 [System.IO.File]::WriteAllText(
     (Join-Path (Split-Path -Parent $OutDir) 'yxz-3d-release.zip.sha256'),
     "$sha  yxz-3d-release.zip`r`n",
