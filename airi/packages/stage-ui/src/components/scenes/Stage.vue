@@ -43,6 +43,7 @@ import { useSpeechStore } from '../../stores/modules/speech'
 import { useProvidersStore } from '../../stores/providers'
 import { useSettings } from '../../stores/settings'
 import { useSpeechRuntimeStore } from '../../stores/speech-runtime'
+import { createTtsBudgetSignal, TtsProviderScheduler } from '../../utils/tts-provider-scheduling'
 import { shouldRunLive2dLipSyncLoop } from './runtime'
 
 const props = withDefaults(defineProps<{
@@ -275,12 +276,16 @@ const playbackManager = createPlaybackManager<AudioBuffer>({
 let providerTtsOkCount = 0
 let providerTtsFailCount = 0
 
-// A speech provider that just failed is skipped for a while. The local voice
-// pack is the primary one, and on a machine where its service is not running
-// every single chunk would otherwise pay a connection attempt before the
-// cloud backup takes over.
-const PROVIDER_FAILURE_COOLDOWN_MS = 60_000
-const providerFailureUntil = new Map<string, number>()
+// A speech provider that just failed is skipped for a while, and a provider
+// that is too slow to answer is skipped for longer.  The local voice pack is
+// one of the candidates, and on a machine where it cannot keep up every
+// single line would otherwise pay the same wait before the next provider in
+// the chain takes over.
+//
+// The scheduler learns the speed of every provider from what it actually
+// managed here, so the same build behaves well on a machine with a GPU and
+// on one without.
+const ttsScheduler = new TtsProviderScheduler()
 
 // Cloud speech services bill per request and enforce a requests-per-minute
 // limit.  宜小智 speaks the welcome line on every page load and every reply
@@ -336,17 +341,6 @@ function writeCachedTts(key: string, buffer: AudioBuffer) {
   }
 }
 
-function isProviderCoolingDown(providerId: string) {
-  const until = providerFailureUntil.get(providerId)
-  if (!until)
-    return false
-  if (Date.now() >= until) {
-    providerFailureUntil.delete(providerId)
-    return false
-  }
-  return true
-}
-
 // A fragment that carries no pronounceable character (a lone "。" or "？")
 // must not be sent to a voice at all: the Edge pack rejects it outright and
 // every other voice would read it as a pause anyway. Skipping it here keeps
@@ -396,7 +390,7 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
         return null
 
       const providerId = candidate.providerId
-      if (isProviderCoolingDown(providerId))
+      if (ttsScheduler.isSkipped(providerId))
         continue
 
       const provider = await providersStore.getProviderInstance(providerId) as SpeechProviderWithExtraOptions<string, UnElevenLabsOptions>
@@ -459,6 +453,14 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
         return cached
       }
 
+      // Every provider gets a time budget.  How long that is depends on how
+      // fast this provider actually answered on this machine, so a fast
+      // voice pack is given room to speak while a hopeless one is cut off
+      // and the next candidate takes over.
+      const budgetMs = ttsScheduler.budgetFor(providerId)
+      const budgetSignal = createTtsBudgetSignal(signal, budgetMs)
+      const startedAt = Date.now()
+
       try {
         console.info('[Stage] Generating speech', {
           provider: providerId,
@@ -473,6 +475,7 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
             ...provider.speech(model, providerConfig),
             input,
             voice: voice.id,
+            abortSignal: budgetSignal.signal,
           })
         }
         finally {
@@ -487,21 +490,35 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
 
         const audioBuffer = await audioContext.decodeAudioData(res)
         writeCachedTts(cacheKey, audioBuffer)
+        ttsScheduler.recordSuccess(providerId, Date.now() - startedAt)
         providerTtsOkCount += 1
         return audioBuffer
       }
       catch (error) {
         providerTtsFailCount += 1
-        providerFailureUntil.set(providerId, Date.now() + PROVIDER_FAILURE_COOLDOWN_MS)
-        // Put the reason into the message itself: the extra object is not
-        // visible when the console only prints the first argument, which used
-        // to hide the actual MiniMax error code from the operator.
-        console.error(`[Stage] Provider TTS failed: ${errorMessageFrom(error) ?? 'Unknown error'}`, {
-          provider: providerId,
-          model,
-          voice: voice.id,
-        })
+        const reason = errorMessageFrom(error) ?? 'Unknown error'
+        if (budgetSignal.signal.aborted && !signal.aborted) {
+          // The budget ran out.  The provider is not broken, it is just too
+          // slow here -- so it is benched for a while instead of being
+          // called again for every single line.
+          ttsScheduler.recordTimeout(providerId)
+          console.warn(`[Stage] Provider TTS too slow: ${providerId} gave up after ${budgetMs}ms`)
+        }
+        else {
+          ttsScheduler.recordFailure(providerId, reason)
+          // Put the reason into the message itself: the extra object is not
+          // visible when the console only prints the first argument, which used
+          // to hide the actual MiniMax error code from the operator.
+          console.error(`[Stage] Provider TTS failed: ${reason}`, {
+            provider: providerId,
+            model,
+            voice: voice.id,
+          })
+        }
         // Try the next provider in the chain.
+      }
+      finally {
+        budgetSignal.dispose()
       }
     }
 

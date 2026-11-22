@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  MINIMAX_DEAD_KEY_COOLDOWN_MS,
   countMinimaxDeadKeys,
   createMinimaxKeyRotatingFetch,
   isMinimaxKeyDead,
@@ -10,6 +11,7 @@ import {
 
 afterEach(() => {
   resetMinimaxDeadKeys()
+  vi.useRealTimers()
   vi.unstubAllGlobals()
 })
 
@@ -122,7 +124,7 @@ describe('minimax dead key bench', () => {
       .rejects.toThrow(/402/)
   })
 
-  it('forgets the bench when every key is benched, so a topped-up plan works again', async () => {
+  it('does not wake a benched key pool up again', async () => {
     const calls: string[] = []
     const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       const key = new Headers(init?.headers).get('authorization') ?? ''
@@ -138,11 +140,18 @@ describe('minimax dead key bench', () => {
     markMinimaxKeyDead('good')
     expect(countMinimaxDeadKeys()).toBe(2)
 
-    // Nothing is benched any more -> both keys are tried once more, and the
-    // key that still refuses gets benched again.
+    // The whole pool is benched, so nothing is dialled at all.  Waking the
+    // pool up here used to turn every line of speech into a burst of doomed
+    // requests before anything gave up.
+    await expect(rotating('https://api.minimaxi.com/v1/chat/completions'))
+      .rejects.toThrow(/额度已用尽/)
+    expect(calls).toEqual([])
+
+    // The bench expires on its own, so a topped-up plan comes back.
+    const later = Date.now() + MINIMAX_DEAD_KEY_COOLDOWN_MS + 1_000
+    vi.useFakeTimers()
+    vi.setSystemTime(later)
     await rotating('https://api.minimaxi.com/v1/chat/completions')
     expect(calls).toEqual(['spent', 'good'])
-    expect(isMinimaxKeyDead('good')).toBe(false)
-    expect(isMinimaxKeyDead('spent')).toBe(true)
   })
 })

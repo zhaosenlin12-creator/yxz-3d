@@ -194,12 +194,18 @@ export function createMinimaxKeyRotatingFetch(keys: string[]): typeof globalThis
     if (all.length === 0)
       return globalThis.fetch(input, init)
 
-    // A benched key is skipped; if that leaves nothing, the plan was
-    // probably topped up in the meantime, so forget the bench and retry.
-    let candidates = all.filter(key => !isMinimaxKeyDead(key))
+    // A benched key is skipped.  When that leaves nothing, the whole key
+    // pool is spent -- and un-benching the keys right here would undo the
+    // cooldown entirely: every single line of speech would fire a fresh
+    // burst of doomed requests at the service (seven calls for two keys
+    // before anything gave up), which is slow, noisy and pointless.
+    //
+    // The bench expires on its own, so a topped-up plan recovers without
+    // anybody having to press a button, and `resetMinimaxDeadKeys` stays
+    // available for an operator who wants to try again right now.
+    const candidates = all.filter(key => !isMinimaxKeyDead(key))
     if (candidates.length === 0) {
-      resetMinimaxDeadKeys()
-      candidates = all
+      throw new Error('MiniMax 密钥额度已用尽，暂时无法使用（已冷却，稍后自动重试）')
     }
 
     let lastError: Error | undefined

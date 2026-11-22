@@ -1699,6 +1699,11 @@ export const useProvidersStore = defineStore('providers', () => {
                   'authorization': `Bearer ${apiKey}`,
                 },
                 body: minimaxBody,
+                // The caller hands us an abort signal so a provider that
+                // does not answer in time can be given up on.  Without it
+                // the request would keep running and the speech pipeline
+                // would sit there waiting for it.
+                signal: init?.signal,
               })
 
               const json = await response.json()
